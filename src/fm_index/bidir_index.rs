@@ -184,6 +184,53 @@ impl BidirFmIndex {
         let rev = FmIndex::from_bytes(&data[4 + fwd_len..])?;
         Ok(Self { fwd, rev })
     }
+
+    // ── GPU MEM/SMEM finding ──────────────────────────────────────────────────
+
+    /// Find all Super-Maximal Exact Matches (SMEMs) for a batch of queries on the GPU.
+    ///
+    /// Each query is processed by a separate GPU thread. Returns one `Vec<Mem>` per query
+    /// with `positions` empty (locate=false). Requires the `gpu` feature.
+    #[cfg(feature = "gpu")]
+    pub async fn find_smems_gpu(
+        &self,
+        queries: &[crate::alphabet::DnaSequence],
+        min_len: usize,
+    ) -> Result<Vec<Vec<crate::fm_index::smem::Mem>>, FmIndexError> {
+        use crate::gpu::mem_find::find_smems_batch_gpu;
+        let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
+        let raw = find_smems_batch_gpu(self, &encoded, min_len).await?;
+        Ok(raw.into_iter().map(raw_to_mems).collect())
+    }
+
+    /// Find all Maximal Exact Matches (MEMs, including non-super-maximal) for a batch
+    /// of queries on the GPU.
+    ///
+    /// Each query is processed by a separate GPU thread. Returns one `Vec<Mem>` per query
+    /// with `positions` empty (locate=false). Requires the `gpu` feature.
+    #[cfg(feature = "gpu")]
+    pub async fn find_mems_gpu(
+        &self,
+        queries: &[crate::alphabet::DnaSequence],
+        min_len: usize,
+    ) -> Result<Vec<Vec<crate::fm_index::smem::Mem>>, FmIndexError> {
+        use crate::gpu::mem_find::find_all_mems_batch_gpu;
+        let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
+        let raw = find_all_mems_batch_gpu(self, &encoded, min_len).await?;
+        Ok(raw.into_iter().map(raw_to_mems).collect())
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn raw_to_mems(hits: Vec<(u32, u32, u32)>) -> Vec<crate::fm_index::smem::Mem> {
+    hits.into_iter()
+        .map(|(start, end, count)| crate::fm_index::smem::Mem {
+            query_start: start as usize,
+            query_end: end as usize,
+            match_count: count,
+            positions: Vec::new(),
+        })
+        .collect()
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

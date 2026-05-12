@@ -1,5 +1,6 @@
 pub mod buffers;
 pub mod locate;
+pub mod mem_find;
 pub mod pipeline;
 pub mod prefix_sum;
 pub mod radix_sort;
