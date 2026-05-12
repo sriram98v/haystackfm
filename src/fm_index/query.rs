@@ -88,6 +88,31 @@ impl FmIndex {
         let pos_in_seq = text_pos - seq_start;
         Some((seq_idx as u32, pos_in_seq))
     }
+
+    /// Locate all occurrences of multiple patterns in parallel on the GPU.
+    ///
+    /// Each pattern is processed by a separate GPU thread during backward search.
+    /// Returns one `Vec<(sequence_header, position)>` per query, in the same order
+    /// as `queries`. Positions are 0-based within each sequence.
+    ///
+    /// Requires the `gpu` feature.
+    #[cfg(feature = "gpu")]
+    pub async fn locate_gpu(
+        &self,
+        queries: &[impl AsRef<[u8]>],
+    ) -> Result<Vec<Vec<(String, u32)>>, crate::error::FmIndexError> {
+        use crate::gpu::locate::locate_batch_gpu;
+        let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_ref()).collect();
+        let by_idx = locate_batch_gpu(self, &encoded).await?;
+        Ok(by_idx
+            .into_iter()
+            .map(|hits| {
+                hits.into_iter()
+                    .map(|(seq_idx, pos)| (self.seq_headers[seq_idx as usize].clone(), pos))
+                    .collect()
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
