@@ -54,7 +54,7 @@ fn bench_smem_gpu(c: &mut Criterion) {
         let queries = make_queries(&corpus, 50, n);
         group.bench_with_input(BenchmarkId::new("batch", n), &queries, |b, qs| {
             b.iter(|| {
-                let _ = idx.find_smems_gpu(qs, MIN_LEN).block_on().unwrap();
+                let _ = idx.find_smems_gpu(qs, MIN_LEN, &[], 1024).block_on().unwrap();
             })
         });
     }
@@ -89,7 +89,7 @@ fn bench_mem_gpu(c: &mut Criterion) {
         let queries = make_queries(&corpus, 50, n);
         group.bench_with_input(BenchmarkId::new("batch", n), &queries, |b, qs| {
             b.iter(|| {
-                let _ = idx.find_mems_gpu(qs, MIN_LEN).block_on().unwrap();
+                let _ = idx.find_mems_gpu(qs, MIN_LEN, &[], 1024).block_on().unwrap();
             })
         });
     }

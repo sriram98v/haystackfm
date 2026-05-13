@@ -67,3 +67,8 @@ required-features = ["gpu"]
 name = "mem_bench"
 harness = false
 required-features = ["gpu"]
+
+[[bench]]
+name = "mem_positions_bench"
+harness = false
+required-features = ["gpu"]

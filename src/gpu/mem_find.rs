@@ -6,8 +6,17 @@ use wgpu;
 
 const MEM_FIND_SHADER: &str = include_str!("../../shaders/mem_find.wgsl");
 
-const MODE_SMEM: u32 = 0;
-const MODE_MEM: u32 = 1;
+pub(crate) const MODE_SMEM: u32 = 0;
+pub(crate) const MODE_MEM: u32 = 1;
+
+/// Raw MEM interval as emitted by the GPU finder: query span + forward SA interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawMemInterval {
+    pub query_start: u32,
+    pub query_end:   u32,
+    pub fwd_lo:      u32,
+    pub fwd_hi:      u32,
+}
 
 // 20 × u32 = 80 bytes (multiple of 16 — satisfies WGSL uniform alignment).
 #[repr(C)]
@@ -25,19 +34,20 @@ struct MemFindParams {
     rev_c:          [u32; 6],
 }
 
-/// GPU-accelerated batch MEM/SMEM finding.
+/// Private core: runs the two GPU MEM-finding passes.
 ///
-/// Returns one `Vec<(query_start, query_end, match_count)>` per query.
-/// `mode` selects SMEM (`MODE_SMEM=0`) or MEM (`MODE_MEM=1`) behaviour.
-pub async fn find_mems_batch_gpu(
+/// Returns `None` when no MEMs were found (all counts zero).
+/// Otherwise returns `(results_flat, mem_counts, mem_offsets)` where
+/// `results_flat` has stride 4: `[query_start, query_end, fwd_lo, fwd_hi]` per MEM.
+async fn run_mem_find_gpu(
     ctx: &GpuContext,
     bidir: &BidirFmIndex,
     queries: &[&[u8]],
     min_len: usize,
     mode: u32,
-) -> Result<Vec<Vec<(u32, u32, u32)>>, FmIndexError> {
+) -> Result<Option<(Vec<u32>, Vec<u32>, Vec<u32>)>, FmIndexError> {
     if queries.is_empty() {
-        return Ok(vec![]);
+        return Ok(None);
     }
 
     let n_queries      = queries.len() as u32;
@@ -144,7 +154,7 @@ pub async fn find_mems_batch_gpu(
     // Compute total MEMs and exclusive prefix sum → mem_offsets.
     let total_mems: u32 = mem_counts.iter().sum();
     if total_mems == 0 {
-        return Ok(vec![vec![]; queries.len()]);
+        return Ok(None);
     }
 
     let mut mem_offsets: Vec<u32> = Vec::with_capacity(queries.len() + 1);
@@ -156,7 +166,7 @@ pub async fn find_mems_batch_gpu(
 
     // ── Pass 2: write MEM results ─────────────────────────────────────────────
     let offsets_buf = ctx.create_buffer_init("mem_offsets", &mem_offsets);
-    let mems_out_buf = ctx.create_buffer_empty("mem_results", total_mems * 3);
+    let mems_out_buf = ctx.create_buffer_empty("mem_results", total_mems * 4);
 
     let write_params = MemFindParams {
         total_mems,
@@ -185,20 +195,71 @@ pub async fn find_mems_batch_gpu(
         ((n_queries + wg_size - 1) / wg_size, 1, 1),
     );
 
-    let results_flat = ctx.download_buffer(&mems_out_buf, total_mems * 3).await;
+    let results_flat = ctx.download_buffer(&mems_out_buf, total_mems * 4).await;
+    Ok(Some((results_flat, mem_counts, mem_offsets)))
+}
 
-    // Assemble per-query results.
-    let mut output: Vec<Vec<(u32, u32, u32)>> = vec![vec![]; queries.len()];
-    for (q, &count) in mem_counts.iter().enumerate() {
-        let off = mem_offsets[q] as usize;
+/// GPU-accelerated batch MEM/SMEM finding.
+///
+/// Returns one `Vec<(query_start, query_end, match_count)>` per query.
+/// `mode` selects SMEM (`MODE_SMEM=0`) or MEM (`MODE_MEM=1`) behaviour.
+pub async fn find_mems_batch_gpu(
+    ctx: &GpuContext,
+    bidir: &BidirFmIndex,
+    queries: &[&[u8]],
+    min_len: usize,
+    mode: u32,
+) -> Result<Vec<Vec<(u32, u32, u32)>>, FmIndexError> {
+    let n = queries.len();
+    let Some((flat, counts, offsets)) =
+        run_mem_find_gpu(ctx, bidir, queries, min_len, mode).await?
+    else {
+        return Ok(vec![vec![]; n]);
+    };
+    let mut output: Vec<Vec<(u32, u32, u32)>> = vec![vec![]; n];
+    for (q, &count) in counts.iter().enumerate() {
+        let off = offsets[q] as usize;
         let mut hits = Vec::with_capacity(count as usize);
         for k in 0..count as usize {
-            let base = (off + k) * 3;
-            hits.push((results_flat[base], results_flat[base + 1], results_flat[base + 2]));
+            let base = (off + k) * 4;
+            // slot: [query_start, query_end, fwd_lo, fwd_hi]
+            // shim: match_count = fwd_hi - fwd_lo
+            hits.push((flat[base], flat[base + 1], flat[base + 3] - flat[base + 2]));
         }
         output[q] = hits;
     }
+    Ok(output)
+}
 
+/// Returns raw SA intervals per MEM — used by the GPU position-resolve pipeline.
+pub(crate) async fn find_mem_intervals_batch_gpu(
+    ctx: &GpuContext,
+    bidir: &BidirFmIndex,
+    queries: &[&[u8]],
+    min_len: usize,
+    mode: u32,
+) -> Result<Vec<Vec<RawMemInterval>>, FmIndexError> {
+    let n = queries.len();
+    let Some((flat, counts, offsets)) =
+        run_mem_find_gpu(ctx, bidir, queries, min_len, mode).await?
+    else {
+        return Ok(vec![vec![]; n]);
+    };
+    let mut output: Vec<Vec<RawMemInterval>> = vec![vec![]; n];
+    for (q, &count) in counts.iter().enumerate() {
+        let off = offsets[q] as usize;
+        let mut hits = Vec::with_capacity(count as usize);
+        for k in 0..count as usize {
+            let base = (off + k) * 4;
+            hits.push(RawMemInterval {
+                query_start: flat[base],
+                query_end:   flat[base + 1],
+                fwd_lo:      flat[base + 2],
+                fwd_hi:      flat[base + 3],
+            });
+        }
+        output[q] = hits;
+    }
     Ok(output)
 }
 

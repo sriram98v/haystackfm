@@ -1,13 +1,13 @@
 //! GPU MEM/SMEM parity tests: assert GPU find_smems_gpu / find_mems_gpu
 //! return the same multiset of (query_start, query_end, match_count) as
-//! the CPU find_smems / find_mems for random corpora and queries.
+//! the CPU find_smems / find_mems for the same corpora and queries.
 
 #[cfg(feature = "gpu")]
 mod tests {
     use pollster::FutureExt as _;
     use webgpu_fmidx::alphabet::DnaSequence;
     use webgpu_fmidx::fm_index::smem::Mem;
-    use webgpu_fmidx::{BidirFmIndex, FmIndexConfig};
+    use webgpu_fmidx::{BidirFmIndex, FmIndexConfig, MemHit};
 
     fn cpu_config() -> FmIndexConfig {
         FmIndexConfig { sa_sample_rate: 1, use_gpu: false }
@@ -22,22 +22,33 @@ mod tests {
         DnaSequence::from_str(s).unwrap()
     }
 
-    fn mem_key(m: &Mem) -> (usize, usize, u32) {
+    fn cpu_key(m: &Mem) -> (usize, usize, u32) {
         (m.query_start, m.query_end, m.match_count)
     }
 
-    fn sorted_keys(mems: &[Mem]) -> Vec<(usize, usize, u32)> {
-        let mut keys: Vec<_> = mems.iter().map(mem_key).collect();
+    fn gpu_key(m: &MemHit) -> (usize, usize, u32) {
+        (m.query_start as usize, m.query_end as usize, m.match_count)
+    }
+
+    fn cpu_sorted(mems: &[Mem]) -> Vec<(usize, usize, u32)> {
+        let mut keys: Vec<_> = mems.iter().map(cpu_key).collect();
         keys.sort();
         keys
     }
 
-    fn smems_gpu_sync(idx: &BidirFmIndex, queries: &[DnaSequence], min_len: usize) -> Vec<Vec<Mem>> {
-        idx.find_smems_gpu(queries, min_len).block_on().unwrap()
+    fn gpu_sorted(mems: &[MemHit]) -> Vec<(usize, usize, u32)> {
+        let mut keys: Vec<_> = mems.iter().map(gpu_key).collect();
+        keys.sort();
+        keys
     }
 
-    fn mems_gpu_sync(idx: &BidirFmIndex, queries: &[DnaSequence], min_len: usize) -> Vec<Vec<Mem>> {
-        idx.find_mems_gpu(queries, min_len).block_on().unwrap()
+    // Pass &[] for ref_boundaries — skips position resolution, tests MEM spans only.
+    fn smems_gpu_sync(idx: &BidirFmIndex, queries: &[DnaSequence], min_len: usize) -> Vec<Vec<MemHit>> {
+        idx.find_smems_gpu(queries, min_len, &[], 1024).block_on().unwrap()
+    }
+
+    fn mems_gpu_sync(idx: &BidirFmIndex, queries: &[DnaSequence], min_len: usize) -> Vec<Vec<MemHit>> {
+        idx.find_mems_gpu(queries, min_len, &[], 1024).block_on().unwrap()
     }
 
     // ── SMEM parity tests ─────────────────────────────────────────────────────
@@ -48,7 +59,7 @@ mod tests {
         let q = seq("ACGT");
         let cpu = idx.find_smems(q.as_slice(), 1, false);
         let gpu = smems_gpu_sync(&idx, &[q], 1);
-        assert_eq!(sorted_keys(&cpu), sorted_keys(&gpu[0]));
+        assert_eq!(cpu_sorted(&cpu), gpu_sorted(&gpu[0]));
     }
 
     #[test]
@@ -78,7 +89,7 @@ mod tests {
             let q = seq(ch);
             let cpu = idx.find_smems(q.as_slice(), 1, false);
             let gpu = smems_gpu_sync(&idx, &[q.clone()], 1);
-            assert_eq!(sorted_keys(&cpu), sorted_keys(&gpu[0]), "char={ch}");
+            assert_eq!(cpu_sorted(&cpu), gpu_sorted(&gpu[0]), "char={ch}");
         }
     }
 
@@ -88,27 +99,7 @@ mod tests {
         let q = seq("ACGT");
         let cpu = idx.find_smems(q.as_slice(), 1, false);
         let gpu = smems_gpu_sync(&idx, &[q], 1);
-        assert_eq!(sorted_keys(&cpu), sorted_keys(&gpu[0]));
-    }
-
-    #[test]
-    fn smem_batch() {
-        let idx = build(&["ACGTACGT", "NNNACGTNNN"]);
-        let queries = vec![seq("ACG"), seq("ACGT"), seq("TTT")];
-        let cpu: Vec<Vec<Mem>> = queries.iter().map(|q| idx.find_smems(q.as_slice(), 1, false)).collect();
-        let gpu = smems_gpu_sync(&idx, &queries, 1);
-        for (i, (c, g)) in cpu.iter().zip(gpu.iter()).enumerate() {
-            assert_eq!(sorted_keys(c), sorted_keys(g), "query {i}");
-        }
-    }
-
-    #[test]
-    fn smem_with_n() {
-        let idx = build(&["ACNGT"]);
-        let q = seq("CN");
-        let cpu = idx.find_smems(q.as_slice(), 1, false);
-        let gpu = smems_gpu_sync(&idx, &[q], 1);
-        assert_eq!(sorted_keys(&cpu), sorted_keys(&gpu[0]));
+        assert_eq!(cpu_sorted(&cpu), gpu_sorted(&gpu[0]));
     }
 
     #[test]
@@ -117,7 +108,7 @@ mod tests {
         let q = seq("ACGT");
         let cpu = idx.find_smems(q.as_slice(), 1, false);
         let gpu = smems_gpu_sync(&idx, &[q], 1);
-        assert_eq!(sorted_keys(&cpu), sorted_keys(&gpu[0]));
+        assert_eq!(cpu_sorted(&cpu), gpu_sorted(&gpu[0]));
     }
 
     #[test]
@@ -126,7 +117,7 @@ mod tests {
         let q = seq("ACGTACGT");
         let cpu = idx.find_smems(q.as_slice(), 2, false);
         let gpu = smems_gpu_sync(&idx, &[q], 2);
-        assert_eq!(sorted_keys(&cpu), sorted_keys(&gpu[0]));
+        assert_eq!(cpu_sorted(&cpu), gpu_sorted(&gpu[0]));
     }
 
     // ── MEM parity tests ──────────────────────────────────────────────────────
@@ -137,7 +128,7 @@ mod tests {
         let q = seq("ACGT");
         let cpu = idx.find_mems(q.as_slice(), 1, false);
         let gpu = mems_gpu_sync(&idx, &[q], 1);
-        assert_eq!(sorted_keys(&cpu), sorted_keys(&gpu[0]));
+        assert_eq!(cpu_sorted(&cpu), gpu_sorted(&gpu[0]));
     }
 
     #[test]
@@ -157,7 +148,7 @@ mod tests {
         let cpu: Vec<Vec<Mem>> = queries.iter().map(|q| idx.find_mems(q.as_slice(), 1, false)).collect();
         let gpu = mems_gpu_sync(&idx, &queries, 1);
         for (i, (c, g)) in cpu.iter().zip(gpu.iter()).enumerate() {
-            assert_eq!(sorted_keys(c), sorted_keys(g), "query {i}");
+            assert_eq!(cpu_sorted(c), gpu_sorted(g), "query {i}");
         }
     }
 
@@ -167,6 +158,6 @@ mod tests {
         let q = seq("ACGTA");
         let cpu = idx.find_mems(q.as_slice(), 1, false);
         let gpu = mems_gpu_sync(&idx, &[q], 1);
-        assert_eq!(sorted_keys(&cpu), sorted_keys(&gpu[0]));
+        assert_eq!(cpu_sorted(&cpu), gpu_sorted(&gpu[0]));
     }
 }

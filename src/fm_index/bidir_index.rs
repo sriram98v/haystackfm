@@ -63,6 +63,13 @@ impl BidirFmIndex {
         Ok(Self { fwd, rev })
     }
 
+    /// Exclusive end positions of each reference in the concatenated text.
+    /// `seq_boundaries()[i]` is the position just past the last base of reference `i`.
+    /// Pass this slice as `ref_boundaries` to [`find_smems_gpu`] / [`find_mems_gpu`].
+    pub fn seq_boundaries(&self) -> &[u32] {
+        &self.fwd.seq_boundaries
+    }
+
     /// Build a bidirectional FM-index using GPU acceleration (async).
     #[cfg(feature = "gpu")]
     pub async fn build(
@@ -189,52 +196,128 @@ impl BidirFmIndex {
 
     /// Find all Super-Maximal Exact Matches (SMEMs) for a batch of queries on the GPU.
     ///
-    /// Each query is processed by a separate GPU thread. Returns one `Vec<Mem>` per query
-    /// with `positions` empty (locate=false). Requires the `gpu` feature.
+    /// Find all Super-Maximal Exact Matches (SMEMs) for a batch of queries on the GPU,
+    /// resolving each match to `(ref_id, offset_within_ref)` positions.
+    ///
+    /// `ref_boundaries[i]` is the exclusive end position of reference `i` in the
+    /// concatenated text (same order as passed to [`BidirFmIndex::build_cpu`]).
+    /// Pass `&[]` to skip position resolution (positions will be empty).
+    ///
+    /// Hits per MEM are capped at `max_hits_per_mem`. Pass `1024` for the default.
     #[cfg(feature = "gpu")]
     pub async fn find_smems_gpu(
         &self,
         queries: &[crate::alphabet::DnaSequence],
         min_len: usize,
-    ) -> Result<Vec<Vec<crate::fm_index::smem::Mem>>, FmIndexError> {
-        use crate::gpu::context_cache;
-        use crate::gpu::mem_find::find_smems_batch_gpu;
+        ref_boundaries: &[u32],
+        max_hits_per_mem: u32,
+    ) -> Result<Vec<Vec<crate::gpu::MemHit>>, FmIndexError> {
+        use crate::gpu::{context_cache, mem_find::MODE_SMEM};
         let ctx = context_cache::get_or_init()?;
         let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
-        let raw = find_smems_batch_gpu(&ctx, self, &encoded, min_len).await?;
-        Ok(raw.into_iter().map(raw_to_mems).collect())
+        resolve_mem_hits_gpu(&ctx, self, &encoded, min_len, MODE_SMEM, ref_boundaries, max_hits_per_mem).await
     }
 
-    /// Find all Maximal Exact Matches (MEMs, including non-super-maximal) for a batch
-    /// of queries on the GPU.
+    /// Find all Maximal Exact Matches (MEMs) for a batch of queries on the GPU,
+    /// resolving each match to `(ref_id, offset_within_ref)` positions.
     ///
-    /// Each query is processed by a separate GPU thread. Returns one `Vec<Mem>` per query
-    /// with `positions` empty (locate=false). Requires the `gpu` feature.
+    /// `ref_boundaries[i]` is the exclusive end position of reference `i` in the
+    /// concatenated text.
+    /// Pass `&[]` to skip position resolution (positions will be empty).
+    ///
+    /// Hits per MEM are capped at `max_hits_per_mem`. Pass `1024` for the default.
     #[cfg(feature = "gpu")]
     pub async fn find_mems_gpu(
         &self,
         queries: &[crate::alphabet::DnaSequence],
         min_len: usize,
-    ) -> Result<Vec<Vec<crate::fm_index::smem::Mem>>, FmIndexError> {
-        use crate::gpu::context_cache;
-        use crate::gpu::mem_find::find_all_mems_batch_gpu;
+        ref_boundaries: &[u32],
+        max_hits_per_mem: u32,
+    ) -> Result<Vec<Vec<crate::gpu::MemHit>>, FmIndexError> {
+        use crate::gpu::{context_cache, mem_find::MODE_MEM};
         let ctx = context_cache::get_or_init()?;
         let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
-        let raw = find_all_mems_batch_gpu(&ctx, self, &encoded, min_len).await?;
-        Ok(raw.into_iter().map(raw_to_mems).collect())
+        resolve_mem_hits_gpu(&ctx, self, &encoded, min_len, MODE_MEM, ref_boundaries, max_hits_per_mem).await
     }
 }
 
+/// Shared GPU pipeline: MEM find → SA resolve → ref boundary map → MemHit assembly.
 #[cfg(feature = "gpu")]
-fn raw_to_mems(hits: Vec<(u32, u32, u32)>) -> Vec<crate::fm_index::smem::Mem> {
-    hits.into_iter()
-        .map(|(start, end, count)| crate::fm_index::smem::Mem {
-            query_start: start as usize,
-            query_end: end as usize,
-            match_count: count,
-            positions: Vec::new(),
+async fn resolve_mem_hits_gpu(
+    ctx: &crate::gpu::GpuContext,
+    bidir: &BidirFmIndex,
+    encoded: &[&[u8]],
+    min_len: usize,
+    mode: u32,
+    ref_boundaries: &[u32],
+    max_hits_per_mem: u32,
+) -> Result<Vec<Vec<crate::gpu::MemHit>>, FmIndexError> {
+    use crate::gpu::mem_find::find_mem_intervals_batch_gpu;
+    use crate::gpu::mem_resolve::resolve_mem_intervals_gpu;
+    use crate::gpu::ref_map::map_positions_to_refs;
+    use crate::gpu::MemHit;
+
+    let per_query_intervals =
+        find_mem_intervals_batch_gpu(ctx, bidir, encoded, min_len, mode).await?;
+
+    // Flatten all intervals; record (query_idx, mem_idx) for reassembly.
+    let mut flat_intervals = Vec::new();
+    let mut index_map: Vec<(usize, usize)> = Vec::new();
+    for (q, mems) in per_query_intervals.iter().enumerate() {
+        for (m, iv) in mems.iter().enumerate() {
+            flat_intervals.push(*iv);
+            index_map.push((q, m));
+        }
+    }
+
+    // Build output skeleton.
+    let mut output: Vec<Vec<MemHit>> = per_query_intervals
+        .iter()
+        .map(|mems| {
+            mems.iter()
+                .map(|iv| MemHit {
+                    query_start: iv.query_start,
+                    query_end:   iv.query_end,
+                    match_count: iv.fwd_hi.saturating_sub(iv.fwd_lo),
+                    positions:   Vec::new(),
+                    truncated:   false,
+                })
+                .collect()
         })
-        .collect()
+        .collect();
+
+    if flat_intervals.is_empty() || ref_boundaries.is_empty() {
+        return Ok(output);
+    }
+
+    let Some((positions_flat, pos_offsets)) =
+        resolve_mem_intervals_gpu(ctx, &bidir.fwd, &flat_intervals, max_hits_per_mem).await?
+    else {
+        return Ok(output);
+    };
+
+    // Mark truncated MEMs.
+    for (k, iv) in flat_intervals.iter().enumerate() {
+        let raw_count = iv.fwd_hi.saturating_sub(iv.fwd_lo);
+        let resolved  = pos_offsets[k + 1] - pos_offsets[k];
+        if raw_count > resolved {
+            let (q, m) = index_map[k];
+            output[q][m].truncated = true;
+        }
+    }
+
+    let (ref_ids, ref_offs) =
+        map_positions_to_refs(ctx, &positions_flat, ref_boundaries).await?;
+
+    for (k, &(q, m)) in index_map.iter().enumerate() {
+        let start = pos_offsets[k] as usize;
+        let end   = pos_offsets[k + 1] as usize;
+        output[q][m].positions = (start..end)
+            .map(|i| (ref_ids[i], ref_offs[i]))
+            .collect();
+    }
+
+    Ok(output)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

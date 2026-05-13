@@ -4,7 +4,7 @@
 //   write_mems  (pass 2): reads offsets from pass_buf_a, writes results to mems_out
 //
 // One thread per query.
-// Results: [query_start, query_end, match_count] packed as 3 u32 per MEM.
+// Results: [query_start, query_end, fwd_lo, fwd_hi] packed as 4 u32 per MEM.
 //
 // Extension formulae (Lam 2009 Lemma 3):
 //   extend_right(c): update rev interval via rev-OCC/rev-C,
@@ -36,7 +36,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read>       all_checkpoints: array<u32>; // fwd then rev
 @group(0) @binding(3) var<storage, read>       all_bitvectors:  array<u32>; // fwd then rev
 @group(0) @binding(4) var<storage, read_write> pass_buf_a:      array<u32>; // pass1: mem_counts; pass2: mem_offsets
-@group(0) @binding(5) var<storage, read_write> mems_out:        array<u32>; // pass2: [start,end,count]*total_mems
+@group(0) @binding(5) var<storage, read_write> mems_out:        array<u32>; // pass2: [qs,qe,fwd_lo,fwd_hi]*total_mems
 @group(0) @binding(6) var<uniform>             params:          Params;
 
 fn fwd_c_val(c: u32) -> u32 {
@@ -203,10 +203,11 @@ fn process_query(qid: u32, write_output: bool) -> u32 {
 
         // ── Emit MEM ─────────────────────────────────────────────────────────
         if write_output {
-            let slot = (out_base + mem_count) * 3u;
+            let slot = (out_base + mem_count) * 4u;
             mems_out[slot]      = i;
             mems_out[slot + 1u] = last_j;
-            mems_out[slot + 2u] = last_fhi - last_flo; // match_count = fwd interval size
+            mems_out[slot + 2u] = last_flo;
+            mems_out[slot + 3u] = last_fhi;
         }
         mem_count += 1u;
 

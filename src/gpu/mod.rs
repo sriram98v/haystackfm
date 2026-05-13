@@ -2,6 +2,11 @@ pub mod buffers;
 pub mod context_cache;
 pub mod locate;
 pub mod mem_find;
+pub mod mem_hit;
+pub mod mem_resolve;
+pub mod ref_map;
+pub use mem_find::RawMemInterval;
+pub use mem_hit::MemHit;
 pub mod pipeline;
 pub mod prefix_sum;
 pub mod radix_sort;
@@ -32,12 +37,13 @@ impl GpuContext {
             .ok_or_else(|| FmIndexError::GpuError("no suitable GPU adapter found".into()))?;
 
         let mut required_limits = wgpu::Limits::default();
-        // Request generous buffer sizes for large genomic data
+        // Request the maximum the adapter supports — large SA buffers (up to ~400MB
+        // for 100M-base combined references) require raising both limits beyond the
+        // wgpu defaults of 256MB / 128MB.
         let adapter_limits = adapter.limits();
-        required_limits.max_buffer_size = adapter_limits.max_buffer_size.min(256 * 1024 * 1024);
-        required_limits.max_storage_buffer_binding_size = adapter_limits
-            .max_storage_buffer_binding_size
-            .min(128 * 1024 * 1024);
+        required_limits.max_buffer_size = adapter_limits.max_buffer_size;
+        required_limits.max_storage_buffer_binding_size =
+            adapter_limits.max_storage_buffer_binding_size;
         required_limits.max_compute_workgroups_per_dimension =
             adapter_limits.max_compute_workgroups_per_dimension;
 
