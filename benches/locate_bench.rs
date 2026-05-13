@@ -33,7 +33,7 @@ fn bench_locate_cpu(c: &mut Criterion) {
     let idx = build_index(&corpus);
 
     let mut group = c.benchmark_group("locate/cpu");
-    for &n in &[1usize, 8, 64, 256] {
+    for &n in &[1usize, 8, 64, 256, 512, 1024, 2048, 4096] {
         let patterns = make_patterns(&corpus, 8, n);
         group.bench_with_input(BenchmarkId::new("batch", n), &patterns, |b, pats| {
             b.iter(|| {
@@ -52,7 +52,7 @@ fn bench_locate_gpu(c: &mut Criterion) {
     let idx = build_index(&corpus);
 
     let mut group = c.benchmark_group("locate/gpu");
-    for &n in &[1usize, 8, 64, 256] {
+    for &n in &[1usize, 8, 64, 256, 512, 1024, 2048, 4096] {
         let patterns = make_patterns(&corpus, 8, n);
         let pattern_refs: Vec<&[u8]> = patterns.iter().map(|p| p.as_slice()).collect();
         group.bench_with_input(BenchmarkId::new("batch", n), &pattern_refs, |b, pats| {
