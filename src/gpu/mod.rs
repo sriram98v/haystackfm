@@ -1,4 +1,5 @@
 pub mod buffers;
+pub mod context_cache;
 pub mod locate;
 pub mod mem_find;
 pub mod pipeline;

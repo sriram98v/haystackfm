@@ -197,9 +197,11 @@ impl BidirFmIndex {
         queries: &[crate::alphabet::DnaSequence],
         min_len: usize,
     ) -> Result<Vec<Vec<crate::fm_index::smem::Mem>>, FmIndexError> {
+        use crate::gpu::context_cache;
         use crate::gpu::mem_find::find_smems_batch_gpu;
+        let ctx = context_cache::get_or_init()?;
         let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
-        let raw = find_smems_batch_gpu(self, &encoded, min_len).await?;
+        let raw = find_smems_batch_gpu(&ctx, self, &encoded, min_len).await?;
         Ok(raw.into_iter().map(raw_to_mems).collect())
     }
 
@@ -214,9 +216,11 @@ impl BidirFmIndex {
         queries: &[crate::alphabet::DnaSequence],
         min_len: usize,
     ) -> Result<Vec<Vec<crate::fm_index::smem::Mem>>, FmIndexError> {
+        use crate::gpu::context_cache;
         use crate::gpu::mem_find::find_all_mems_batch_gpu;
+        let ctx = context_cache::get_or_init()?;
         let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
-        let raw = find_all_mems_batch_gpu(self, &encoded, min_len).await?;
+        let raw = find_all_mems_batch_gpu(&ctx, self, &encoded, min_len).await?;
         Ok(raw.into_iter().map(raw_to_mems).collect())
     }
 }

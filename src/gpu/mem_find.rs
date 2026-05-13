@@ -30,6 +30,7 @@ struct MemFindParams {
 /// Returns one `Vec<(query_start, query_end, match_count)>` per query.
 /// `mode` selects SMEM (`MODE_SMEM=0`) or MEM (`MODE_MEM=1`) behaviour.
 pub async fn find_mems_batch_gpu(
+    ctx: &GpuContext,
     bidir: &BidirFmIndex,
     queries: &[&[u8]],
     min_len: usize,
@@ -38,8 +39,6 @@ pub async fn find_mems_batch_gpu(
     if queries.is_empty() {
         return Ok(vec![]);
     }
-
-    let ctx = GpuContext::new().await?;
 
     let n_queries      = queries.len() as u32;
     let block_size: u32 = 64;
@@ -205,18 +204,20 @@ pub async fn find_mems_batch_gpu(
 
 /// GPU batch SMEM finding. Returns `(query_start, query_end, match_count)` per MEM.
 pub async fn find_smems_batch_gpu(
+    ctx: &GpuContext,
     bidir: &BidirFmIndex,
     queries: &[&[u8]],
     min_len: usize,
 ) -> Result<Vec<Vec<(u32, u32, u32)>>, FmIndexError> {
-    find_mems_batch_gpu(bidir, queries, min_len, MODE_SMEM).await
+    find_mems_batch_gpu(ctx, bidir, queries, min_len, MODE_SMEM).await
 }
 
 /// GPU batch MEM finding (all maximal matches). Returns `(query_start, query_end, match_count)`.
 pub async fn find_all_mems_batch_gpu(
+    ctx: &GpuContext,
     bidir: &BidirFmIndex,
     queries: &[&[u8]],
     min_len: usize,
 ) -> Result<Vec<Vec<(u32, u32, u32)>>, FmIndexError> {
-    find_mems_batch_gpu(bidir, queries, min_len, MODE_MEM).await
+    find_mems_batch_gpu(ctx, bidir, queries, min_len, MODE_MEM).await
 }

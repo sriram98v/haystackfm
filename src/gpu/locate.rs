@@ -36,19 +36,18 @@ struct ResolveParams {
     c: [u32; 6],
 }
 
-/// Run GPU-accelerated batch locate.
+/// Run GPU-accelerated batch locate using a pre-initialized `GpuContext`.
 ///
 /// Returns one `Vec<(seq_idx, pos_in_seq)>` per query.
 /// `seq_idx` is a 0-based index into the original sequence list.
 pub async fn locate_batch_gpu(
+    ctx: &GpuContext,
     index: &FmIndex,
     queries: &[&[u8]],
 ) -> Result<Vec<Vec<(u32, u32)>>, FmIndexError> {
     if queries.is_empty() {
         return Ok(vec![]);
     }
-
-    let ctx = GpuContext::new().await?;
 
     let num_queries = queries.len() as u32;
     let text_len = index.text_len;

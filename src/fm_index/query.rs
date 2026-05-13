@@ -101,9 +101,11 @@ impl FmIndex {
         &self,
         queries: &[impl AsRef<[u8]>],
     ) -> Result<Vec<Vec<(String, u32)>>, crate::error::FmIndexError> {
+        use crate::gpu::context_cache;
         use crate::gpu::locate::locate_batch_gpu;
+        let ctx = context_cache::get_or_init()?;
         let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_ref()).collect();
-        let by_idx = locate_batch_gpu(self, &encoded).await?;
+        let by_idx = locate_batch_gpu(&ctx, self, &encoded).await?;
         Ok(by_idx
             .into_iter()
             .map(|hits| {
