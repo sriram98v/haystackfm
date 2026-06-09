@@ -10,7 +10,7 @@
 //   bitvectors[(block * ALPHA + c)*2 + 1] = high 32 bits of presence bitvector for c
 
 const BLOCK_SIZE: u32 = 64u;
-const ALPHA: u32 = 6u;   // DNA alphabet: $=0,A=1,C=2,G=3,T=4,N=5
+const ALPHA: u32 = 16u;  // IUPAC alphabet: $=0,A=1,C=2,G=3,T=4,N=5,R=6,Y=7,S=8,W=9,K=10,M=11,B=12,D=13,H=14,V=15
 
 struct Params {
     n: u32,
@@ -23,9 +23,9 @@ struct Params {
 @group(0) @binding(3) var<uniform>             params:        Params;
 
 // Workgroup-shared accumulators (atomic for correctness across the 64 threads)
-var<workgroup> ws_counts: array<atomic<u32>, 6>;
-var<workgroup> ws_bv_lo:  array<atomic<u32>, 6>;  // bits 0-31
-var<workgroup> ws_bv_hi:  array<atomic<u32>, 6>;  // bits 32-63
+var<workgroup> ws_counts: array<atomic<u32>, 16>;
+var<workgroup> ws_bv_lo:  array<atomic<u32>, 16>;  // bits 0-31
+var<workgroup> ws_bv_hi:  array<atomic<u32>, 16>;  // bits 32-63
 
 @compute @workgroup_size(64)
 fn occ_block(

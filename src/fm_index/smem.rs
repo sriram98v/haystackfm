@@ -1,4 +1,4 @@
-use crate::alphabet::{A, C, G, N, T};
+use crate::alphabet::compatible_symbols;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::BidirFmIndex;
 use crate::fm_index::FmIndex;
@@ -201,30 +201,9 @@ impl BidirFmIndex {
     }
 }
 
-/// Bases that a query byte `c` should be matched against in the reference index.
-///
-/// Two wildcard rules:
-/// - Query `N` matches any reference base → try A, C, G, T, N.
-/// - Reference `N` matches any query base → always include N in the candidate set.
-fn wildcard_bases(c: u8) -> &'static [u8] {
-    const ACGTN: &[u8] = &[A, C, G, T, N];
-    const AN: &[u8] = &[A, N];
-    const CN: &[u8] = &[C, N];
-    const GN: &[u8] = &[G, N];
-    const TN: &[u8] = &[T, N];
-    match c {
-        x if x == N => ACGTN,
-        x if x == A => AN,
-        x if x == C => CN,
-        x if x == G => GN,
-        x if x == T => TN,
-        _ => &[],
-    }
-}
-
-/// Extend each interval in `ivs` right by `c`, expanding N to A/C/G/T.
+/// Extend each interval in `ivs` right by `c`, using IUPAC base-set intersection.
 fn extend_multi_right(ivs: &[BidirInterval], c: u8, rev: &FmIndex) -> Vec<BidirInterval> {
-    let bases = wildcard_bases(c);
+    let bases = compatible_symbols(c);
     let mut result = Vec::new();
     for &base in bases {
         for iv in ivs {
@@ -236,9 +215,9 @@ fn extend_multi_right(ivs: &[BidirInterval], c: u8, rev: &FmIndex) -> Vec<BidirI
     result
 }
 
-/// Extend each interval in `ivs` left by `c`, expanding N to A/C/G/T.
+/// Extend each interval in `ivs` left by `c`, using IUPAC base-set intersection.
 fn extend_multi_left(ivs: &[BidirInterval], c: u8, fwd: &FmIndex) -> Vec<BidirInterval> {
-    let bases = wildcard_bases(c);
+    let bases = compatible_symbols(c);
     let mut result = Vec::new();
     for &base in bases {
         for iv in ivs {

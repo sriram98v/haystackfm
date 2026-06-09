@@ -2,13 +2,7 @@ use crate::alphabet::ALPHABET_SIZE;
 
 /// C array: C[c] = number of characters in the text that are lexicographically smaller than c.
 ///
-/// For DNA alphabet {$=0, A=1, C=2, G=3, T=4, N=5}:
-/// C[0] = 0
-/// C[1] = count($)
-/// C[2] = count($) + count(A)
-/// C[3] = count($) + count(A) + count(C)
-/// C[4] = count($) + count(A) + count(C) + count(G)
-/// C[5] = count($) + count(A) + count(C) + count(G) + count(T)
+/// Covers the full IUPAC alphabet {$=0,A=1,C=2,G=3,T=4,N=5,R=6,Y=7,S=8,W=9,K=10,M=11,B=12,D=13,H=14,V=15}.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CArray {
     pub data: [u32; ALPHABET_SIZE],
@@ -48,32 +42,47 @@ mod tests {
 
     #[test]
     fn test_c_array_basic() {
-        // text: A C G T $  => freq: $=1, A=1, C=1, G=1, T=1, N=0
+        // text: A C G T $  => freq: $=1, A=1, C=1, G=1, T=1, rest=0
         let text = vec![A, C, G, T, SENTINEL];
         let c = CArray::from_text(&text);
-        assert_eq!(c.data, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(c.data, [0, 1, 2, 3, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]);
     }
 
     #[test]
     fn test_c_array_repeated() {
-        // text: A A C C $  => freq: $=1, A=2, C=2, G=0, T=0, N=0
+        // text: A A C C $  => freq: $=1, A=2, C=2, rest=0
         let text = vec![A, A, C, C, SENTINEL];
         let c = CArray::from_text(&text);
-        assert_eq!(c.data, [0, 1, 3, 5, 5, 5]);
+        assert_eq!(c.data, [0, 1, 3, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]);
     }
 
     #[test]
     fn test_c_array_empty() {
         let text: Vec<u8> = vec![];
         let c = CArray::from_text(&text);
-        assert_eq!(c.data, [0, 0, 0, 0, 0, 0]);
+        assert_eq!(c.data, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
     fn test_c_array_with_n() {
-        // text: A N N $  => freq: $=1, A=1, C=0, G=0, T=0, N=2
+        // text: A N N $  => freq: $=1, A=1, N=2, rest=0
+        // prefix sums: idx 5(N) ends at 2+0=2, idx 6(R) = 2+2 = 4
         let text = vec![A, N, N, SENTINEL];
         let c = CArray::from_text(&text);
-        assert_eq!(c.data, [0, 1, 2, 2, 2, 2]);
+        assert_eq!(c.data, [0, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]);
+    }
+
+    #[test]
+    fn test_c_array_with_iupac() {
+        // text: A R $  => freq: $=1, A=1, R=1
+        let text = vec![A, R, SENTINEL];
+        let c = CArray::from_text(&text);
+        // prefix: [0=0, A=1, C=2, G=2, T=2, N=2, R=2, Y=3, ...]
+        assert_eq!(c.data[0], 0); // $
+        assert_eq!(c.data[A as usize], 1);
+        assert_eq!(c.data[C as usize], 2); // +A
+        assert_eq!(c.data[N as usize], 2); // no C,G,T
+        assert_eq!(c.data[R as usize], 2); // +N=0
+        assert_eq!(c.data[Y as usize], 3); // +R=1
     }
 }

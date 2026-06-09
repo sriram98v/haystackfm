@@ -1,15 +1,17 @@
 use super::FmIndex;
+use crate::alphabet::compatible_symbols;
 
 impl FmIndex {
     /// Count occurrences of a pattern in the indexed text.
     ///
-    /// Uses backward search: processes the pattern from right to left,
-    /// narrowing the SA interval [lo, hi) at each step.
-    ///
-    /// Time: O(m) where m = pattern length.
+    /// IUPAC ambiguity codes in the pattern and/or reference are resolved via
+    /// base-set intersection: a query symbol matches a reference symbol when
+    /// their IUPAC base sets share at least one nucleotide.
     pub fn count(&self, pattern: &[u8]) -> u32 {
-        let (lo, hi) = self.backward_search(pattern);
-        hi.saturating_sub(lo)
+        self.backward_search(pattern)
+            .iter()
+            .map(|(lo, hi)| hi - lo)
+            .sum()
     }
 
     /// Locate all occurrences of a pattern in the indexed text.
@@ -17,15 +19,11 @@ impl FmIndex {
     /// Returns `(sequence_id, position)` tuples where `sequence_id` is the FASTA
     /// header of the matching sequence and `position` is 0-based within that sequence.
     ///
-    /// Time: O(m + occ * k) where m = pattern length, occ = number of occurrences,
-    /// k = SA sample rate.
+    /// IUPAC ambiguity codes are resolved via base-set intersection (see `count`).
     pub fn locate(&self, pattern: &[u8]) -> Vec<(String, u32)> {
-        let (lo, hi) = self.backward_search(pattern);
-        if lo >= hi {
-            return vec![];
-        }
-
-        (lo..hi)
+        self.backward_search(pattern)
+            .into_iter()
+            .flat_map(|(lo, hi)| lo..hi)
             .map(|i| {
                 let text_pos = self.resolve_sa(i);
                 let (seq_idx, pos_in_seq) = self
@@ -36,25 +34,39 @@ impl FmIndex {
             .collect()
     }
 
-    /// Backward search: find the SA interval [lo, hi) for the pattern.
-    fn backward_search(&self, pattern: &[u8]) -> (u32, u32) {
+    /// Backward search returning a union of SA intervals covering all IUPAC-compatible matches.
+    ///
+    /// Each step expands the query symbol to all compatible reference symbols via
+    /// base-set intersection, collects one interval per compatible symbol, then
+    /// merges overlapping intervals before the next step.
+    pub(crate) fn backward_search(&self, pattern: &[u8]) -> Vec<(u32, u32)> {
         if pattern.is_empty() {
-            return (0, self.text_len);
+            return vec![(0, self.text_len)];
         }
 
-        let mut lo = 0u32;
-        let mut hi = self.text_len;
+        let mut intervals = vec![(0u32, self.text_len)];
 
         for &c in pattern.iter().rev() {
-            let c_val = self.c_array.get(c);
-            lo = c_val + self.occ.rank(c, lo);
-            hi = c_val + self.occ.rank(c, hi);
-            if lo >= hi {
-                return (lo, hi);
+            let compat = compatible_symbols(c);
+            let mut next: Vec<(u32, u32)> = Vec::new();
+            for &(lo, hi) in &intervals {
+                for &r in compat {
+                    let c_val = self.c_array.get(r);
+                    let new_lo = c_val + self.occ.rank(r, lo);
+                    let new_hi = c_val + self.occ.rank(r, hi);
+                    if new_lo < new_hi {
+                        next.push((new_lo, new_hi));
+                    }
+                }
             }
+            next = merge_intervals(next);
+            if next.is_empty() {
+                return vec![];
+            }
+            intervals = next;
         }
 
-        (lo, hi)
+        intervals
     }
 
     /// Resolve a BWT position to a text position using the sampled SA.
@@ -115,6 +127,27 @@ impl FmIndex {
             })
             .collect())
     }
+}
+
+/// Merge a list of SA intervals, combining overlapping or adjacent ones.
+fn merge_intervals(mut ivs: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    if ivs.is_empty() {
+        return ivs;
+    }
+    ivs.sort_unstable_by_key(|&(lo, _)| lo);
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ivs.len());
+    let (mut cur_lo, mut cur_hi) = ivs[0];
+    for &(lo, hi) in &ivs[1..] {
+        if lo <= cur_hi {
+            cur_hi = cur_hi.max(hi);
+        } else {
+            merged.push((cur_lo, cur_hi));
+            cur_lo = lo;
+            cur_hi = hi;
+        }
+    }
+    merged.push((cur_lo, cur_hi));
+    merged
 }
 
 #[cfg(test)]
