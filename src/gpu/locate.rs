@@ -8,7 +8,7 @@ const LOCATE_SEARCH_SHADER: &str = include_str!("../../shaders/locate_search.wgs
 const LOCATE_RESOLVE_SHADER: &str = include_str!("../../shaders/locate_resolve.wgsl");
 
 // Uniform struct for locate_search.wgsl.
-// 12 × u32 = 48 bytes (multiple of 16, satisfies WGSL uniform alignment).
+// 20 × u32 = 80 bytes (multiple of 16, satisfies WGSL uniform alignment).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct SearchParams {
@@ -17,12 +17,11 @@ struct SearchParams {
     num_blocks: u32,
     _pad: u32,
     // C-array values embedded to stay within max_storage_buffers_per_shader_stage=8
-    c: [u32; 6],
-    _pad2: [u32; 2],
+    c: [u32; 16],
 }
 
 // Uniform struct for locate_resolve.wgsl.
-// 12 × u32 = 48 bytes.
+// 24 × u32 = 96 bytes (multiple of 16, satisfies WGSL uniform alignment).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ResolveParams {
@@ -33,7 +32,8 @@ struct ResolveParams {
     sample_rate: u32,
     total_matches: u32,
     // C-array values embedded to stay within max_storage_buffers_per_shader_stage=8
-    c: [u32; 6],
+    c: [u32; 16],
+    _pad2: [u32; 2],
 }
 
 /// Run GPU-accelerated batch locate using a pre-initialized `GpuContext`.
@@ -57,7 +57,7 @@ pub async fn locate_batch_gpu(
     let sample_rate = index.sa_samples.sample_rate;
     let alpha = ALPHABET_SIZE as u32;
 
-    let c_arr: [u32; 6] = index.c_array.data;
+    let c_arr: [u32; 16] = index.c_array.data;
 
     // Flatten Occ checkpoints: [block * ALPHA + c]
     let mut checkpoints_flat: Vec<u32> = Vec::with_capacity((num_blocks * alpha) as usize);
@@ -108,7 +108,6 @@ pub async fn locate_batch_gpu(
         num_blocks,
         _pad: 0,
         c: c_arr,
-        _pad2: [0, 0],
     };
     let search_params_buf = ctx.create_uniform_buffer("locate_search_params", &search_params);
 
@@ -189,6 +188,7 @@ pub async fn locate_batch_gpu(
         sample_rate,
         total_matches,
         c: c_arr,
+        _pad2: [0, 0],
     };
     let resolve_params_buf = ctx.create_uniform_buffer("locate_resolve_params", &resolve_params);
 

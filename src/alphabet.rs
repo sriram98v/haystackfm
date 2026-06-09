@@ -221,9 +221,21 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip() {
         let pairs = [
-            ('A', A), ('C', C), ('G', G), ('T', T), ('N', N),
-            ('R', R), ('Y', Y), ('S', S), ('W', W), ('K', K),
-            ('M', M), ('B', B), ('D', D), ('H', H), ('V', V),
+            ('A', A),
+            ('C', C),
+            ('G', G),
+            ('T', T),
+            ('N', N),
+            ('R', R),
+            ('Y', Y),
+            ('S', S),
+            ('W', W),
+            ('K', K),
+            ('M', M),
+            ('B', B),
+            ('D', D),
+            ('H', H),
+            ('V', V),
         ];
         for (ch, code) in pairs {
             assert_eq!(encode_char(ch), Some(code), "encode {ch}");
@@ -319,7 +331,10 @@ mod tests {
     fn test_compatible_symbols_n_is_universal() {
         let compat = compatible_symbols(N);
         for code in 1u8..=15 {
-            assert!(compat.contains(&code), "N should be compatible with code {code}");
+            assert!(
+                compat.contains(&code),
+                "N should be compatible with code {code}"
+            );
         }
     }
 

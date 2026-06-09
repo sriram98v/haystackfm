@@ -13,10 +13,11 @@
 //                    update rev_lo by count_smaller_than(c, fwd_lo, fwd_hi, fwd_occ)
 
 const BLOCK_SIZE: u32 = 64u;
-const ALPHA: u32 = 6u;
+const ALPHA: u32 = 16u;  // full IUPAC: $=0,A=1,C=2,G=3,T=4,N=5,R=6,Y=7,S=8,W=9,K=10,M=11,B=12,D=13,H=14,V=15
 const MODE_SMEM: u32 = 0u;
 const MODE_MEM: u32 = 1u;
 
+// 40 × u32 = 160 bytes (multiple of 16).
 struct Params {
     n_queries:      u32,
     min_len:        u32,
@@ -26,8 +27,14 @@ struct Params {
     rev_num_blocks: u32,
     mode:           u32,
     total_mems:     u32,
-    fwd_c0: u32, fwd_c1: u32, fwd_c2: u32, fwd_c3: u32, fwd_c4: u32, fwd_c5: u32,
-    rev_c0: u32, rev_c1: u32, rev_c2: u32, rev_c3: u32, rev_c4: u32, rev_c5: u32,
+    fwd_c0:  u32, fwd_c1:  u32, fwd_c2:  u32, fwd_c3:  u32,
+    fwd_c4:  u32, fwd_c5:  u32, fwd_c6:  u32, fwd_c7:  u32,
+    fwd_c8:  u32, fwd_c9:  u32, fwd_c10: u32, fwd_c11: u32,
+    fwd_c12: u32, fwd_c13: u32, fwd_c14: u32, fwd_c15: u32,
+    rev_c0:  u32, rev_c1:  u32, rev_c2:  u32, rev_c3:  u32,
+    rev_c4:  u32, rev_c5:  u32, rev_c6:  u32, rev_c7:  u32,
+    rev_c8:  u32, rev_c9:  u32, rev_c10: u32, rev_c11: u32,
+    rev_c12: u32, rev_c13: u32, rev_c14: u32, rev_c15: u32,
 }
 
 // 6 storage bindings + 1 uniform = 7 total (within max_storage_buffers_per_shader_stage=8)
@@ -41,25 +48,45 @@ struct Params {
 
 fn fwd_c_val(c: u32) -> u32 {
     switch c {
-        case 0u: { return params.fwd_c0; }
-        case 1u: { return params.fwd_c1; }
-        case 2u: { return params.fwd_c2; }
-        case 3u: { return params.fwd_c3; }
-        case 4u: { return params.fwd_c4; }
-        case 5u: { return params.fwd_c5; }
-        default: { return 0u; }
+        case 0u:  { return params.fwd_c0; }
+        case 1u:  { return params.fwd_c1; }
+        case 2u:  { return params.fwd_c2; }
+        case 3u:  { return params.fwd_c3; }
+        case 4u:  { return params.fwd_c4; }
+        case 5u:  { return params.fwd_c5; }
+        case 6u:  { return params.fwd_c6; }
+        case 7u:  { return params.fwd_c7; }
+        case 8u:  { return params.fwd_c8; }
+        case 9u:  { return params.fwd_c9; }
+        case 10u: { return params.fwd_c10; }
+        case 11u: { return params.fwd_c11; }
+        case 12u: { return params.fwd_c12; }
+        case 13u: { return params.fwd_c13; }
+        case 14u: { return params.fwd_c14; }
+        case 15u: { return params.fwd_c15; }
+        default:  { return 0u; }
     }
 }
 
 fn rev_c_val(c: u32) -> u32 {
     switch c {
-        case 0u: { return params.rev_c0; }
-        case 1u: { return params.rev_c1; }
-        case 2u: { return params.rev_c2; }
-        case 3u: { return params.rev_c3; }
-        case 4u: { return params.rev_c4; }
-        case 5u: { return params.rev_c5; }
-        default: { return 0u; }
+        case 0u:  { return params.rev_c0; }
+        case 1u:  { return params.rev_c1; }
+        case 2u:  { return params.rev_c2; }
+        case 3u:  { return params.rev_c3; }
+        case 4u:  { return params.rev_c4; }
+        case 5u:  { return params.rev_c5; }
+        case 6u:  { return params.rev_c6; }
+        case 7u:  { return params.rev_c7; }
+        case 8u:  { return params.rev_c8; }
+        case 9u:  { return params.rev_c9; }
+        case 10u: { return params.rev_c10; }
+        case 11u: { return params.rev_c11; }
+        case 12u: { return params.rev_c12; }
+        case 13u: { return params.rev_c13; }
+        case 14u: { return params.rev_c14; }
+        case 15u: { return params.rev_c15; }
+        default:  { return 0u; }
     }
 }
 

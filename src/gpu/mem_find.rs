@@ -18,7 +18,7 @@ pub struct RawMemInterval {
     pub fwd_hi: u32,
 }
 
-// 20 × u32 = 80 bytes (multiple of 16 — satisfies WGSL uniform alignment).
+// 40 × u32 = 160 bytes (multiple of 16 — satisfies WGSL uniform alignment).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct MemFindParams {
@@ -30,8 +30,8 @@ struct MemFindParams {
     rev_num_blocks: u32,
     mode: u32,
     total_mems: u32,
-    fwd_c: [u32; 6],
-    rev_c: [u32; 6],
+    fwd_c: [u32; 16],
+    rev_c: [u32; 16],
 }
 
 /// Private core: runs the two GPU MEM-finding passes.
@@ -59,8 +59,8 @@ async fn run_mem_find_gpu(
     let fwd_num_blocks = (fwd_text_len + block_size - 1) / block_size;
     let rev_num_blocks = (rev_text_len + block_size - 1) / block_size;
 
-    let fwd_c: [u32; 6] = bidir.fwd.c_array.data;
-    let rev_c: [u32; 6] = bidir.rev.c_array.data;
+    let fwd_c: [u32; 16] = bidir.fwd.c_array.data;
+    let rev_c: [u32; 16] = bidir.rev.c_array.data;
 
     // Flatten fwd then rev checkpoints into a single buffer.
     let mut all_checkpoints: Vec<u32> =

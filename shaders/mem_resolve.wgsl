@@ -16,9 +16,10 @@
 //   7: params       — uniform
 
 const BLOCK_SIZE: u32 = 64u;
-const ALPHA: u32      = 6u;
+const ALPHA: u32      = 16u;  // full IUPAC: $=0,A=1,C=2,G=3,T=4,N=5,R=6,Y=7,S=8,W=9,K=10,M=11,B=12,D=13,H=14,V=15
 const U32_MAX: u32    = 0xFFFFFFFFu;
 
+// 24 × u32 = 96 bytes (multiple of 16 — satisfies WGSL uniform alignment).
 struct Params {
     num_mems:    u32,
     text_len:    u32,
@@ -26,10 +27,11 @@ struct Params {
     sample_rate: u32,
     total_pos:   u32,
     _pad0:       u32,
-    c0: u32, c1: u32, c2: u32, c3: u32, c4: u32, c5: u32,
+    c0: u32, c1: u32, c2: u32,  c3: u32,  c4: u32,  c5: u32,
+    c6: u32, c7: u32, c8: u32,  c9: u32,  c10: u32, c11: u32,
+    c12: u32, c13: u32, c14: u32, c15: u32,
     _pad1: u32, _pad2: u32,
 }
-// 16 × u32 = 64 bytes (multiple of 16 — satisfies WGSL uniform alignment).
 
 @group(0) @binding(0) var<storage, read>       bwt:          array<u32>;
 @group(0) @binding(1) var<storage, read>       checkpoints:  array<u32>;
@@ -42,13 +44,23 @@ struct Params {
 
 fn c_val(c: u32) -> u32 {
     switch c {
-        case 0u: { return params.c0; }
-        case 1u: { return params.c1; }
-        case 2u: { return params.c2; }
-        case 3u: { return params.c3; }
-        case 4u: { return params.c4; }
-        case 5u: { return params.c5; }
-        default: { return 0u; }
+        case 0u:  { return params.c0; }
+        case 1u:  { return params.c1; }
+        case 2u:  { return params.c2; }
+        case 3u:  { return params.c3; }
+        case 4u:  { return params.c4; }
+        case 5u:  { return params.c5; }
+        case 6u:  { return params.c6; }
+        case 7u:  { return params.c7; }
+        case 8u:  { return params.c8; }
+        case 9u:  { return params.c9; }
+        case 10u: { return params.c10; }
+        case 11u: { return params.c11; }
+        case 12u: { return params.c12; }
+        case 13u: { return params.c13; }
+        case 14u: { return params.c14; }
+        case 15u: { return params.c15; }
+        default:  { return 0u; }
     }
 }
 

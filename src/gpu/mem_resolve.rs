@@ -7,7 +7,7 @@ use wgpu;
 
 const MEM_RESOLVE_SHADER: &str = include_str!("../../shaders/mem_resolve.wgsl");
 
-// 16 × u32 = 64 bytes (multiple of 16 — satisfies WGSL uniform alignment).
+// 24 × u32 = 96 bytes (multiple of 16 — satisfies WGSL uniform alignment).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct MemResolveParams {
@@ -17,7 +17,7 @@ struct MemResolveParams {
     sample_rate: u32,
     total_pos: u32,
     _pad0: u32,
-    c: [u32; 6],
+    c: [u32; 16],
     _pad1: [u32; 2],
 }
 
@@ -47,7 +47,7 @@ pub(crate) async fn resolve_mem_intervals_gpu(
     let text_len = index.text_len;
     let num_blocks = (text_len + block_size - 1) / block_size;
     let sample_rate = index.sa_samples.sample_rate;
-    let c_arr: [u32; 6] = index.c_array.data;
+    let c_arr: [u32; 16] = index.c_array.data;
 
     // Compute per-MEM hit counts (capped) and prefix sums.
     let mut position_offsets: Vec<u32> = Vec::with_capacity(intervals.len() + 1);
