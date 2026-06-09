@@ -1,5 +1,7 @@
+use crate::alphabet::{A, C, G, N, T};
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::BidirFmIndex;
+use crate::fm_index::FmIndex;
 
 /// A Maximal Exact Match (MEM) between a query and the indexed reference.
 ///
@@ -126,6 +128,8 @@ impl BidirFmIndex {
 
     /// Find the right-maximal, left-maximal seed starting at query position `i`.
     ///
+    /// `N` bases in `query` are treated as wildcards matching any of A/C/G/T.
+    ///
     /// Returns `(Some(Mem), next_i)` on success where `next_i = i + 1` (the
     /// `find_smems` outer loop may choose a larger advance).
     /// Returns `(None, i + 1)` when no valid seed exists at `i`.
@@ -137,25 +141,25 @@ impl BidirFmIndex {
         locate: bool,
     ) -> (Option<Mem>, usize) {
         let n = query.len();
-        let mut iv = self.full_interval();
+        // Track a set of active intervals; N-wildcard may produce multiple branches.
+        let mut ivs: Vec<BidirInterval> = vec![self.full_interval()];
         let mut j = i;
-        let mut last_valid: Option<(BidirInterval, usize)> = None; // (interval, end_exclusive)
+        let mut last_valid: Option<(Vec<BidirInterval>, usize)> = None;
 
         // Right extension phase: uses the reverse index.
         while j < n {
-            match iv.extend_right(query[j], &self.rev) {
-                Some(ext) => {
-                    iv = ext;
-                    j += 1;
-                    last_valid = Some((iv, j));
-                }
-                None => break,
+            let next = extend_multi_right(&ivs, query[j], &self.rev);
+            if next.is_empty() {
+                break;
             }
+            ivs = next;
+            j += 1;
+            last_valid = Some((ivs.clone(), j));
         }
 
-        let (valid_iv, end) = match last_valid {
+        let (valid_ivs, end) = match last_valid {
             Some(v) => v,
-            None => return (None, i + 1), // no match at all for query[i]
+            None => return (None, i + 1),
         };
 
         let len = end - i;
@@ -164,20 +168,24 @@ impl BidirFmIndex {
         }
 
         // Left-maximality check: uses the forward index.
+        // Not left-maximal when ANY interval in the set can be extended left.
         let left_maximal = if i == 0 {
             true
         } else {
-            // If extending the interval one step to the left by query[i-1] succeeds,
-            // the match is NOT left-maximal.
-            valid_iv.extend_left(query[i - 1], &self.fwd).is_none()
+            extend_multi_left(&valid_ivs, query[i - 1], &self.fwd).is_empty()
         };
 
         if !left_maximal {
             return (None, i + 1);
         }
 
+        let match_count: u32 = valid_ivs.iter().map(|iv| iv.size()).sum();
+
         let positions = if locate {
-            self.locate_interval(&valid_iv)
+            valid_ivs
+                .iter()
+                .flat_map(|iv| self.locate_interval(iv))
+                .collect()
         } else {
             Vec::new()
         };
@@ -185,12 +193,61 @@ impl BidirFmIndex {
         let mem = Mem {
             query_start: i,
             query_end: end,
-            match_count: valid_iv.size(),
+            match_count,
             positions,
         };
 
         (Some(mem), i + 1)
     }
+}
+
+/// Bases that a query byte `c` should be matched against in the reference index.
+///
+/// Two wildcard rules:
+/// - Query `N` matches any reference base → try A, C, G, T, N.
+/// - Reference `N` matches any query base → always include N in the candidate set.
+fn wildcard_bases(c: u8) -> &'static [u8] {
+    const ACGTN: &[u8] = &[A, C, G, T, N];
+    const AN: &[u8] = &[A, N];
+    const CN: &[u8] = &[C, N];
+    const GN: &[u8] = &[G, N];
+    const TN: &[u8] = &[T, N];
+    match c {
+        x if x == N => ACGTN,
+        x if x == A => AN,
+        x if x == C => CN,
+        x if x == G => GN,
+        x if x == T => TN,
+        _ => &[],
+    }
+}
+
+/// Extend each interval in `ivs` right by `c`, expanding N to A/C/G/T.
+fn extend_multi_right(ivs: &[BidirInterval], c: u8, rev: &FmIndex) -> Vec<BidirInterval> {
+    let bases = wildcard_bases(c);
+    let mut result = Vec::new();
+    for &base in bases {
+        for iv in ivs {
+            if let Some(ext) = iv.extend_right(base, rev) {
+                result.push(ext);
+            }
+        }
+    }
+    result
+}
+
+/// Extend each interval in `ivs` left by `c`, expanding N to A/C/G/T.
+fn extend_multi_left(ivs: &[BidirInterval], c: u8, fwd: &FmIndex) -> Vec<BidirInterval> {
+    let bases = wildcard_bases(c);
+    let mut result = Vec::new();
+    for &base in bases {
+        for iv in ivs {
+            if let Some(ext) = iv.extend_left(base, fwd) {
+                result.push(ext);
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -455,5 +512,110 @@ mod tests {
             mems_all.len() >= mems.len(),
             "min_len=1 should return at least as many MEMs as min_len={min_len}"
         );
+    }
+
+    // ── N-wildcard tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn n_in_query_matches_any_nucleotide_smem() {
+        // Reference has ACGT; query "N" should match all 4 positions.
+        let idx = bidir("ACGT");
+        let query = encode("N");
+        let smems = idx.find_smems(&query, 1, false);
+        assert_eq!(smems.len(), 1);
+        assert_eq!(smems[0].query_start, 0);
+        assert_eq!(smems[0].query_end, 1);
+        // N matches A, C, G, T → 4 occurrences total
+        assert_eq!(smems[0].match_count, 4);
+    }
+
+    #[test]
+    fn n_in_query_flanked_by_exact_bases() {
+        // Reference "AACAAGAAT"; query "ANT" should match "AAT" (A-N-T where N=A).
+        let idx = bidir("AACAAGAAT");
+        let query = encode("ANT");
+        let smems = idx.find_smems(&query, 1, false);
+        // "ANT" with N=A matches "AAT" in the reference (at position 6)
+        assert_eq!(smems.len(), 1);
+        assert_eq!(smems[0].query_start, 0);
+        assert_eq!(smems[0].query_end, 3);
+        assert!(smems[0].match_count >= 1);
+    }
+
+    #[test]
+    fn n_wildcard_locate_returns_all_matching_positions() {
+        // Reference "ACGT"; query "N" matches all 4 positions.
+        let idx = bidir("ACGT");
+        let query = encode("N");
+        let smems = idx.find_smems(&query, 1, true);
+        assert_eq!(smems.len(), 1);
+        let mut positions = smems[0].positions.clone();
+        positions.sort();
+        assert_eq!(positions.len(), 4);
+        // All offsets 0..3 must appear
+        let offsets: Vec<u32> = positions.iter().map(|(_, off)| *off).collect();
+        for expected in 0u32..4 {
+            assert!(offsets.contains(&expected), "missing offset {expected}");
+        }
+    }
+
+    #[test]
+    fn n_wildcard_find_mems_superset() {
+        // Every MEM found with an exact query must also appear when the
+        // corresponding base is replaced with N (because N ⊇ exact base).
+        let idx = bidir("ACGTACGT");
+        let exact_query = encode("ACGT");
+        let n_query = encode("NCGN"); // N at pos 0 and 3
+        let exact_mems = idx.find_mems(&exact_query, 1, false);
+        let n_mems = idx.find_mems(&n_query, 1, false);
+        // N-query must find at least as many match positions as exact query.
+        let exact_count: u32 = exact_mems.iter().map(|m| m.match_count).sum();
+        let n_count: u32 = n_mems.iter().map(|m| m.match_count).sum();
+        assert!(
+            n_count >= exact_count,
+            "N-wildcard count {n_count} < exact count {exact_count}"
+        );
+    }
+
+    #[test]
+    fn n_only_query_matches_all_positions() {
+        // "NN" in query matches any 2-mer in the reference.
+        let idx = bidir("ACGT");
+        let query = encode("NN");
+        let smems = idx.find_smems(&query, 1, false);
+        // Should find exactly one SMEM of length 2 covering all 3 dinucleotides
+        assert_eq!(smems.len(), 1);
+        assert_eq!(smems[0].query_end - smems[0].query_start, 2);
+        assert_eq!(smems[0].match_count, 3); // AC, CG, GT
+    }
+
+    #[test]
+    fn n_in_reference_is_bidirectional_wildcard() {
+        // N in the reference matches any query base (bidirectional wildcard).
+        // Reference "ANCGT", query "AC":
+        //   "AN" at ref pos 0: query A=ref A (exact), query C=ref N (wildcard) → match
+        //   "NC" at ref pos 1: query A=ref N (wildcard), query C=ref C (exact) → match
+        let idx = bidir("ANCGT");
+        let query = encode("AC");
+        let mems = idx.find_mems(&query, 2, false);
+        assert_eq!(mems.len(), 1, "should find one length-2 MEM");
+        assert_eq!(mems[0].query_start, 0);
+        assert_eq!(mems[0].query_end, 2);
+        assert_eq!(
+            mems[0].match_count, 2,
+            "matches 'AN' at ref pos 0 and 'NC' at ref pos 1"
+        );
+    }
+
+    #[test]
+    fn n_in_query_left_maximal() {
+        // "NA" in AAAA: N matches A, so "NA" == "AA"; left-maximal only at pos 0
+        // since all positions can extend left except the first.
+        let idx = bidir("AAAA");
+        let query = encode("NA");
+        let smems = idx.find_smems(&query, 2, false);
+        assert_eq!(smems.len(), 1);
+        assert_eq!(smems[0].query_start, 0);
+        assert_eq!(smems[0].query_end, 2);
     }
 }
