@@ -10,11 +10,17 @@ mod tests {
     use webgpu_fmidx::{BidirFmIndex, FmIndexConfig, MemHit};
 
     fn cpu_config() -> FmIndexConfig {
-        FmIndexConfig { sa_sample_rate: 1, use_gpu: false }
+        FmIndexConfig {
+            sa_sample_rate: 1,
+            use_gpu: false,
+        }
     }
 
     fn build(seqs: &[&str]) -> BidirFmIndex {
-        let dna: Vec<DnaSequence> = seqs.iter().map(|s| DnaSequence::from_str(s).unwrap()).collect();
+        let dna: Vec<DnaSequence> = seqs
+            .iter()
+            .map(|s| DnaSequence::from_str(s).unwrap())
+            .collect();
         BidirFmIndex::build_cpu(&dna, &cpu_config()).unwrap()
     }
 
@@ -43,12 +49,24 @@ mod tests {
     }
 
     // Pass &[] for ref_boundaries — skips position resolution, tests MEM spans only.
-    fn smems_gpu_sync(idx: &BidirFmIndex, queries: &[DnaSequence], min_len: usize) -> Vec<Vec<MemHit>> {
-        idx.find_smems_gpu(queries, min_len, &[], 1024).block_on().unwrap()
+    fn smems_gpu_sync(
+        idx: &BidirFmIndex,
+        queries: &[DnaSequence],
+        min_len: usize,
+    ) -> Vec<Vec<MemHit>> {
+        idx.find_smems_gpu(queries, min_len, &[], 1024)
+            .block_on()
+            .unwrap()
     }
 
-    fn mems_gpu_sync(idx: &BidirFmIndex, queries: &[DnaSequence], min_len: usize) -> Vec<Vec<MemHit>> {
-        idx.find_mems_gpu(queries, min_len, &[], 1024).block_on().unwrap()
+    fn mems_gpu_sync(
+        idx: &BidirFmIndex,
+        queries: &[DnaSequence],
+        min_len: usize,
+    ) -> Vec<Vec<MemHit>> {
+        idx.find_mems_gpu(queries, min_len, &[], 1024)
+            .block_on()
+            .unwrap()
     }
 
     // ── SMEM parity tests ─────────────────────────────────────────────────────
@@ -145,7 +163,10 @@ mod tests {
     fn mem_batch() {
         let idx = build(&["ACGTACGT"]);
         let queries = vec![seq("A"), seq("AC"), seq("ACG"), seq("ACGT")];
-        let cpu: Vec<Vec<Mem>> = queries.iter().map(|q| idx.find_mems(q.as_slice(), 1, false)).collect();
+        let cpu: Vec<Vec<Mem>> = queries
+            .iter()
+            .map(|q| idx.find_mems(q.as_slice(), 1, false))
+            .collect();
         let gpu = mems_gpu_sync(&idx, &queries, 1);
         for (i, (c, g)) in cpu.iter().zip(gpu.iter()).enumerate() {
             assert_eq!(cpu_sorted(c), gpu_sorted(g), "query {i}");

@@ -215,7 +215,16 @@ impl BidirFmIndex {
         use crate::gpu::{context_cache, mem_find::MODE_SMEM};
         let ctx = context_cache::get_or_init()?;
         let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
-        resolve_mem_hits_gpu(&ctx, self, &encoded, min_len, MODE_SMEM, ref_boundaries, max_hits_per_mem).await
+        resolve_mem_hits_gpu(
+            &ctx,
+            self,
+            &encoded,
+            min_len,
+            MODE_SMEM,
+            ref_boundaries,
+            max_hits_per_mem,
+        )
+        .await
     }
 
     /// Find all Maximal Exact Matches (MEMs) for a batch of queries on the GPU,
@@ -237,7 +246,16 @@ impl BidirFmIndex {
         use crate::gpu::{context_cache, mem_find::MODE_MEM};
         let ctx = context_cache::get_or_init()?;
         let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
-        resolve_mem_hits_gpu(&ctx, self, &encoded, min_len, MODE_MEM, ref_boundaries, max_hits_per_mem).await
+        resolve_mem_hits_gpu(
+            &ctx,
+            self,
+            &encoded,
+            min_len,
+            MODE_MEM,
+            ref_boundaries,
+            max_hits_per_mem,
+        )
+        .await
     }
 }
 
@@ -277,10 +295,10 @@ async fn resolve_mem_hits_gpu(
             mems.iter()
                 .map(|iv| MemHit {
                     query_start: iv.query_start,
-                    query_end:   iv.query_end,
+                    query_end: iv.query_end,
                     match_count: iv.fwd_hi.saturating_sub(iv.fwd_lo),
-                    positions:   Vec::new(),
-                    truncated:   false,
+                    positions: Vec::new(),
+                    truncated: false,
                 })
                 .collect()
         })
@@ -299,22 +317,19 @@ async fn resolve_mem_hits_gpu(
     // Mark truncated MEMs.
     for (k, iv) in flat_intervals.iter().enumerate() {
         let raw_count = iv.fwd_hi.saturating_sub(iv.fwd_lo);
-        let resolved  = pos_offsets[k + 1] - pos_offsets[k];
+        let resolved = pos_offsets[k + 1] - pos_offsets[k];
         if raw_count > resolved {
             let (q, m) = index_map[k];
             output[q][m].truncated = true;
         }
     }
 
-    let (ref_ids, ref_offs) =
-        map_positions_to_refs(ctx, &positions_flat, ref_boundaries).await?;
+    let (ref_ids, ref_offs) = map_positions_to_refs(ctx, &positions_flat, ref_boundaries).await?;
 
     for (k, &(q, m)) in index_map.iter().enumerate() {
         let start = pos_offsets[k] as usize;
-        let end   = pos_offsets[k + 1] as usize;
-        output[q][m].positions = (start..end)
-            .map(|i| (ref_ids[i], ref_offs[i]))
-            .collect();
+        let end = pos_offsets[k + 1] as usize;
+        output[q][m].positions = (start..end).map(|i| (ref_ids[i], ref_offs[i])).collect();
     }
 
     Ok(output)

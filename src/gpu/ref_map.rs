@@ -8,9 +8,9 @@ const REF_MAP_SHADER: &str = include_str!("../../shaders/ref_map.wgsl");
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct RefMapParams {
     total_pos: u32,
-    num_refs:  u32,
-    _pad0:     u32,
-    _pad1:     u32,
+    num_refs: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 /// Maps flat raw text positions to (ref_id, offset_within_ref) pairs.
@@ -30,14 +30,19 @@ pub(crate) async fn map_positions_to_refs(
     }
 
     let total_pos = positions.len() as u32;
-    let num_refs  = boundaries.len() as u32;
+    let num_refs = boundaries.len() as u32;
 
-    let pos_buf  = ctx.create_buffer_init("rm_pos",  positions);
-    let bnd_buf  = ctx.create_buffer_init("rm_bnd",  boundaries);
-    let rid_buf  = ctx.create_buffer_empty("rm_rid",  total_pos);
-    let off_buf  = ctx.create_buffer_empty("rm_off",  total_pos);
+    let pos_buf = ctx.create_buffer_init("rm_pos", positions);
+    let bnd_buf = ctx.create_buffer_init("rm_bnd", boundaries);
+    let rid_buf = ctx.create_buffer_empty("rm_rid", total_pos);
+    let off_buf = ctx.create_buffer_empty("rm_off", total_pos);
 
-    let params = RefMapParams { total_pos, num_refs, _pad0: 0, _pad1: 0 };
+    let params = RefMapParams {
+        total_pos,
+        num_refs,
+        _pad0: 0,
+        _pad1: 0,
+    };
     let params_buf = ctx.create_uniform_buffer("rm_params", &params);
 
     let pipeline = ctx.create_compute_pipeline("ref_map", REF_MAP_SHADER, "map_positions");
@@ -45,18 +50,33 @@ pub(crate) async fn map_positions_to_refs(
         &pipeline,
         0,
         &[
-            wgpu::BindGroupEntry { binding: 0, resource: pos_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: bnd_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: rid_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: off_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: params_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: pos_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: bnd_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: rid_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: off_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: params_buf.as_entire_binding(),
+            },
         ],
     );
 
     let wg_size: u32 = 64;
     ctx.dispatch(&pipeline, &bg, ((total_pos + wg_size - 1) / wg_size, 1, 1));
 
-    let ref_ids  = ctx.download_buffer(&rid_buf, total_pos).await;
-    let offsets  = ctx.download_buffer(&off_buf, total_pos).await;
+    let ref_ids = ctx.download_buffer(&rid_buf, total_pos).await;
+    let offsets = ctx.download_buffer(&off_buf, total_pos).await;
     Ok((ref_ids, offsets))
 }

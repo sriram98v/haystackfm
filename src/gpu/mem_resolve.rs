@@ -11,14 +11,14 @@ const MEM_RESOLVE_SHADER: &str = include_str!("../../shaders/mem_resolve.wgsl");
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct MemResolveParams {
-    num_mems:    u32,
-    text_len:    u32,
-    num_blocks:  u32,
+    num_mems: u32,
+    text_len: u32,
+    num_blocks: u32,
     sample_rate: u32,
-    total_pos:   u32,
-    _pad0:       u32,
-    c:           [u32; 6],
-    _pad1:       [u32; 2],
+    total_pos: u32,
+    _pad0: u32,
+    c: [u32; 6],
+    _pad1: [u32; 2],
 }
 
 /// Resolves raw SA positions for a flat list of MEM intervals.
@@ -81,13 +81,11 @@ pub(crate) async fn resolve_mem_intervals_gpu(
     }
 
     // Flatten Occ checkpoints and bitvectors (fwd index only).
-    let mut checkpoints_flat: Vec<u32> =
-        Vec::with_capacity((num_blocks * alpha) as usize);
+    let mut checkpoints_flat: Vec<u32> = Vec::with_capacity((num_blocks * alpha) as usize);
     for block in &index.occ.checkpoints {
         checkpoints_flat.extend_from_slice(block);
     }
-    let mut bitvectors_flat: Vec<u32> =
-        Vec::with_capacity((num_blocks * alpha * 2) as usize);
+    let mut bitvectors_flat: Vec<u32> = Vec::with_capacity((num_blocks * alpha * 2) as usize);
     for block in &index.occ.bitvectors {
         for &bv64 in block.iter() {
             bitvectors_flat.push(bv64 as u32);
@@ -97,13 +95,13 @@ pub(crate) async fn resolve_mem_intervals_gpu(
 
     let bwt_u32: Vec<u32> = index.bwt.data.iter().map(|&b| b as u32).collect();
 
-    let bwt_buf      = ctx.create_buffer_init("mr_bwt",      &bwt_u32);
-    let chk_buf      = ctx.create_buffer_init("mr_chk",      &checkpoints_flat);
-    let bv_buf       = ctx.create_buffer_init("mr_bv",       &bitvectors_flat);
-    let sa_buf       = ctx.create_buffer_init("mr_sa",       &index.sa_samples.samples);
-    let ivs_buf      = ctx.create_buffer_init("mr_ivs",      &intervals_flat);
-    let offsets_buf  = ctx.create_buffer_init("mr_offsets",  &position_offsets);
-    let pos_out_buf  = ctx.create_buffer_empty("mr_pos_out", total_pos);
+    let bwt_buf = ctx.create_buffer_init("mr_bwt", &bwt_u32);
+    let chk_buf = ctx.create_buffer_init("mr_chk", &checkpoints_flat);
+    let bv_buf = ctx.create_buffer_init("mr_bv", &bitvectors_flat);
+    let sa_buf = ctx.create_buffer_init("mr_sa", &index.sa_samples.samples);
+    let ivs_buf = ctx.create_buffer_init("mr_ivs", &intervals_flat);
+    let offsets_buf = ctx.create_buffer_init("mr_offsets", &position_offsets);
+    let pos_out_buf = ctx.create_buffer_empty("mr_pos_out", total_pos);
 
     let params = MemResolveParams {
         num_mems,
@@ -117,19 +115,44 @@ pub(crate) async fn resolve_mem_intervals_gpu(
     };
     let params_buf = ctx.create_uniform_buffer("mr_params", &params);
 
-    let pipeline = ctx.create_compute_pipeline("mem_resolve", MEM_RESOLVE_SHADER, "resolve_positions");
+    let pipeline =
+        ctx.create_compute_pipeline("mem_resolve", MEM_RESOLVE_SHADER, "resolve_positions");
     let bg = ctx.create_bind_group(
         &pipeline,
         0,
         &[
-            wgpu::BindGroupEntry { binding: 0, resource: bwt_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: chk_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: bv_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: sa_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: ivs_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 5, resource: offsets_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 6, resource: pos_out_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 7, resource: params_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: bwt_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: chk_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: bv_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: sa_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: ivs_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: offsets_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: pos_out_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: params_buf.as_entire_binding(),
+            },
         ],
     );
 

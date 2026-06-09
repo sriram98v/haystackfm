@@ -4,8 +4,8 @@ use webgpu_fmidx::alphabet::{encode_char, DnaSequence};
 use webgpu_fmidx::fm_index::{FmIndex, FmIndexConfig};
 
 fn random_dna(len: usize, seed: u64) -> String {
-    use rand::SeedableRng;
     use rand::Rng;
+    use rand::SeedableRng;
     let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
     let bases = ['A', 'C', 'G', 'T'];
     (0..len).map(|_| bases[rng.random_range(0..4)]).collect()
@@ -17,7 +17,10 @@ fn encode(s: &str) -> Vec<u8> {
 
 fn build_index(corpus: &str) -> FmIndex {
     let seq = DnaSequence::from_str(corpus).unwrap();
-    let config = FmIndexConfig { sa_sample_rate: 32, use_gpu: false };
+    let config = FmIndexConfig {
+        sa_sample_rate: 32,
+        use_gpu: false,
+    };
     FmIndex::build_cpu(&[seq], &config).unwrap()
 }
 

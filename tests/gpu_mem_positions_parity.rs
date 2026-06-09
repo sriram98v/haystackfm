@@ -9,12 +9,17 @@ mod tests {
     use webgpu_fmidx::{BidirFmIndex, FmIndexConfig, MemHit};
 
     fn cpu_config() -> FmIndexConfig {
-        FmIndexConfig { sa_sample_rate: 1, use_gpu: false }
+        FmIndexConfig {
+            sa_sample_rate: 1,
+            use_gpu: false,
+        }
     }
 
     fn build(seqs: &[&str]) -> BidirFmIndex {
-        let dna: Vec<DnaSequence> =
-            seqs.iter().map(|s| DnaSequence::from_str(s).unwrap()).collect();
+        let dna: Vec<DnaSequence> = seqs
+            .iter()
+            .map(|s| DnaSequence::from_str(s).unwrap())
+            .collect();
         BidirFmIndex::build_cpu(&dna, &cpu_config()).unwrap()
     }
 
@@ -68,21 +73,16 @@ mod tests {
     }
 
     /// GPU results as comparable structure.
-    fn gpu_mems_with_positions(
-        hits: &[MemHit],
-    ) -> Vec<(usize, usize, HashSet<(u32, u32)>)> {
+    fn gpu_mems_with_positions(hits: &[MemHit]) -> Vec<(usize, usize, HashSet<(u32, u32)>)> {
         hits.iter()
             .map(|h| {
-                let positions: HashSet<(u32, u32)> =
-                    h.positions.iter().copied().collect();
+                let positions: HashSet<(u32, u32)> = h.positions.iter().copied().collect();
                 (h.query_start as usize, h.query_end as usize, positions)
             })
             .collect()
     }
 
-    fn sort_mem_tuples(
-        v: &mut Vec<(usize, usize, HashSet<(u32, u32)>)>,
-    ) {
+    fn sort_mem_tuples(v: &mut Vec<(usize, usize, HashSet<(u32, u32)>)>) {
         v.sort_by_key(|(qs, qe, _)| (*qs, *qe));
     }
 
@@ -108,7 +108,11 @@ mod tests {
         for (i, (c, g)) in cpu.iter().zip(gpu.iter()).enumerate() {
             assert_eq!(c.0, g.0, "MEM {i}: query_start");
             assert_eq!(c.1, g.1, "MEM {i}: query_end");
-            assert_eq!(c.2, g.2, "MEM {i}: positions mismatch\ncpu={:?}\ngpu={:?}", c.2, g.2);
+            assert_eq!(
+                c.2, g.2,
+                "MEM {i}: positions mismatch\ncpu={:?}\ngpu={:?}",
+                c.2, g.2
+            );
         }
     }
 
@@ -183,7 +187,11 @@ mod tests {
             sort_mem_tuples(&mut gpu_v);
             assert_eq!(cpu_q.len(), gpu_v.len(), "query {qi}: MEM count");
             for (i, (c, g)) in cpu_q.iter().zip(gpu_v.iter()).enumerate() {
-                assert_eq!(c.2, g.2, "query {qi} MEM {i}: positions\ncpu={:?}\ngpu={:?}", c.2, g.2);
+                assert_eq!(
+                    c.2, g.2,
+                    "query {qi} MEM {i}: positions\ncpu={:?}\ngpu={:?}",
+                    c.2, g.2
+                );
             }
         }
     }
@@ -205,10 +213,7 @@ mod tests {
         // Passing &[] skips SA resolve — positions should be empty, no panic.
         let idx = build(&["ACGTACGT"]);
         let q = seq("ACGT");
-        let gpu_raw = idx
-            .find_mems_gpu(&[q], 1, &[], 1024)
-            .block_on()
-            .unwrap();
+        let gpu_raw = idx.find_mems_gpu(&[q], 1, &[], 1024).block_on().unwrap();
         // MEMs found but positions empty (resolve skipped).
         assert!(!gpu_raw[0].is_empty());
         for hit in &gpu_raw[0] {

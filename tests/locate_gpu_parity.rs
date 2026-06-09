@@ -31,10 +31,7 @@ mod tests {
         FmIndex::build_cpu(&dna, &cpu_config()).unwrap()
     }
 
-    fn locate_gpu_sync(
-        idx: &FmIndex,
-        queries: &[Vec<u8>],
-    ) -> Vec<Vec<(String, u32)>> {
+    fn locate_gpu_sync(idx: &FmIndex, queries: &[Vec<u8>]) -> Vec<Vec<(String, u32)>> {
         let refs: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
         idx.locate_gpu(&refs).block_on().unwrap()
     }
@@ -90,10 +87,8 @@ mod tests {
     fn batch_multiple_queries() {
         let idx = build(&["ACGTACGT", "NNNACGTNNN"]);
         let patterns_valid = vec![encode("ACG"), encode("ACGT")];
-        let cpu_results: Vec<Vec<(String, u32)>> = patterns_valid
-            .iter()
-            .map(|p| idx.locate(p))
-            .collect();
+        let cpu_results: Vec<Vec<(String, u32)>> =
+            patterns_valid.iter().map(|p| idx.locate(p)).collect();
         let gpu_results = locate_gpu_sync(&idx, &patterns_valid);
         for (i, (cpu, gpu)) in cpu_results.iter().zip(gpu_results.iter()).enumerate() {
             assert_eq!(
@@ -136,8 +131,7 @@ mod tests {
             encode("GT"),
             encode("ACG"),
         ];
-        let cpu_results: Vec<Vec<(String, u32)>> =
-            patterns.iter().map(|p| idx.locate(p)).collect();
+        let cpu_results: Vec<Vec<(String, u32)>> = patterns.iter().map(|p| idx.locate(p)).collect();
         let gpu_results = locate_gpu_sync(&idx, &patterns);
         for (i, (cpu, gpu)) in cpu_results.iter().zip(gpu_results.iter()).enumerate() {
             assert_eq!(

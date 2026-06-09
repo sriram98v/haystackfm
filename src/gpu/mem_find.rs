@@ -13,25 +13,25 @@ pub(crate) const MODE_MEM: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawMemInterval {
     pub query_start: u32,
-    pub query_end:   u32,
-    pub fwd_lo:      u32,
-    pub fwd_hi:      u32,
+    pub query_end: u32,
+    pub fwd_lo: u32,
+    pub fwd_hi: u32,
 }
 
 // 20 × u32 = 80 bytes (multiple of 16 — satisfies WGSL uniform alignment).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct MemFindParams {
-    n_queries:      u32,
-    min_len:        u32,
-    fwd_text_len:   u32,
-    rev_text_len:   u32,
+    n_queries: u32,
+    min_len: u32,
+    fwd_text_len: u32,
+    rev_text_len: u32,
     fwd_num_blocks: u32,
     rev_num_blocks: u32,
-    mode:           u32,
-    total_mems:     u32,
-    fwd_c:          [u32; 6],
-    rev_c:          [u32; 6],
+    mode: u32,
+    total_mems: u32,
+    fwd_c: [u32; 6],
+    rev_c: [u32; 6],
 }
 
 /// Private core: runs the two GPU MEM-finding passes.
@@ -50,12 +50,12 @@ async fn run_mem_find_gpu(
         return Ok(None);
     }
 
-    let n_queries      = queries.len() as u32;
+    let n_queries = queries.len() as u32;
     let block_size: u32 = 64;
-    let alpha           = ALPHABET_SIZE as u32;
+    let alpha = ALPHABET_SIZE as u32;
 
-    let fwd_text_len   = bidir.fwd.text_len;
-    let rev_text_len   = bidir.rev.text_len;
+    let fwd_text_len = bidir.fwd.text_len;
+    let rev_text_len = bidir.rev.text_len;
     let fwd_num_blocks = (fwd_text_len + block_size - 1) / block_size;
     let rev_num_blocks = (rev_text_len + block_size - 1) / block_size;
 
@@ -102,15 +102,15 @@ async fn run_mem_find_gpu(
         queries_flat.push(0); // wgpu requires non-zero-size buffers
     }
 
-    let chk_buf   = ctx.create_buffer_init("mem_chk",   &all_checkpoints);
-    let bv_buf    = ctx.create_buffer_init("mem_bv",    &all_bitvectors);
+    let chk_buf = ctx.create_buffer_init("mem_chk", &all_checkpoints);
+    let bv_buf = ctx.create_buffer_init("mem_bv", &all_bitvectors);
     let qflat_buf = ctx.create_buffer_init("mem_qflat", &queries_flat);
-    let qoff_buf  = ctx.create_buffer_init("mem_qoff",  &query_offsets);
+    let qoff_buf = ctx.create_buffer_init("mem_qoff", &query_offsets);
 
     // pass_buf_a: pass 1 output (mem_counts), pass 2 input (mem_offsets)
     let pass_buf_a = ctx.create_buffer_empty("mem_pass_a", n_queries + 1);
     // dummy binding 5 for pass 1 (mems_out not written in count pass)
-    let dummy_buf  = ctx.create_buffer_empty("mem_dummy", 1);
+    let dummy_buf = ctx.create_buffer_empty("mem_dummy", 1);
 
     // ── Pass 1: count MEMs per query ─────────────────────────────────────────
     let count_params = MemFindParams {
@@ -132,13 +132,34 @@ async fn run_mem_find_gpu(
         &count_pipeline,
         0,
         &[
-            wgpu::BindGroupEntry { binding: 0, resource: qflat_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: qoff_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: chk_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: bv_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: pass_buf_a.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 5, resource: dummy_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 6, resource: count_params_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: qflat_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: qoff_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: chk_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: bv_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: pass_buf_a.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: dummy_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: count_params_buf.as_entire_binding(),
+            },
         ],
     );
 
@@ -179,13 +200,34 @@ async fn run_mem_find_gpu(
         &write_pipeline,
         0,
         &[
-            wgpu::BindGroupEntry { binding: 0, resource: qflat_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: qoff_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: chk_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: bv_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: offsets_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 5, resource: mems_out_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 6, resource: write_params_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: qflat_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: qoff_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: chk_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: bv_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: offsets_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: mems_out_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: write_params_buf.as_entire_binding(),
+            },
         ],
     );
 
@@ -253,9 +295,9 @@ pub(crate) async fn find_mem_intervals_batch_gpu(
             let base = (off + k) * 4;
             hits.push(RawMemInterval {
                 query_start: flat[base],
-                query_end:   flat[base + 1],
-                fwd_lo:      flat[base + 2],
-                fwd_hi:      flat[base + 3],
+                query_end: flat[base + 1],
+                fwd_lo: flat[base + 2],
+                fwd_hi: flat[base + 3],
             });
         }
         output[q] = hits;

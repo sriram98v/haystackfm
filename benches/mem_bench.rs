@@ -4,8 +4,8 @@ use webgpu_fmidx::alphabet::DnaSequence;
 use webgpu_fmidx::{BidirFmIndex, FmIndexConfig};
 
 fn random_dna(len: usize, seed: u64) -> String {
-    use rand::SeedableRng;
     use rand::Rng;
+    use rand::SeedableRng;
     let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
     let bases = ['A', 'C', 'G', 'T'];
     (0..len).map(|_| bases[rng.random_range(0..4)]).collect()
@@ -13,7 +13,10 @@ fn random_dna(len: usize, seed: u64) -> String {
 
 fn build_bidir(corpus: &str) -> BidirFmIndex {
     let seq = DnaSequence::from_str(corpus).unwrap();
-    let config = FmIndexConfig { sa_sample_rate: 32, use_gpu: false };
+    let config = FmIndexConfig {
+        sa_sample_rate: 32,
+        use_gpu: false,
+    };
     BidirFmIndex::build_cpu(&[seq], &config).unwrap()
 }
 
@@ -54,7 +57,10 @@ fn bench_smem_gpu(c: &mut Criterion) {
         let queries = make_queries(&corpus, 50, n);
         group.bench_with_input(BenchmarkId::new("batch", n), &queries, |b, qs| {
             b.iter(|| {
-                let _ = idx.find_smems_gpu(qs, MIN_LEN, &[], 1024).block_on().unwrap();
+                let _ = idx
+                    .find_smems_gpu(qs, MIN_LEN, &[], 1024)
+                    .block_on()
+                    .unwrap();
             })
         });
     }
@@ -89,7 +95,10 @@ fn bench_mem_gpu(c: &mut Criterion) {
         let queries = make_queries(&corpus, 50, n);
         group.bench_with_input(BenchmarkId::new("batch", n), &queries, |b, qs| {
             b.iter(|| {
-                let _ = idx.find_mems_gpu(qs, MIN_LEN, &[], 1024).block_on().unwrap();
+                let _ = idx
+                    .find_mems_gpu(qs, MIN_LEN, &[], 1024)
+                    .block_on()
+                    .unwrap();
             })
         });
     }
@@ -102,5 +111,11 @@ fn bench_smem_gpu(_c: &mut Criterion) {}
 #[cfg(not(feature = "gpu"))]
 fn bench_mem_gpu(_c: &mut Criterion) {}
 
-criterion_group!(benches, bench_smem_cpu, bench_smem_gpu, bench_mem_cpu, bench_mem_gpu);
+criterion_group!(
+    benches,
+    bench_smem_cpu,
+    bench_smem_gpu,
+    bench_mem_cpu,
+    bench_mem_gpu
+);
 criterion_main!(benches);

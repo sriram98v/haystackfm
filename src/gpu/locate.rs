@@ -60,15 +60,13 @@ pub async fn locate_batch_gpu(
     let c_arr: [u32; 6] = index.c_array.data;
 
     // Flatten Occ checkpoints: [block * ALPHA + c]
-    let mut checkpoints_flat: Vec<u32> =
-        Vec::with_capacity((num_blocks * alpha) as usize);
+    let mut checkpoints_flat: Vec<u32> = Vec::with_capacity((num_blocks * alpha) as usize);
     for block in &index.occ.checkpoints {
         checkpoints_flat.extend_from_slice(block);
     }
 
     // Flatten Occ bitvectors: split each u64 into (lo_u32, hi_u32)
-    let mut bitvectors_flat: Vec<u32> =
-        Vec::with_capacity((num_blocks * alpha * 2) as usize);
+    let mut bitvectors_flat: Vec<u32> = Vec::with_capacity((num_blocks * alpha * 2) as usize);
     for block in &index.occ.bitvectors {
         for &bv64 in block.iter() {
             bitvectors_flat.push(bv64 as u32);
@@ -94,13 +92,13 @@ pub async fn locate_batch_gpu(
     let sa_samples_data: Vec<u32> = index.sa_samples.samples.clone();
     let seq_bounds_data: Vec<u32> = index.seq_boundaries.clone();
 
-    let bwt_buf   = ctx.create_buffer_init("locate_bwt", &bwt_u32);
-    let chk_buf   = ctx.create_buffer_init("locate_chk", &checkpoints_flat);
-    let bv_buf    = ctx.create_buffer_init("locate_bv", &bitvectors_flat);
-    let sa_buf    = ctx.create_buffer_init("locate_sa", &sa_samples_data);
-    let seqb_buf  = ctx.create_buffer_init("locate_seqb", &seq_bounds_data);
+    let bwt_buf = ctx.create_buffer_init("locate_bwt", &bwt_u32);
+    let chk_buf = ctx.create_buffer_init("locate_chk", &checkpoints_flat);
+    let bv_buf = ctx.create_buffer_init("locate_bv", &bitvectors_flat);
+    let sa_buf = ctx.create_buffer_init("locate_sa", &sa_samples_data);
+    let seqb_buf = ctx.create_buffer_init("locate_seqb", &seq_bounds_data);
     let qflat_buf = ctx.create_buffer_init("locate_qflat", &queries_flat);
-    let qoff_buf  = ctx.create_buffer_init("locate_qoff", &query_offsets);
+    let qoff_buf = ctx.create_buffer_init("locate_qoff", &query_offsets);
     let intervals_buf = ctx.create_buffer_empty("locate_intervals", num_queries * 2);
 
     // ── Phase A: backward search (one thread per query) ─────────────────────
@@ -112,14 +110,10 @@ pub async fn locate_batch_gpu(
         c: c_arr,
         _pad2: [0, 0],
     };
-    let search_params_buf =
-        ctx.create_uniform_buffer("locate_search_params", &search_params);
+    let search_params_buf = ctx.create_uniform_buffer("locate_search_params", &search_params);
 
-    let search_pipeline = ctx.create_compute_pipeline(
-        "locate_search",
-        LOCATE_SEARCH_SHADER,
-        "locate_search",
-    );
+    let search_pipeline =
+        ctx.create_compute_pipeline("locate_search", LOCATE_SEARCH_SHADER, "locate_search");
     let search_bg = ctx.create_bind_group(
         &search_pipeline,
         0,
@@ -158,9 +152,7 @@ pub async fn locate_batch_gpu(
         ((num_queries + wg_size - 1) / wg_size, 1, 1),
     );
 
-    let intervals = ctx
-        .download_buffer(&intervals_buf, num_queries * 2)
-        .await;
+    let intervals = ctx.download_buffer(&intervals_buf, num_queries * 2).await;
 
     // Compute per-query match counts
     let match_counts: Vec<u32> = (0..num_queries as usize)
@@ -187,8 +179,7 @@ pub async fn locate_batch_gpu(
 
     // ── Phase B: resolve SA positions (one thread per match) ────────────────
     let results_buf = ctx.create_buffer_empty("locate_results", total_matches * 2);
-    let match_off_buf =
-        ctx.create_buffer_init("locate_match_offsets", &match_offsets);
+    let match_off_buf = ctx.create_buffer_init("locate_match_offsets", &match_offsets);
 
     let resolve_params = ResolveParams {
         num_queries,
@@ -199,14 +190,10 @@ pub async fn locate_batch_gpu(
         total_matches,
         c: c_arr,
     };
-    let resolve_params_buf =
-        ctx.create_uniform_buffer("locate_resolve_params", &resolve_params);
+    let resolve_params_buf = ctx.create_uniform_buffer("locate_resolve_params", &resolve_params);
 
-    let resolve_pipeline = ctx.create_compute_pipeline(
-        "locate_resolve",
-        LOCATE_RESOLVE_SHADER,
-        "locate_resolve",
-    );
+    let resolve_pipeline =
+        ctx.create_compute_pipeline("locate_resolve", LOCATE_RESOLVE_SHADER, "locate_resolve");
     let resolve_bg = ctx.create_bind_group(
         &resolve_pipeline,
         0,
@@ -256,9 +243,7 @@ pub async fn locate_batch_gpu(
         ((total_matches + wg_size - 1) / wg_size, 1, 1),
     );
 
-    let results_flat = ctx
-        .download_buffer(&results_buf, total_matches * 2)
-        .await;
+    let results_flat = ctx.download_buffer(&results_buf, total_matches * 2).await;
 
     // Assemble per-query results
     let mut output: Vec<Vec<(u32, u32)>> = vec![vec![]; queries.len()];

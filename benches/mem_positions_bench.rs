@@ -26,14 +26,19 @@ fn random_dna(len: usize, seed: u64) -> String {
     let mut state = seed ^ 0xdeadbeef_cafebabe;
     (0..len)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             bases[((state >> 33) & 3) as usize] as char
         })
         .collect()
 }
 
 fn build_index(num_refs: usize) -> (BidirFmIndex, Vec<u32>) {
-    let config = FmIndexConfig { sa_sample_rate: 4, use_gpu: false };
+    let config = FmIndexConfig {
+        sa_sample_rate: 4,
+        use_gpu: false,
+    };
     let seqs: Vec<DnaSequence> = (0..num_refs)
         .map(|i| DnaSequence::from_str(&random_dna(REF_LEN, i as u64 + 1)).unwrap())
         .collect();
@@ -75,40 +80,40 @@ fn bench_positions(c: &mut Criterion, num_refs: usize) {
         let queries = make_queries(&idx, batch, &boundaries);
 
         // CPU: find_mems + locate (positions included).
-        group.bench_with_input(
-            BenchmarkId::new("cpu", batch),
-            &queries,
-            |b, qs| {
-                b.iter(|| {
-                    for q in qs {
-                        let _ = idx.find_mems(q.as_slice(), MIN_LEN, true);
-                    }
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("cpu", batch), &queries, |b, qs| {
+            b.iter(|| {
+                for q in qs {
+                    let _ = idx.find_mems(q.as_slice(), MIN_LEN, true);
+                }
+            })
+        });
 
         // GPU: find_mems_gpu with full position resolution.
-        group.bench_with_input(
-            BenchmarkId::new("gpu", batch),
-            &queries,
-            |b, qs| {
-                b.iter(|| {
-                    let _ = idx
-                        .find_mems_gpu(qs, MIN_LEN, &boundaries, 1024)
-                        .block_on()
-                        .unwrap();
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("gpu", batch), &queries, |b, qs| {
+            b.iter(|| {
+                let _ = idx
+                    .find_mems_gpu(qs, MIN_LEN, &boundaries, 1024)
+                    .block_on()
+                    .unwrap();
+            })
+        });
     }
 
     group.finish();
 }
 
-fn bench_k1(c: &mut Criterion)    { bench_positions(c, 1); }
-fn bench_k10(c: &mut Criterion)   { bench_positions(c, 10); }
-fn bench_k100(c: &mut Criterion)  { bench_positions(c, 100); }
-fn bench_k1000(c: &mut Criterion) { bench_positions(c, 1_000); }
+fn bench_k1(c: &mut Criterion) {
+    bench_positions(c, 1);
+}
+fn bench_k10(c: &mut Criterion) {
+    bench_positions(c, 10);
+}
+fn bench_k100(c: &mut Criterion) {
+    bench_positions(c, 100);
+}
+fn bench_k1000(c: &mut Criterion) {
+    bench_positions(c, 1_000);
+}
 
 criterion_group!(benches, bench_k1, bench_k10, bench_k100, bench_k1000);
 criterion_main!(benches);

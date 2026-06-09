@@ -373,4 +373,87 @@ mod tests {
         assert!(idx.find_smems(&[], 1, false).is_empty());
         assert!(idx.find_mems(&[], 1, false).is_empty());
     }
+
+    #[test]
+    fn find_mems_matches_brute_force() {
+        let reference = "ACGTTAGCCAGTACGT";
+        let query_str = "CGTTAGC";
+        let idx = bidir(reference);
+        let query = encode(query_str);
+
+        let mems = idx.find_mems(&query, 1, false);
+        let mem_pairs: Vec<(usize, usize)> =
+            mems.iter().map(|m| (m.query_start, m.query_end)).collect();
+
+        let expected = brute_force_mems(reference, query_str, 1);
+
+        assert_eq!(
+            mem_pairs, expected,
+            "MEMs differ from brute force.\nGot:      {:?}\nExpected: {:?}",
+            mem_pairs, expected
+        );
+    }
+
+    #[test]
+    fn find_mems_all_left_and_right_maximal() {
+        let reference = "ACGTTAGCCAGTACGT";
+        let query_str = "CGTTAGCAGT";
+        let idx = bidir(reference);
+        let query = encode(query_str);
+
+        let mems = idx.find_mems(&query, 1, false);
+        assert!(!mems.is_empty(), "expected at least one MEM");
+
+        for mem in &mems {
+            let s = mem.query_start;
+            let e = mem.query_end;
+            let matched = &query_str[s..e];
+
+            assert!(
+                reference.contains(matched),
+                "MEM [{s},{e}) '{matched}' not found in reference"
+            );
+
+            let right_maximal = e == query_str.len() || !reference.contains(&query_str[s..e + 1]);
+            assert!(
+                right_maximal,
+                "MEM [{s},{e}) '{matched}' is not right-maximal: extending right still matches"
+            );
+
+            let left_maximal = s == 0 || !reference.contains(&query_str[s - 1..e]);
+            assert!(
+                left_maximal,
+                "MEM [{s},{e}) '{matched}' is not left-maximal: extending left still matches"
+            );
+        }
+    }
+
+    #[test]
+    fn find_mems_min_len_filter() {
+        let reference = "ACGTTAGCCAGTACGT";
+        let query_str = "CGTTAGC";
+        let idx = bidir(reference);
+        let query = encode(query_str);
+
+        let min_len = 3;
+        let mems = idx.find_mems(&query, min_len, false);
+
+        for mem in &mems {
+            assert!(
+                mem.len() >= min_len,
+                "MEM [{},{}] has length {} < min_len {}",
+                mem.query_start,
+                mem.query_end,
+                mem.len(),
+                min_len
+            );
+        }
+
+        // Verify that mems with min_len=1 contains strictly more entries (or equal)
+        let mems_all = idx.find_mems(&query, 1, false);
+        assert!(
+            mems_all.len() >= mems.len(),
+            "min_len=1 should return at least as many MEMs as min_len={min_len}"
+        );
+    }
 }
