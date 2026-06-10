@@ -270,10 +270,18 @@ async fn run_mem_find_gpu(
     Ok(Some((results_flat, iv_flat, mem_counts, mem_offsets)))
 }
 
-/// GPU-accelerated batch MEM/SMEM finding.
+/// GPU-accelerated batch MEM/SMEM finding (count + span only).
+///
+/// Runs the two-pass `mem_find.wgsl` pipeline with IUPAC multi-interval
+/// bidirectional extension:
+///
+/// - **Pass 1** (`count_mems`): counts MEMs and total SA intervals per query.
+/// - **Pass 2** (`write_mems`): writes MEM spans and per-MEM interval lists.
+///
+/// `mode` selects SMEM (`MODE_SMEM=0`) or MEM (`MODE_MEM=1`) behaviour.
 ///
 /// Returns one `Vec<(query_start, query_end, match_count)>` per query.
-/// `mode` selects SMEM (`MODE_SMEM=0`) or MEM (`MODE_MEM=1`) behaviour.
+/// `match_count` is the sum of forward SA interval sizes across all IUPAC branches.
 pub async fn find_mems_batch_gpu(
     ctx: &GpuContext,
     bidir: &BidirFmIndex,
@@ -306,7 +314,9 @@ pub async fn find_mems_batch_gpu(
     Ok(output)
 }
 
-/// Returns raw SA intervals per MEM — used by the GPU position-resolve pipeline.
+/// Returns raw SA intervals per MEM — used by the 3-pass GPU position-resolve pipeline
+/// (`mem_resolve.wgsl` → `ref_map.wgsl`). Each `RawMemInterval` carries the query span
+/// and the forward SA interval `[fwd_lo, fwd_hi)`; callers resolve positions from it.
 pub(crate) async fn find_mem_intervals_batch_gpu(
     ctx: &GpuContext,
     bidir: &BidirFmIndex,

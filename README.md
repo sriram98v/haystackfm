@@ -1,165 +1,282 @@
 # webgpu-fmidx
 
-[![Built with Anthropic](https://img.shields.io/badge/Built%20with-Anthropic-191919?logo=anthropic&logoColor=white)](https://www.anthropic.com)
+A GPU-accelerated FM-index library for DNA sequence alignment. Runs on native targets (Vulkan / Metal / DX12) via **wgpu** and compiles to **WebAssembly** for in-browser WebGPU use.
 
-GPU-accelerated FM-index construction for DNA sequences, targeting WebGPU via `wgpu`.
+Supports the full **16-symbol IUPAC ambiguity alphabet** (A C G T N R Y S W K M B D H V) in both the CPU and GPU query paths.
 
-Builds a full FM-index (suffix array → BWT → C array → Occ table) on the GPU using
-compute shaders written in WGSL. Compiles to native (Vulkan / Metal / DX12) and to
-WebAssembly (browser WebGPU).
+---
 
 ## Features
 
-- **GPU-accelerated construction** — radix sort, prefix sum, and gather shaders
-- **CPU fallback** — identical results, no GPU required
-- **WASM target** — runs entirely in the browser via `wasm-pack`
-- **FM-index queries** — `count(pattern)` in O(m), `locate(pattern)` in O(m + occ·k)
-- **Serialization** — binary round-trip with `bincode`
-- **DNA alphabet** — A, C, G, T (+ sentinel `$`); rejects invalid characters early
+| Feature | Description |
+|---------|-------------|
+| CPU construction | BWT, suffix array, and Occ table built on CPU |
+| GPU construction | All three steps GPU-accelerated via WGSL compute shaders |
+| `count` / `locate` | Exact-match and position queries (CPU, O(m) and O(m + occ·k)) |
+| GPU batch locate | IUPAC-aware backward search + SA resolve on GPU |
+| MEM / SMEM finding | Bidirectional FM-index; CPU and GPU paths |
+| GPU MEM pipeline | 3-pass: find intervals → resolve SA positions → map to references |
+| IUPAC ambiguity | Full 16-symbol alphabet in query and reference; GPU parity-tested |
+| WASM bindings | `wasm-bindgen` JS/TS API for browser use |
+| Serialization | `to_bytes` / `from_bytes` for index persistence |
+
+---
 
 ## Quick Start
 
-### Native (CPU only)
+### Native — CPU only
 
 ```bash
-cargo build
-cargo test
+cargo add webgpu-fmidx
 ```
-
-### Native (GPU — Vulkan / Metal / DX12)
-
-```bash
-cargo build --features gpu
-cargo test --features gpu
-```
-
-### WebAssembly (browser WebGPU)
-
-Prerequisites: `wasm-bindgen-cli`, `node`, `npm`.
-
-```bash
-# Install wasm-bindgen-cli (once, must match Cargo.toml version)
-cargo install wasm-bindgen-cli --version 0.2.117
-
-# 1. Build the WASM package
-cargo build --target wasm32-unknown-unknown --features wasm --release
-wasm-bindgen target/wasm32-unknown-unknown/release/webgpu_fmidx.wasm \
-  --target web --out-dir web/pkg
-
-# 2. Install JS dependencies
-cd web && npm install
-
-# 3. Start dev server
-npm run dev
-```
-
-Or use the convenience script: `cd web && npm run build-wasm`.
-
-Open `http://localhost:5173` in a WebGPU-capable browser (Chrome 113+, Edge 113+).
-
-## Rust API
 
 ```rust
 use webgpu_fmidx::{DnaSequence, FmIndex, FmIndexConfig};
 
-let sequences = vec![
-    DnaSequence::from_str("ACGTACGTACGT")?,
-    DnaSequence::from_str("TGCATGCATGCA")?,
-];
-
-// CPU build (sync)
+let seq = DnaSequence::from_str("ACGTACGT")?;
 let config = FmIndexConfig::default();
-let index = FmIndex::build_cpu(&sequences, &config)?;
+let index = FmIndex::build_cpu(&[seq], &config)?;
 
-// GPU build (async, requires `gpu` feature)
-#[cfg(feature = "gpu")]
-let index = FmIndex::build(&sequences, &config).await?;
-
-// Count occurrences
-let count = index.count(&[1, 2, 3, 4]); // encoded ACGT
-
-// Locate positions
-let positions = index.locate(&[1, 2, 3, 4]);
-
-// Serialize / deserialize
-let bytes = index.to_bytes()?;
-let restored = FmIndex::from_bytes(&bytes)?;
+let pattern = webgpu_fmidx::alphabet::encode_str("ACGT")?;
+assert_eq!(index.count(&pattern), 2);
+let positions = index.locate(&pattern); // Vec<(seq_id, offset)>
 ```
 
-## JavaScript / TypeScript API
+### Native — GPU (Vulkan / Metal / DX12)
+
+```bash
+cargo add webgpu-fmidx --features gpu
+```
+
+```rust
+use webgpu_fmidx::{DnaSequence, FmIndex, FmIndexConfig};
+use webgpu_fmidx::gpu::locate_batch_gpu;
+
+let seqs = vec![DnaSequence::from_str("ACGTACGT")?];
+let config = FmIndexConfig::default();
+
+// Async GPU build
+let index = FmIndex::build(&seqs, &config).await?;
+
+// GPU batch locate (IUPAC-aware)
+let ctx = webgpu_fmidx::gpu::GpuContext::new().await?;
+let queries: Vec<&[u8]> = vec![&encoded_pattern];
+let hits = locate_batch_gpu(&ctx, &index, &queries).await?;
+// hits[i] = Vec<(seq_id, offset_within_seq)>
+```
+
+### MEM / SMEM finding
+
+```rust
+use webgpu_fmidx::{DnaSequence, BidirFmIndex, FmIndexConfig};
+
+let refs = vec![DnaSequence::from_str("ACGTACGTACGT")?];
+let config = FmIndexConfig::default();
+let bidir = BidirFmIndex::build_cpu(&refs, &config)?;
+
+let query = webgpu_fmidx::alphabet::encode_str("ACGT")?;
+
+// CPU — returns Vec<Mem>
+let smems = bidir.find_smems(&query, /*min_len=*/18, /*locate=*/true);
+let mems  = bidir.find_mems(&query,  /*min_len=*/18, /*locate=*/true);
+
+// GPU batch — returns Vec<Vec<MemHit>>
+#[cfg(feature = "gpu")]
+{
+    use webgpu_fmidx::gpu::GpuContext;
+    let ctx = GpuContext::new().await?;
+    let smem_hits = bidir.find_smems_gpu(&ctx, &[query.as_slice()], 18).await?;
+    let mem_hits  = bidir.find_mems_gpu(&ctx,  &[query.as_slice()], 18).await?;
+    // smem_hits[query_i] = Vec<MemHit> with resolved reference positions
+}
+```
+
+### WebAssembly (browser WebGPU)
+
+```bash
+cargo add webgpu-fmidx --features wasm
+wasm-pack build --target web --features wasm
+```
 
 ```typescript
 import init, { FmIndexBuilder, FmIndexHandle } from "./pkg/webgpu_fmidx.js";
 
-await init(); // load WASM
+await init();
 
-const builder = new FmIndexBuilder(32); // sa_sample_rate = 32
+const builder = new FmIndexBuilder(/*sa_sample_rate=*/32);
 builder.add_fasta(`>seq1\nACGTACGT\n>seq2\nTGCATGCA`);
 
-// GPU build (async)
-const handle = await builder.build_gpu();
-// or CPU: const handle = builder.build_cpu();
+const handle = await builder.build_gpu();    // or builder.build_cpu()
 
-console.log(handle.count("ACGT"));       // number of occurrences
-console.log(handle.locate("ACGT"));      // Uint32Array of positions
-console.log(handle.text_len());          // total text length
-console.log(handle.num_sequences());     // number of indexed sequences
+console.log(handle.count("ACGT"));           // number of occurrences
+console.log(handle.locate("ACGT"));          // Uint32Array of positions
+console.log(handle.text_len());              // total text length
+console.log(handle.num_sequences());         // number of indexed sequences
 
-// Serialize
-const bytes = handle.to_bytes();         // Uint8Array
+const bytes = handle.to_bytes();             // Uint8Array — serialize
 const restored = FmIndexHandle.from_bytes(bytes);
 ```
 
-## Feature Flags
+---
 
-| Flag   | Enables                              | Implies  |
-|--------|--------------------------------------|----------|
-| `cpu`  | CPU implementations (default)        | —        |
-| `gpu`  | GPU implementations via `wgpu`       | —        |
-| `wasm` | WASM bindings via `wasm-bindgen`     | `gpu`    |
+## Rust API
+
+### `FmIndex`
+
+```rust
+// Build
+FmIndex::build_cpu(sequences, config)?          // sync, CPU
+FmIndex::build(sequences, config).await?        // async, GPU (feature = "gpu")
+
+// Query
+index.count(pattern)                            // u32 — number of occurrences
+index.locate(pattern)                           // Vec<(seq_id, offset)>
+index.text_len()                                // u32
+index.num_sequences()                           // u32
+
+// Persistence
+index.to_bytes()?                               // Vec<u8>
+FmIndex::from_bytes(bytes)?                     // FmIndex
+```
+
+### `BidirFmIndex`
+
+```rust
+BidirFmIndex::build_cpu(sequences, config)?
+
+// CPU MEM finding — IUPAC-aware; N matches any of A/C/G/T
+bidir.find_smems(query, min_len, locate)        // Vec<Mem>
+bidir.find_mems(query, min_len, locate)         // Vec<Mem>
+
+// GPU MEM finding (feature = "gpu")
+bidir.find_smems_gpu(&ctx, queries, min_len).await?  // Vec<Vec<MemHit>>
+bidir.find_mems_gpu(&ctx,  queries, min_len).await?  // Vec<Vec<MemHit>>
+```
+
+### `Mem` / `MemHit`
+
+```rust
+pub struct Mem {
+    pub query_start: usize,       // 0-based inclusive
+    pub query_end:   usize,       // 0-based exclusive
+    pub match_count: u32,         // SA interval size
+    pub positions:   Vec<(u32, u32)>, // (seq_id, offset) — empty when locate=false
+}
+
+pub struct MemHit {               // GPU result type
+    pub query_start: u32,
+    pub query_end:   u32,
+    pub match_count: u32,
+    pub positions:   Vec<(u32, u32)>, // (ref_id, offset_within_ref)
+    pub truncated:   bool,        // true if positions capped at max_hits_per_mem
+}
+```
+
+---
+
+## IUPAC Ambiguity
+
+Queries and references may contain any of the 16 IUPAC symbols:
+
+| Code | Bases | Code | Bases |
+|------|-------|------|-------|
+| A | A | N | A C G T |
+| C | C | R | A G |
+| G | G | Y | C T |
+| T | T | S | G C |
+| | | W | A T |
+| | | K | G T |
+| | | M | A C |
+| | | B | C G T |
+| | | D | A G T |
+| | | H | A C T |
+| | | V | A C G |
+
+Two symbols match when their base sets share at least one nucleotide. Both the CPU (`compatible_symbols`) and GPU (WGSL `COMPAT` table) paths use the same lookup, and parity tests enforce they stay in sync.
+
+---
 
 ## Architecture
 
 ```
 Construction pipeline
-  ┌─────────────────────────────────┐
-  │  Input: [DnaSequence]           │
-  │  → concatenate + add sentinels  │
-  │  → GPU: build suffix array      │  radix_sort.wgsl + sa_*.wgsl
-  │  → GPU: derive BWT              │  bwt_gather.wgsl
-  │  → CPU: compute C array         │  (trivial histogram, 5 values)
-  │  → GPU: build Occ table         │  occ_scan.wgsl + prefix_sum.wgsl
-  │  → sample SA at rate k          │
-  └─────────────────────────────────┘
+  ┌───────────────────────────────────────┐
+  │  Input: [DnaSequence]                 │
+  │  → concatenate + add sentinels        │
+  │  → GPU: build suffix array            │  radix_sort.wgsl + sa_*.wgsl
+  │  → GPU: derive BWT                    │  bwt_gather.wgsl
+  │  → CPU: compute C array               │  (trivial histogram, 16 values)
+  │  → GPU: build Occ table               │  occ_scan.wgsl + prefix_sum.wgsl
+  │  → sample SA at rate k                │
+  └───────────────────────────────────────┘
 
-Query pipeline (CPU, O(m) count / O(m + occ·k) locate)
-  backward_search → SA interval [lo, hi)
-  locate: LF-walk from each interval position to nearest SA sample
+CPU query pipeline  (O(m) count / O(m + occ·k) locate)
+  backward_search (IUPAC multi-interval) → SA interval set [lo, hi)
+  locate: LF-walk from each position to nearest SA sample
+
+GPU locate pipeline  (2 passes)
+  Pass 1  locate_search.wgsl   — backward search, IUPAC multi-interval → (match_count, intervals)
+  Pass 2  locate_resolve.wgsl  — LF-walk to sampled SA position → (seq_id, offset)
+
+GPU MEM/SMEM pipeline  (3 passes)
+  Pass 1  mem_find.wgsl        — bidirectional extension, IUPAC multi-interval → raw SA intervals
+  Pass 2  mem_resolve.wgsl     — resolve each SA position via LF-walk
+  Pass 3  ref_map.wgsl         — binary-search reference boundaries → (ref_id, offset)
 ```
+
+### Key modules
+
+| Path | Role |
+|------|------|
+| `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic |
+| `src/alphabet.rs` | IUPAC encoding, `compatible_symbols`, `DnaSequence` |
+| `src/gpu/` | WebGPU pipeline setup, buffer management, `GpuContext` |
+| `src/gpu/locate.rs` | `locate_batch_gpu` — 2-pass GPU locate |
+| `src/gpu/mem_find.rs` | `find_mems_batch_gpu` / `find_mem_intervals_batch_gpu` |
+| `src/gpu/mem_resolve.rs` | SA position resolve pass |
+| `src/gpu/ref_map.rs` | Reference boundary mapping pass |
+| `src/suffix_array/`, `src/bwt/`, `src/occ/` | CPU and GPU implementations |
+| `src/wasm/` | `wasm-bindgen` JS/TS bindings |
+| `shaders/` | WGSL compute shaders |
+
+### `GpuContext` caching
+
+`src/gpu/context_cache.rs` holds a process-wide `OnceLock<GpuContext>`. GPU functions accept an optional pre-initialized context; pass `None` on first call and reuse thereafter to avoid adapter/device init overhead in benchmarks and tests.
+
+---
+
+## Feature Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `cpu` | yes | CPU construction and queries |
+| `gpu` | no | WebGPU-accelerated construction and queries via `wgpu` |
+| `wasm` | no | `wasm-bindgen` JS/TS bindings |
+
+---
 
 ## Browser Compatibility
 
-| Browser       | Version | WebGPU | Notes                         |
-|---------------|---------|--------|-------------------------------|
-| Chrome        | 113+    | Yes    | Stable WebGPU support         |
-| Edge          | 113+    | Yes    | Same as Chrome                |
-| Firefox       | —       | Flag   | Behind `dom.webgpu.enabled`   |
-| Safari        | 18+     | Yes    | macOS / iOS 18+               |
+Requires a browser with **WebGPU** support:
 
-The CPU path (`builder.build_cpu()`) works in all browsers that support WASM.
+| Browser | Support |
+|---------|---------|
+| Chrome 113+ | Stable |
+| Edge 113+ | Stable |
+| Safari 18+ | Stable |
+| Firefox | Behind flag |
+
+---
 
 ## Benchmarks
 
-Run with Criterion:
-
 ```bash
-cargo bench --features gpu
+cargo bench --features gpu --bench locate_bench
+cargo bench --features gpu --bench mem_bench
+cargo bench --features gpu --bench mem_positions_bench
 ```
 
-Benchmarks cover:
-- `build_cpu` / `build_gpu` at 1 K, 10 K, 100 K, 1 M characters
-- `cpu_vs_gpu` — direct comparison at same sizes
-- `query_count` / `query_locate` — query throughput at varying pattern lengths
+---
 
 ## License
 

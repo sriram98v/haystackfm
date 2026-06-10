@@ -36,7 +36,16 @@ struct ResolveParams {
     _pad2: [u32; 2],
 }
 
-/// Run GPU-accelerated batch locate using a pre-initialized `GpuContext`.
+/// GPU-accelerated batch locate (2-pass pipeline).
+///
+/// **Pass 1** (`locate_search.wgsl`): each thread runs backward search over its
+/// query. IUPAC ambiguity codes expand into up to `MAX_IVS` parallel SA intervals
+/// via the WGSL `COMPAT` table. Emits a flat interval buffer and per-query match
+/// counts/offsets.
+///
+/// **Pass 2** (`locate_resolve.wgsl`): each thread walks one match position via
+/// LF-mapping to the nearest sampled SA entry, then maps the text offset to a
+/// reference sequence and within-sequence position.
 ///
 /// Returns one `Vec<(seq_idx, pos_in_seq)>` per query.
 /// `seq_idx` is a 0-based index into the original sequence list.

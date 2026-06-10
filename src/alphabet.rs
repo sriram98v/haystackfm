@@ -1,3 +1,18 @@
+//! IUPAC nucleotide alphabet encoding and DNA sequence types.
+//!
+//! The alphabet has 16 symbols (codes 0–15):
+//!
+//! | Code | Symbol | Bases |
+//! |------|--------|-------|
+//! | 0 | `$` | sentinel |
+//! | 1–4 | A C G T | exact bases |
+//! | 5 | N | A C G T (any) |
+//! | 6–15 | R Y S W K M B D H V | degenerate IUPAC |
+//!
+//! [`compatible_symbols`] returns the set of codes whose base sets overlap with
+//! a given code. Both the CPU query path and the GPU WGSL shaders use this table;
+//! the WGSL `COMPAT` array is parity-tested against it in CI.
+
 use crate::error::FmIndexError;
 
 /// Alphabet size: $, A, C, G, T, N, R, Y, S, W, K, M, B, D, H, V
