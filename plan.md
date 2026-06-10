@@ -112,7 +112,7 @@ Status: [x] complete
 
 **Files:** `src/gpu/locate.rs` (tests), `src/gpu/mem_find.rs` (tests)
 
-Status: [ ] pending
+Status: [x] complete
 
 ---
 
