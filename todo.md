@@ -1,0 +1,2 @@
+- [ ] Bag identical sequences: don't let two identical sequences be repeated.
+- [ ] How do we handle references that are substrings of other references.

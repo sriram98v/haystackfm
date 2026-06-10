@@ -10,6 +10,7 @@
 const BLOCK_SIZE: u32 = 64u;
 const ALPHA: u32 = 16u;  // full IUPAC: $=0,A=1,C=2,G=3,T=4,N=5,R=6,Y=7,S=8,W=9,K=10,M=11,B=12,D=13,H=14,V=15
 const U32_MAX: u32 = 0xFFFFFFFFu;
+const MAX_IVS: u32 = 16u;
 
 // 24 × u32 = 96 bytes (multiple of 16).
 struct Params {
@@ -32,7 +33,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read>       bitvectors:    array<u32>; // [num_blocks * ALPHA * 2]
 @group(0) @binding(3) var<storage, read>       sa_samples:    array<u32>; // U32_MAX = unsampled
 @group(0) @binding(4) var<storage, read>       seq_bounds:    array<u32>; // cumulative seq end positions
-@group(0) @binding(5) var<storage, read>       intervals:     array<u32>; // [num_queries * 2]
+@group(0) @binding(5) var<storage, read>       intervals:     array<u32>; // [num_queries * MAX_IVS * 2]
 @group(0) @binding(6) var<storage, read>       match_offsets: array<u32>; // [num_queries + 1]
 @group(0) @binding(7) var<storage, read_write> results:       array<u32>; // [total_matches * 2]
 @group(0) @binding(8) var<uniform>             params:         Params;
@@ -115,9 +116,23 @@ fn locate_resolve(
     }
     let qid = blo - 1u;
 
-    let sa_lo   = intervals[qid * 2u];
-    let k       = tid - match_offsets[qid];
-    var bwt_pos = sa_lo + k;
+    // Scan the per-query interval block to map local offset → SA position.
+    // intervals layout: [qid * MAX_IVS * 2 + i*2] = lo_i, [+i*2+1] = hi_i
+    // Zero-padded slots (lo==hi==0) contribute size 0 and are skipped.
+    let iv_base = qid * MAX_IVS * 2u;
+    var remaining = tid - match_offsets[qid];
+    var bwt_pos = 0u;
+    for (var ii = 0u; ii < MAX_IVS; ii++) {
+        let iv_lo = intervals[iv_base + ii * 2u];
+        let iv_hi = intervals[iv_base + ii * 2u + 1u];
+        if iv_hi <= iv_lo { continue; }
+        let size = iv_hi - iv_lo;
+        if remaining < size {
+            bwt_pos = iv_lo + remaining;
+            break;
+        }
+        remaining -= size;
+    }
 
     // Walk LF-mapping until a sampled SA position is found.
     var steps = 0u;

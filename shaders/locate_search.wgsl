@@ -6,6 +6,50 @@
 
 const BLOCK_SIZE: u32 = 64u;
 const ALPHA: u32 = 16u;  // full IUPAC: $=0,A=1,C=2,G=3,T=4,N=5,R=6,Y=7,S=8,W=9,K=10,M=11,B=12,D=13,H=14,V=15
+const MAX_IVS: u32 = 16u;
+
+// IUPAC compatible-symbol table (mirrors alphabet::compatible_symbols in Rust).
+// COMPAT[code * 16 + k] = k-th symbol compatible with `code`; 0 = padding.
+// COMPAT_LEN[code]      = number of valid entries for `code`.
+// Two codes are compatible when their IUPAC base sets share ≥1 nucleotide.
+const COMPAT_LEN: array<u32, 16> = array<u32, 16>(
+     0u,  8u,  8u,  8u,  8u, 15u, 12u, 12u,
+    12u, 12u, 12u, 12u, 14u, 14u, 14u, 14u,
+);
+const COMPAT: array<u32, 256> = array<u32, 256>(
+    // code  0 ($): no compatible symbols
+     0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,
+    // code  1 (A): A N R W M D H V
+     1u,  5u,  6u,  9u, 11u, 13u, 14u, 15u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,
+    // code  2 (C): C N Y S M B H V
+     2u,  5u,  7u,  8u, 11u, 12u, 14u, 15u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,
+    // code  3 (G): G N R S K B D V
+     3u,  5u,  6u,  8u, 10u, 12u, 13u, 15u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,
+    // code  4 (T): T N Y W K B D H
+     4u,  5u,  7u,  9u, 10u, 12u, 13u, 14u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,  0u,
+    // code  5 (N): A C G T N R Y S W K M B D H V
+     1u,  2u,  3u,  4u,  5u,  6u,  7u,  8u,  9u, 10u, 11u, 12u, 13u, 14u, 15u,  0u,
+    // code  6 (R=A|G): A G N R S W K M B D H V
+     1u,  3u,  5u,  6u,  8u,  9u, 10u, 11u, 12u, 13u, 14u, 15u,  0u,  0u,  0u,  0u,
+    // code  7 (Y=C|T): C T N Y S W K M B D H V
+     2u,  4u,  5u,  7u,  8u,  9u, 10u, 11u, 12u, 13u, 14u, 15u,  0u,  0u,  0u,  0u,
+    // code  8 (S=G|C): C G N R Y S K M B D H V
+     2u,  3u,  5u,  6u,  7u,  8u, 10u, 11u, 12u, 13u, 14u, 15u,  0u,  0u,  0u,  0u,
+    // code  9 (W=A|T): A T N R Y W K M B D H V
+     1u,  4u,  5u,  6u,  7u,  9u, 10u, 11u, 12u, 13u, 14u, 15u,  0u,  0u,  0u,  0u,
+    // code 10 (K=G|T): G T N R Y S W K B D H V
+     3u,  4u,  5u,  6u,  7u,  8u,  9u, 10u, 12u, 13u, 14u, 15u,  0u,  0u,  0u,  0u,
+    // code 11 (M=A|C): A C N R Y S W M B D H V
+     1u,  2u,  5u,  6u,  7u,  8u,  9u, 11u, 12u, 13u, 14u, 15u,  0u,  0u,  0u,  0u,
+    // code 12 (B=C|G|T): C G T N R Y S W K M B D H V
+     2u,  3u,  4u,  5u,  6u,  7u,  8u,  9u, 10u, 11u, 12u, 13u, 14u, 15u,  0u,  0u,
+    // code 13 (D=A|G|T): A G T N R Y S W K M B D H V
+     1u,  3u,  4u,  5u,  6u,  7u,  8u,  9u, 10u, 11u, 12u, 13u, 14u, 15u,  0u,  0u,
+    // code 14 (H=A|C|T): A C T N R Y S W K M B D H V
+     1u,  2u,  4u,  5u,  6u,  7u,  8u,  9u, 10u, 11u, 12u, 13u, 14u, 15u,  0u,  0u,
+    // code 15 (V=A|C|G): A C G N R Y S W K M B D H V
+     1u,  2u,  3u,  5u,  6u,  7u,  8u,  9u, 10u, 11u, 12u, 13u, 14u, 15u,  0u,  0u,
+);
 
 // c_array values are embedded in the uniform to stay within the
 // max_storage_buffers_per_shader_stage=8 limit.
@@ -25,7 +69,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read>       query_offsets: array<u32>; // len = num_queries + 1
 @group(0) @binding(2) var<storage, read>       checkpoints:   array<u32>; // [num_blocks * ALPHA]
 @group(0) @binding(3) var<storage, read>       bitvectors:    array<u32>; // [num_blocks * ALPHA * 2]
-@group(0) @binding(4) var<storage, read_write> intervals:     array<u32>; // [num_queries * 2]
+@group(0) @binding(4) var<storage, read_write> intervals:     array<u32>; // [num_queries * MAX_IVS * 2]
 @group(0) @binding(5) var<uniform>             params:         Params;
 
 fn c_val(c: u32) -> u32 {
@@ -91,31 +135,99 @@ fn locate_search(
     let pat_end   = query_offsets[qid + 1u];
     let pat_len   = pat_end - pat_start;
 
+    let base = qid * MAX_IVS * 2u;
+
     if pat_len == 0u {
-        intervals[qid * 2u]      = 0u;
-        intervals[qid * 2u + 1u] = params.text_len;
+        intervals[base]      = 0u;
+        intervals[base + 1u] = params.text_len;
+        for (var zi = 1u; zi < MAX_IVS; zi++) {
+            intervals[base + zi * 2u]      = 0u;
+            intervals[base + zi * 2u + 1u] = 0u;
+        }
         return;
     }
 
-    var lo = 0u;
-    var hi = params.text_len;
+    var ivs: array<vec2u, 16>;
+    var n_ivs: u32 = 1u;
+    ivs[0] = vec2u(0u, params.text_len);
 
     var k = pat_len;
     loop {
         if k == 0u { break; }
-        if lo >= hi { break; }
+        if n_ivs == 0u { break; }
         k -= 1u;
         let c = queries_flat[pat_start + k];
         if c >= ALPHA {
-            lo = 0u;
-            hi = 0u;
+            n_ivs = 0u;
             break;
         }
-        let cv = c_val(c);
-        lo = cv + occ_rank(c, lo);
-        hi = cv + occ_rank(c, hi);
+
+        // Expand: each active interval × each compatible symbol → child intervals
+        var scratch: array<vec2u, 16>;
+        var ns: u32 = 0u;
+        let clen = COMPAT_LEN[c];
+        for (var ii = 0u; ii < n_ivs; ii++) {
+            let iv_lo = ivs[ii].x;
+            let iv_hi = ivs[ii].y;
+            for (var ki = 0u; ki < clen; ki++) {
+                let r   = COMPAT[c * 16u + ki];
+                let cv  = c_val(r);
+                let nlo = cv + occ_rank(r, iv_lo);
+                let nhi = cv + occ_rank(r, iv_hi);
+                if nlo < nhi && ns < MAX_IVS {
+                    scratch[ns] = vec2u(nlo, nhi);
+                    ns += 1u;
+                }
+            }
+        }
+
+        if ns == 0u {
+            n_ivs = 0u;
+            break;
+        }
+
+        // Insertion sort by lo
+        for (var i = 1u; i < ns; i++) {
+            let key = scratch[i];
+            var j   = i;
+            loop {
+                if j == 0u { break; }
+                if scratch[j - 1u].x <= key.x { break; }
+                scratch[j] = scratch[j - 1u];
+                j -= 1u;
+            }
+            scratch[j] = key;
+        }
+
+        // Coalesce overlapping / adjacent intervals
+        var merged: array<vec2u, 16>;
+        var nm: u32 = 1u;
+        merged[0] = scratch[0];
+        for (var i = 1u; i < ns; i++) {
+            if scratch[i].x <= merged[nm - 1u].y {
+                if scratch[i].y > merged[nm - 1u].y {
+                    merged[nm - 1u].y = scratch[i].y;
+                }
+            } else {
+                merged[nm] = scratch[i];
+                nm += 1u;
+            }
+        }
+
+        n_ivs = nm;
+        for (var i = 0u; i < nm; i++) {
+            ivs[i] = merged[i];
+        }
     }
 
-    intervals[qid * 2u]      = lo;
-    intervals[qid * 2u + 1u] = hi;
+    // Write MAX_IVS slots; zero-pad unused
+    for (var i = 0u; i < MAX_IVS; i++) {
+        if i < n_ivs {
+            intervals[base + i * 2u]      = ivs[i].x;
+            intervals[base + i * 2u + 1u] = ivs[i].y;
+        } else {
+            intervals[base + i * 2u]      = 0u;
+            intervals[base + i * 2u + 1u] = 0u;
+        }
+    }
 }

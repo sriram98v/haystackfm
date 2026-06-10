@@ -359,4 +359,78 @@ mod tests {
         assert_eq!(text, vec![A, C, G, SENTINEL, T, T, SENTINEL]);
         assert_eq!(cum, vec![4, 7]);
     }
+
+    // Verifies that the WGSL COMPAT / COMPAT_LEN constants in
+    // shaders/locate_search.wgsl and shaders/mem_find.wgsl exactly match
+    // the compatible_symbols function above.  If this test fails, update the
+    // shader constants to match.
+    #[test]
+    fn wgsl_compat_table_matches_compatible_symbols() {
+        // Expected COMPAT_LEN (one entry per code 0..16)
+        let expected_len: [u8; 16] = [0, 8, 8, 8, 8, 15, 12, 12, 12, 12, 12, 12, 14, 14, 14, 14];
+
+        // Expected COMPAT flat table (code * 16 + k → symbol, 0 = padding)
+        #[rustfmt::skip]
+        let expected_compat: [[u8; 16]; 16] = [
+            // code  0 ($)
+            [0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
+            // code  1 (A): A N R W M D H V
+            [1,  5,  6,  9, 11, 13, 14, 15,  0,  0,  0,  0,  0,  0,  0,  0],
+            // code  2 (C): C N Y S M B H V
+            [2,  5,  7,  8, 11, 12, 14, 15,  0,  0,  0,  0,  0,  0,  0,  0],
+            // code  3 (G): G N R S K B D V
+            [3,  5,  6,  8, 10, 12, 13, 15,  0,  0,  0,  0,  0,  0,  0,  0],
+            // code  4 (T): T N Y W K B D H
+            [4,  5,  7,  9, 10, 12, 13, 14,  0,  0,  0,  0,  0,  0,  0,  0],
+            // code  5 (N): all 15 non-sentinel codes
+            [1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0],
+            // code  6 (R=A|G)
+            [1,  3,  5,  6,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0],
+            // code  7 (Y=C|T)
+            [2,  4,  5,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0],
+            // code  8 (S=G|C)
+            [2,  3,  5,  6,  7,  8, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0],
+            // code  9 (W=A|T)
+            [1,  4,  5,  6,  7,  9, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0],
+            // code 10 (K=G|T)
+            [3,  4,  5,  6,  7,  8,  9, 10, 12, 13, 14, 15,  0,  0,  0,  0],
+            // code 11 (M=A|C)
+            [1,  2,  5,  6,  7,  8,  9, 11, 12, 13, 14, 15,  0,  0,  0,  0],
+            // code 12 (B=C|G|T)
+            [2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0],
+            // code 13 (D=A|G|T)
+            [1,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0],
+            // code 14 (H=A|C|T)
+            [1,  2,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0],
+            // code 15 (V=A|C|G)
+            [1,  2,  3,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0],
+        ];
+
+        for code in 0u8..16 {
+            let syms = compatible_symbols(code);
+            let len = syms.len() as u8;
+            assert_eq!(
+                len,
+                expected_len[code as usize],
+                "COMPAT_LEN mismatch for code {code}"
+            );
+            // Check each compatible symbol matches the expected slot
+            for (k, &sym) in syms.iter().enumerate() {
+                assert_eq!(
+                    sym,
+                    expected_compat[code as usize][k],
+                    "COMPAT mismatch for code {code} slot {k}: got {sym}, expected {}",
+                    expected_compat[code as usize][k]
+                );
+            }
+            // Padding slots must be 0
+            for k in syms.len()..16 {
+                assert_eq!(
+                    expected_compat[code as usize][k],
+                    0,
+                    "COMPAT padding non-zero for code {code} slot {k}"
+                );
+            }
+        }
+    }
 }

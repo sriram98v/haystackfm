@@ -37,15 +37,16 @@ struct MemFindParams {
 /// Private core: runs the two GPU MEM-finding passes.
 ///
 /// Returns `None` when no MEMs were found (all counts zero).
-/// Otherwise returns `(results_flat, mem_counts, mem_offsets)` where
-/// `results_flat` has stride 4: `[query_start, query_end, fwd_lo, fwd_hi]` per MEM.
+/// Otherwise returns `(mems_flat, iv_flat, mem_counts, mem_offsets)` where
+/// `mems_flat` has stride 4: `[query_start, query_end, iv_offset, n_ivs]` per MEM,
+/// `iv_flat` has stride 2: `[fwd_lo, fwd_hi]` per interval.
 async fn run_mem_find_gpu(
     ctx: &GpuContext,
     bidir: &BidirFmIndex,
     queries: &[&[u8]],
     min_len: usize,
     mode: u32,
-) -> Result<Option<(Vec<u32>, Vec<u32>, Vec<u32>)>, FmIndexError> {
+) -> Result<Option<(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>)>, FmIndexError> {
     if queries.is_empty() {
         return Ok(None);
     }
@@ -107,10 +108,11 @@ async fn run_mem_find_gpu(
     let qflat_buf = ctx.create_buffer_init("mem_qflat", &queries_flat);
     let qoff_buf = ctx.create_buffer_init("mem_qoff", &query_offsets);
 
-    // pass_buf_a: pass 1 output (mem_counts), pass 2 input (mem_offsets)
-    let pass_buf_a = ctx.create_buffer_empty("mem_pass_a", n_queries + 1);
-    // dummy binding 5 for pass 1 (mems_out not written in count pass)
+    // pass_buf_a: pass 1 writes [mem_count, iv_count] per query (stride 2)
+    let pass_buf_a = ctx.create_buffer_empty("mem_pass_a", n_queries * 2);
+    // dummy bindings 5 and 6 for pass 1 (output buffers not written in count pass)
     let dummy_buf = ctx.create_buffer_empty("mem_dummy", 1);
+    let dummy_buf2 = ctx.create_buffer_empty("mem_dummy2", 1);
 
     // ── Pass 1: count MEMs per query ─────────────────────────────────────────
     let count_params = MemFindParams {
@@ -158,6 +160,10 @@ async fn run_mem_find_gpu(
             },
             wgpu::BindGroupEntry {
                 binding: 6,
+                resource: dummy_buf2.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
                 resource: count_params_buf.as_entire_binding(),
             },
         ],
@@ -170,24 +176,42 @@ async fn run_mem_find_gpu(
         ((n_queries + wg_size - 1) / wg_size, 1, 1),
     );
 
-    let mem_counts = ctx.download_buffer(&pass_buf_a, n_queries).await;
+    // Download stride-2 pass1 data: [mem_count, iv_count] per query.
+    let pass_data = ctx.download_buffer(&pass_buf_a, n_queries * 2).await;
+    let mem_counts: Vec<u32> = (0..n_queries as usize).map(|q| pass_data[q * 2]).collect();
+    let iv_counts: Vec<u32> = (0..n_queries as usize).map(|q| pass_data[q * 2 + 1]).collect();
 
-    // Compute total MEMs and exclusive prefix sum → mem_offsets.
     let total_mems: u32 = mem_counts.iter().sum();
     if total_mems == 0 {
         return Ok(None);
     }
 
+    // Exclusive prefix sums for MEM and interval offsets.
     let mut mem_offsets: Vec<u32> = Vec::with_capacity(queries.len() + 1);
     mem_offsets.push(0);
     for &c in &mem_counts {
         let prev = *mem_offsets.last().unwrap();
         mem_offsets.push(prev + c);
     }
+    let total_ivs: u32 = iv_counts.iter().sum();
+    let mut iv_offsets: Vec<u32> = Vec::with_capacity(queries.len() + 1);
+    iv_offsets.push(0);
+    for &c in &iv_counts {
+        let prev = *iv_offsets.last().unwrap();
+        iv_offsets.push(prev + c);
+    }
+
+    // Interleave [mem_offset, iv_offset] per query for pass 2.
+    let mut offsets_data: Vec<u32> = Vec::with_capacity(n_queries as usize * 2);
+    for q in 0..n_queries as usize {
+        offsets_data.push(mem_offsets[q]);
+        offsets_data.push(iv_offsets[q]);
+    }
 
     // ── Pass 2: write MEM results ─────────────────────────────────────────────
-    let offsets_buf = ctx.create_buffer_init("mem_offsets", &mem_offsets);
+    let offsets_buf = ctx.create_buffer_init("mem_offsets", &offsets_data);
     let mems_out_buf = ctx.create_buffer_empty("mem_results", total_mems * 4);
+    let iv_out_buf = ctx.create_buffer_empty("mem_ivs", total_ivs.max(1) * 2);
 
     let write_params = MemFindParams {
         total_mems,
@@ -226,6 +250,10 @@ async fn run_mem_find_gpu(
             },
             wgpu::BindGroupEntry {
                 binding: 6,
+                resource: iv_out_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
                 resource: write_params_buf.as_entire_binding(),
             },
         ],
@@ -238,7 +266,8 @@ async fn run_mem_find_gpu(
     );
 
     let results_flat = ctx.download_buffer(&mems_out_buf, total_mems * 4).await;
-    Ok(Some((results_flat, mem_counts, mem_offsets)))
+    let iv_flat = ctx.download_buffer(&iv_out_buf, total_ivs.max(1) * 2).await;
+    Ok(Some((results_flat, iv_flat, mem_counts, mem_offsets)))
 }
 
 /// GPU-accelerated batch MEM/SMEM finding.
@@ -253,7 +282,7 @@ pub async fn find_mems_batch_gpu(
     mode: u32,
 ) -> Result<Vec<Vec<(u32, u32, u32)>>, FmIndexError> {
     let n = queries.len();
-    let Some((flat, counts, offsets)) =
+    let Some((flat, iv_flat, counts, offsets)) =
         run_mem_find_gpu(ctx, bidir, queries, min_len, mode).await?
     else {
         return Ok(vec![vec![]; n]);
@@ -264,9 +293,13 @@ pub async fn find_mems_batch_gpu(
         let mut hits = Vec::with_capacity(count as usize);
         for k in 0..count as usize {
             let base = (off + k) * 4;
-            // slot: [query_start, query_end, fwd_lo, fwd_hi]
-            // shim: match_count = fwd_hi - fwd_lo
-            hits.push((flat[base], flat[base + 1], flat[base + 3] - flat[base + 2]));
+            // slot: [qs, qe, iv_offset, n_ivs]
+            let iv_off = flat[base + 2] as usize;
+            let n_ivs = flat[base + 3] as usize;
+            let match_count: u32 = (0..n_ivs)
+                .map(|i| iv_flat[(iv_off + i) * 2 + 1] - iv_flat[(iv_off + i) * 2])
+                .sum();
+            hits.push((flat[base], flat[base + 1], match_count));
         }
         output[q] = hits;
     }
@@ -282,7 +315,7 @@ pub(crate) async fn find_mem_intervals_batch_gpu(
     mode: u32,
 ) -> Result<Vec<Vec<RawMemInterval>>, FmIndexError> {
     let n = queries.len();
-    let Some((flat, counts, offsets)) =
+    let Some((flat, iv_flat, counts, offsets)) =
         run_mem_find_gpu(ctx, bidir, queries, min_len, mode).await?
     else {
         return Ok(vec![vec![]; n]);
@@ -290,15 +323,21 @@ pub(crate) async fn find_mem_intervals_batch_gpu(
     let mut output: Vec<Vec<RawMemInterval>> = vec![vec![]; n];
     for (q, &count) in counts.iter().enumerate() {
         let off = offsets[q] as usize;
-        let mut hits = Vec::with_capacity(count as usize);
+        let mut hits = Vec::new();
         for k in 0..count as usize {
             let base = (off + k) * 4;
-            hits.push(RawMemInterval {
-                query_start: flat[base],
-                query_end: flat[base + 1],
-                fwd_lo: flat[base + 2],
-                fwd_hi: flat[base + 3],
-            });
+            let qs = flat[base];
+            let qe = flat[base + 1];
+            let iv_off = flat[base + 2] as usize;
+            let n_ivs = flat[base + 3] as usize;
+            for i in 0..n_ivs {
+                hits.push(RawMemInterval {
+                    query_start: qs,
+                    query_end: qe,
+                    fwd_lo: iv_flat[(iv_off + i) * 2],
+                    fwd_hi: iv_flat[(iv_off + i) * 2 + 1],
+                });
+            }
         }
         output[q] = hits;
     }

@@ -99,7 +99,7 @@ pub async fn locate_batch_gpu(
     let seqb_buf = ctx.create_buffer_init("locate_seqb", &seq_bounds_data);
     let qflat_buf = ctx.create_buffer_init("locate_qflat", &queries_flat);
     let qoff_buf = ctx.create_buffer_init("locate_qoff", &query_offsets);
-    let intervals_buf = ctx.create_buffer_empty("locate_intervals", num_queries * 2);
+    let intervals_buf = ctx.create_buffer_empty("locate_intervals", num_queries * 16 * 2);
 
     // ── Phase A: backward search (one thread per query) ─────────────────────
     let search_params = SearchParams {
@@ -151,14 +151,18 @@ pub async fn locate_batch_gpu(
         ((num_queries + wg_size - 1) / wg_size, 1, 1),
     );
 
-    let intervals = ctx.download_buffer(&intervals_buf, num_queries * 2).await;
+    let intervals = ctx.download_buffer(&intervals_buf, num_queries * 16 * 2).await;
 
-    // Compute per-query match counts
+    // Compute per-query match counts: sum (hi-lo) over up to 16 interval slots.
     let match_counts: Vec<u32> = (0..num_queries as usize)
         .map(|q| {
-            let lo = intervals[q * 2];
-            let hi = intervals[q * 2 + 1];
-            hi.saturating_sub(lo)
+            (0..16usize)
+                .map(|i| {
+                    let lo = intervals[q * 32 + i * 2];
+                    let hi = intervals[q * 32 + i * 2 + 1];
+                    hi.saturating_sub(lo)
+                })
+                .sum()
         })
         .collect();
 
