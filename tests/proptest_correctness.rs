@@ -33,7 +33,14 @@ fn build_index(texts: &[String], sa_sample_rate: usize) -> FmIndex {
         .iter()
         .map(|s| DnaSequence::from_str(s).unwrap())
         .collect();
-    FmIndex::build_cpu(&seqs, &FmIndexConfig { sa_sample_rate: sa_sample_rate as u32, use_gpu: false }).unwrap()
+    FmIndex::build_cpu(
+        &seqs,
+        &FmIndexConfig {
+            sa_sample_rate: sa_sample_rate as u32,
+            use_gpu: false,
+        },
+    )
+    .unwrap()
 }
 
 /// Brute-force positions of `pattern` in `text` (0-based, overlapping).
@@ -250,8 +257,8 @@ fn pattern_not_in_text_returns_zero() {
 
 #[test]
 fn seeded_random_correctness() {
-    use rand::SeedableRng;
     use rand::Rng;
+    use rand::SeedableRng;
 
     let mut rng = rand::rngs::SmallRng::seed_from_u64(0xDEADBEEF_CAFEBABE);
     let bases = b"ACGT";

@@ -425,15 +425,13 @@ mod tests {
             let syms = compatible_symbols(code);
             let len = syms.len() as u8;
             assert_eq!(
-                len,
-                expected_len[code as usize],
+                len, expected_len[code as usize],
                 "COMPAT_LEN mismatch for code {code}"
             );
             // Check each compatible symbol matches the expected slot
             for (k, &sym) in syms.iter().enumerate() {
                 assert_eq!(
-                    sym,
-                    expected_compat[code as usize][k],
+                    sym, expected_compat[code as usize][k],
                     "COMPAT mismatch for code {code} slot {k}: got {sym}, expected {}",
                     expected_compat[code as usize][k]
                 );
@@ -441,8 +439,7 @@ mod tests {
             // Padding slots must be 0
             for k in syms.len()..16 {
                 assert_eq!(
-                    expected_compat[code as usize][k],
-                    0,
+                    expected_compat[code as usize][k], 0,
                     "COMPAT padding non-zero for code {code} slot {k}"
                 );
             }

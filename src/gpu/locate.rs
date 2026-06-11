@@ -160,7 +160,9 @@ pub async fn locate_batch_gpu(
         ((num_queries + wg_size - 1) / wg_size, 1, 1),
     );
 
-    let intervals = ctx.download_buffer(&intervals_buf, num_queries * 16 * 2).await;
+    let intervals = ctx
+        .download_buffer(&intervals_buf, num_queries * 16 * 2)
+        .await;
 
     // Compute per-query match counts: sum (hi-lo) over up to 16 interval slots.
     let match_counts: Vec<u32> = (0..num_queries as usize)

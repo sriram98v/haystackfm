@@ -179,7 +179,9 @@ async fn run_mem_find_gpu(
     // Download stride-2 pass1 data: [mem_count, iv_count] per query.
     let pass_data = ctx.download_buffer(&pass_buf_a, n_queries * 2).await;
     let mem_counts: Vec<u32> = (0..n_queries as usize).map(|q| pass_data[q * 2]).collect();
-    let iv_counts: Vec<u32> = (0..n_queries as usize).map(|q| pass_data[q * 2 + 1]).collect();
+    let iv_counts: Vec<u32> = (0..n_queries as usize)
+        .map(|q| pass_data[q * 2 + 1])
+        .collect();
 
     let total_mems: u32 = mem_counts.iter().sum();
     if total_mems == 0 {

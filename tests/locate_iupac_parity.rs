@@ -33,10 +33,7 @@ mod tests {
     }
 
     /// Returns `None` when no GPU adapter is available (caller should skip).
-    fn try_locate_gpu(
-        idx: &FmIndex,
-        queries: &[Vec<u8>],
-    ) -> Option<Vec<Vec<(String, u32)>>> {
+    fn try_locate_gpu(idx: &FmIndex, queries: &[Vec<u8>]) -> Option<Vec<Vec<(String, u32)>>> {
         let refs: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
         match idx.locate_gpu(&refs).block_on() {
             Ok(r) => Some(r),
@@ -184,8 +181,7 @@ mod tests {
     fn batch_exact_and_iupac() {
         let idx = build(&["ACGTACGT"]);
         let patterns = vec![encode("ACG"), encode("N"), encode("RY"), encode("ACGT")];
-        let cpu_results: Vec<Vec<(String, u32)>> =
-            patterns.iter().map(|p| idx.locate(p)).collect();
+        let cpu_results: Vec<Vec<(String, u32)>> = patterns.iter().map(|p| idx.locate(p)).collect();
         let Some(gpu_results) = try_locate_gpu(&idx, &patterns) else {
             return;
         };
