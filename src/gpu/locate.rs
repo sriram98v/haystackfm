@@ -98,7 +98,7 @@ pub async fn locate_batch_gpu(
     }
 
     let bwt_u32: Vec<u32> = index.bwt.data.iter().map(|&b| b as u32).collect();
-    let sa_samples_data: Vec<u32> = index.sa_samples.samples.clone();
+    let sa_samples_data: Vec<u32> = index.sa_samples.to_flat_vec(index.text_len as usize);
     let seq_bounds_data: Vec<u32> = index.seq_boundaries.clone();
 
     let bwt_buf = ctx.create_buffer_init("locate_bwt", &bwt_u32);

@@ -64,7 +64,7 @@ pub(crate) async fn resolve_mem_intervals_gpu(
     }
 
     // Pre-flight: check SA buffer fits within device limits.
-    let sa_bytes = (index.sa_samples.samples.len() as u64) * 4;
+    let sa_bytes = (index.text_len as u64) * 4;
     let max_binding = ctx.device.limits().max_storage_buffer_binding_size as u64;
     if sa_bytes > max_binding {
         return Err(FmIndexError::GpuError(format!(
@@ -94,11 +94,12 @@ pub(crate) async fn resolve_mem_intervals_gpu(
     }
 
     let bwt_u32: Vec<u32> = index.bwt.data.iter().map(|&b| b as u32).collect();
+    let sa_flat = index.sa_samples.to_flat_vec(index.text_len as usize);
 
     let bwt_buf = ctx.create_buffer_init("mr_bwt", &bwt_u32);
     let chk_buf = ctx.create_buffer_init("mr_chk", &checkpoints_flat);
     let bv_buf = ctx.create_buffer_init("mr_bv", &bitvectors_flat);
-    let sa_buf = ctx.create_buffer_init("mr_sa", &index.sa_samples.samples);
+    let sa_buf = ctx.create_buffer_init("mr_sa", &sa_flat);
     let ivs_buf = ctx.create_buffer_init("mr_ivs", &intervals_flat);
     let offsets_buf = ctx.create_buffer_init("mr_offsets", &position_offsets);
     let pos_out_buf = ctx.create_buffer_empty("mr_pos_out", total_pos);

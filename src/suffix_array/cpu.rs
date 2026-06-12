@@ -1,106 +1,18 @@
-//! CPU implementation of suffix array construction (prefix-doubling algorithm).
+//! CPU implementation of suffix array construction (SACA-K via psacak).
 
 use super::SuffixArray;
 
-/// Build a suffix array using the prefix doubling algorithm.
+/// Build a suffix array using the pSACAK algorithm.
 ///
-/// Time: O(n log^2 n) with counting sort per iteration.
-/// Space: O(n) auxiliary.
+/// Time: O(n), Space: O(n).
+/// Requires `text` to end with a unique minimum sentinel byte (0).
 pub fn build_suffix_array(text: &[u8]) -> SuffixArray {
-    let n = text.len();
-    if n == 0 {
+    if text.is_empty() {
         return SuffixArray { data: vec![] };
     }
-    if n == 1 {
-        return SuffixArray { data: vec![0] };
+    SuffixArray {
+        data: psacak::psacak(text),
     }
-
-    let n32 = n as u32;
-
-    // SA[i] = index of the i-th suffix in sorted order
-    let mut sa: Vec<u32> = (0..n32).collect();
-
-    // rank[i] = rank of suffix starting at position i
-    let mut rank: Vec<u32> = vec![0; n];
-    for i in 0..n {
-        rank[i] = text[i] as u32;
-    }
-
-    let mut new_rank = vec![0u32; n];
-    let mut h: u32 = 1;
-
-    loop {
-        // Sort SA by (rank[sa[i]], rank[(sa[i]+h) % n])
-        // Use radix sort: first by secondary key, then by primary key (stable)
-        let max_rank = *rank.iter().max().unwrap() + 1;
-
-        // Sort by secondary key: rank[(sa[i] + h) % n]
-        sa = counting_sort_by(&sa, max_rank as usize, |&idx| {
-            rank[((idx as u64 + h as u64) % n as u64) as usize]
-        });
-
-        // Sort by primary key: rank[sa[i]] (stable sort preserves secondary ordering)
-        sa = counting_sort_by(&sa, max_rank as usize, |&idx| rank[idx as usize]);
-
-        // Compute new ranks based on sorted order
-        new_rank[sa[0] as usize] = 0;
-        for i in 1..n {
-            let prev = sa[i - 1] as usize;
-            let curr = sa[i] as usize;
-            let prev_secondary = ((prev as u64 + h as u64) % n as u64) as usize;
-            let curr_secondary = ((curr as u64 + h as u64) % n as u64) as usize;
-
-            if rank[curr] == rank[prev] && rank[curr_secondary] == rank[prev_secondary] {
-                new_rank[curr] = new_rank[prev];
-            } else {
-                new_rank[curr] = new_rank[prev] + 1;
-            }
-        }
-
-        std::mem::swap(&mut rank, &mut new_rank);
-
-        // Check if all ranks are unique
-        let max_r = *rank.iter().max().unwrap();
-        if max_r == n32 - 1 {
-            break;
-        }
-
-        h *= 2;
-        if h >= n32 {
-            break;
-        }
-    }
-
-    SuffixArray { data: sa }
-}
-
-/// Stable counting sort of `items` by the key extracted via `key_fn`.
-/// `max_key` is an exclusive upper bound on key values.
-fn counting_sort_by<F>(items: &[u32], max_key: usize, key_fn: F) -> Vec<u32>
-where
-    F: Fn(&u32) -> u32,
-{
-    let n = items.len();
-    let mut counts = vec![0usize; max_key + 1];
-
-    for item in items {
-        counts[key_fn(item) as usize] += 1;
-    }
-
-    // Exclusive prefix sum -> starting positions
-    let mut offsets = vec![0usize; max_key + 1];
-    for i in 1..=max_key {
-        offsets[i] = offsets[i - 1] + counts[i - 1];
-    }
-
-    let mut output = vec![0u32; n];
-    for item in items {
-        let key = key_fn(item) as usize;
-        output[offsets[key]] = *item;
-        offsets[key] += 1;
-    }
-
-    output
 }
 
 /// Simple O(n log n) SA construction using standard library sort.

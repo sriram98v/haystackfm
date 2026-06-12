@@ -81,14 +81,15 @@ impl FmIndex {
         // Build BWT from SA
         let bwt = build_bwt(&text, &sa);
 
+        // Sample SA then free it before building Occ (saves ~4n bytes of peak memory)
+        let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate);
+        drop(sa);
+
         // Build C array from BWT
         let c_array = CArray::from_text(&bwt.data);
 
         // Build Occ table from BWT
         let occ = build_occ_table(&bwt);
-
-        // Sample the suffix array
-        let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate);
 
         Ok(Self {
             bwt,

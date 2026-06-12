@@ -1,153 +1,95 @@
-# GPU IUPAC Ambiguity Support — Implementation Plan
+# Plan: Pure-Rust Construction Speedup + Memory (WASM-Safe)
 
-## Root Problem
-
-GPU emits **one `(lo,hi)` interval** per query; CPU `backward_search` returns **a union of disjoint intervals**. Everything downstream (count, locate, MEM/SMEM) is wrong for any IUPAC ambiguity code in a query.
-
-CPU path (`src/fm_index/query.rs:42`):
-- Calls `compatible_symbols(c)` → expands each code to all matching bases
-- Iterates over compatible bases, collects multiple SA intervals, merges them
-
-GPU path (`shaders/locate_search.wgsl`, `shaders/mem_find.wgsl`):
-- Treats query char as a single exact code — `c_val(c)` with no expansion
-- No branching, no merging → wrong results for N, R, Y, S, W, K, M, B, D, H, V
-
-## Key Design Choice: `MAX_IVS = 16`
-
-C-array partitions BWT by symbol → intervals for different compatible symbols never overlap.
-After merging, ≤15 disjoint intervals exist per backward step.
-Use fixed-size `array<vec2u, 16>` in-register; **incremental merge after each char** (bounds register pressure vs 240-elem scratch).
+## Requirements
+- Improve construction speed (currently ~2136s / ~35 min for chromosome)
+- Reduce peak memory (currently 8276 MB, 27× input)
+- **All changes must be pure Rust** — no C FFI, no `cc`/`cmake` deps
+- WASM build (`wasm-pack build --features wasm`) must continue working
 
 ---
 
-## Phase 1 — Shared IUPAC table in WGSL (~0.5d, Low risk)
+## Phase 1 — Drop Full SA Before Occ Build — LOW EFFORT
 
-Encode `compatible_symbols` as two WGSL constants:
-- `const COMPAT: array<u32, 256>` — indexed by `code * 16 + k`
-- `const COMPAT_LEN: array<u32, 16>` — number of compatible symbols per code
+**Expected: ~1.2 GB peak reduction for chromosome (drops 4n bytes earlier)**
 
-Must exactly mirror `src/alphabet.rs::compatible_symbols`. Add a Rust parity test
-(`#[cfg(test)]`) that builds the same table from `compatible_symbols` and asserts equality.
+One-line change in `src/fm_index/mod.rs` (around line 79–91):
+```rust
+let sa = build_suffix_array(&text);
+let bwt = build_bwt(&text, &sa);
+let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate);
+drop(sa);   // ← free 4n bytes before building Occ
+let occ = build_occ(&bwt);
+```
 
-**Files:** `shaders/locate_search.wgsl`, `shaders/mem_find.wgsl`, `src/alphabet.rs` (test only)
-
-Status: [x] complete
-
----
-
-## Phase 2 — `locate_search.wgsl` multi-interval (~1.5d, High)
-
-Replace scalar `lo/hi` with `var ivs: array<vec2u, MAX_IVS>; var n_ivs: u32`.
-
-Per query char:
-1. For each active interval `ivs[k]` × each `r in compat(c)`:
-   - Compute `new_lo = C[r] + occ(r, lo)`, `new_hi = C[r] + occ(r, hi)`
-   - Collect if `new_lo < new_hi`
-2. Incremental merge (insertion sort by lo + linear coalesce, mirrors `merge_intervals` at `query.rs:133`)
-3. Break if empty
-
-Output layout change: emit `MAX_IVS` intervals per query (zero-pad unused slots).
-Buffer: `[num_queries * MAX_IVS * 2]` u32s. Fixed stride, no second prefix-sum needed.
-
-Driver (`src/gpu/locate.rs`):
-- `match_count[q] = Σ(hi−lo)` over its `MAX_IVS` interval block
-- Prefix sum and resolve phase unchanged
-
-**Files:** `shaders/locate_search.wgsl`, `src/gpu/locate.rs`
-
-Status: [x] complete
+**Risk:** None — purely mechanical change.
 
 ---
 
-## Phase 3 — `locate_resolve.wgsl` interval-list aware (~1d, High)
+## Phase 2 — Replace Prefix-Doubling with `psacak` ✨ HIGH IMPACT
 
-Map flat thread index `k = tid - match_offsets[qid]` to `(interval, within_offset)`:
-- Walk per-query `MAX_IVS` block, subtract each `hi−lo` until `k` lands inside
-- `bwt_pos = iv_lo + k_local`
+**Expected: O(n log² n) → O(n), ~20-50× construction speedup**
 
-**Binding workaround (8-binding limit already hit):** Use zero-terminated intervals —
-real intervals always satisfy `hi > lo`, so sentinel `(0,0)` terminates the scan.
-No extra binding needed.
+`psacak` (SACA-K algorithm) is a pure-Rust linear-time SA construction crate — already present as a transitive dep in the benchmark. No C FFI, works on `wasm32-unknown-unknown`.
 
-**Files:** `shaders/locate_resolve.wgsl`, `src/gpu/locate.rs`
+**Changes:**
+- Add `psacak = "0.1"` to `[dependencies]` in `Cargo.toml`
+- Replace `build_suffix_array()` in `src/suffix_array/cpu.rs`:
+  ```rust
+  pub fn build_suffix_array(text: &[u8]) -> SuffixArray {
+      let mut sa = vec![0usize; text.len()];
+      psacak::saca_k(text, &mut sa);
+      SuffixArray { data: sa.into_iter().map(|x| x as u32).collect() }
+  }
+  ```
+  *(exact API shape needs verification against `psacak` docs before coding)*
+- All existing SA tests remain valid (same output, different algorithm)
 
-Status: [x] complete
-
----
-
-## Phase 4 — `mem_find.wgsl` multi-interval bidirectional (~2–3d, Highest)
-
-Replace scalar `(fwd_lo, fwd_hi, rev_lo, rev_hi)` with `var ivs: array<vec4u, MAX_IVS>; var n_ivs`.
-
-`extend_multi_right(c)`:
-- For each iv × each `r in compat(c)`: run `try_extend_right` math, collect non-empty
-- Merge by fwd interval
-
-Left-maximality: not-left-maximal if ANY iv extends left by ANY `r in compat(query[i-1])`
-(mirrors `smem.rs:175`).
-
-`match_count = Σ fwd sizes`.
-
-**Two-level MEM output layout:**
-- MEM header: `[qs, qe, iv_offset, iv_count]`
-- Flat fwd-interval buffer (separate)
-
-Pass 1 outputs both `mem_count` and `total_iv_count` per query; CPU prefix-sums both.
-Single `process_query` fn shared by both passes (existing pattern).
-
-Update downstream: `shaders/mem_resolve.wgsl`, `shaders/ref_map.wgsl`, `src/gpu/mem_find.rs`.
-
-**Files:** `shaders/mem_find.wgsl`, `shaders/mem_resolve.wgsl`, `shaders/ref_map.wgsl`, `src/gpu/mem_find.rs`
-
-Status: [x] complete
+**Risk:** psacak uses `usize` SA entries — need to verify API and cast to u32. Low risk.
 
 ---
 
-## Phase 5 — Parity Tests (~1d, Medium)
+## Phase 3 — Compact `SampledSuffixArray` — MEDIUM IMPACT
 
-- WGSL compat table == `alphabet.rs::compatible_symbols` (CI-enforced, fails on drift)
-- `count_gpu` / `locate_gpu` == CPU across all IUPAC query × ref combos
-- `find_smems_gpu` / `find_mems_gpu` == CPU (sorted positions)
-- All GPU tests skip cleanly when no GPU adapter available
+**Expected: ~75% reduction in sampled SA memory (4n → ~1.25n bytes)**
 
-**Files:** `src/gpu/locate.rs` (tests), `src/gpu/mem_find.rs` (tests)
+`bitvec` is pure Rust — WASM-safe.
 
-Status: [x] complete
+**Changes:**
+- Add `bitvec = "1"` to `[dependencies]` in `Cargo.toml`
+- Replace flat `Vec<u32>` (length n, u32::MAX sentinels) in `src/suffix_array/mod.rs`:
+  ```rust
+  pub struct SampledSuffixArray {
+      is_sampled: bitvec::vec::BitVec,  // n/8 bytes
+      samples: Vec<u32>,                 // only n/sample_rate entries
+      sample_rate: u32,
+  }
+  ```
+- Update `from_full()`, `is_sampled()`, `get()` — rank into `samples` via `is_sampled.count_ones(..)` prefix sum
+- Update `locate()` in `src/fm_index/mod.rs` to use new indexing
+- All existing locate tests cover correctness
 
----
-
-## Risks
-
-| Risk | Severity | Mitigation |
-|------|----------|------------|
-| Register pressure with 16-interval arrays | High | Incremental merge, not 240-elem scratch |
-| 8-binding limit in resolve | Medium | Zero-terminated interval blocks |
-| MEM pass 1/2 count divergence | Medium | Single `process_query` fn, write-branch only |
-| `MAX_IVS` overflow on N-heavy queries | Low | Debug clamp + stress test; bump to 32 if exceeded |
-| WGSL compat table drifts from `alphabet.rs` | Low | Parity test in CI |
-
----
-
-## Estimate
-
-| Phase | Effort | Risk |
-|-------|--------|------|
-| 1 — WGSL IUPAC table | 0.5d | Low |
-| 2 — locate_search multi-interval | 1.5d | High |
-| 3 — locate_resolve interval-list | 1d | High |
-| 4 — mem_find multi-interval bidir | 2–3d | Highest |
-| 5 — Parity tests | 1d | Medium |
-| **Total** | **~6–7d** | |
-
-**Phases 1–3 (locate count/locate) are independently shippable before Phase 4 (MEM/SMEM).**
+**Risk:** rank query must match LF-walk logic. Existing locate tests catch regressions.
 
 ---
 
-## Success Criteria
+## Estimated Impact
 
-- [ ] `count_gpu` / `locate_gpu` match CPU across all IUPAC query/ref combos
-- [ ] `find_smems_gpu` / `find_mems_gpu` match CPU (counts + positions)
-- [ ] WGSL compat table proven equal to `alphabet.rs::compatible_symbols`
-- [ ] No exact-ACGT benchmark regression
-- [ ] Resolve stays ≤8 storage bindings
-- [ ] Parity tests skip cleanly when no GPU adapter
+| Phase | Effort | Speedup | Memory |
+|-------|--------|---------|--------|
+| 1 — drop SA early | ~15min | neutral | −1.2 GB peak |
+| 2 — psacak | ~1h | ~20-50× construction | neutral |
+| 3 — compact SA | ~2h | neutral | −75% sampled SA (~6 GB saved) |
+
+**Total: LOW–MEDIUM. All three phases together: ~35 min → ~1–3 min, ~8 GB → ~2–3 GB.**
+
+---
+
+## WASM Safety
+
+| Component | WASM-safe? | Reason |
+|-----------|-----------|--------|
+| `psacak` | ✅ | Pure Rust, no `cc` dep |
+| `bitvec` | ✅ | Pure Rust |
+| `drop(sa)` | ✅ | Language feature |
+
+No platform-conditional cfg guards needed.
