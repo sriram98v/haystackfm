@@ -236,7 +236,9 @@ Construction pipeline
 
 CPU query pipeline  (O(m) count / O(m + occ·k) locate)
   backward_search (IUPAC multi-interval) → SA interval set [lo, hi)
-  locate: LF-walk from each position to nearest SA sample
+  locate: LF-walk from each position to nearest SA sample, fused symbol+rank
+          lookup per step (`OccTable::lf_step` — one block-plane read instead
+          of two)
 
 GPU locate pipeline  (2 passes)
   Pass 1  locate_search.wgsl   — backward search, IUPAC multi-interval → (match_count, intervals)

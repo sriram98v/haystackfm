@@ -258,7 +258,7 @@ impl FmIndex {
     /// LF-mapping: given a position in the BWT, return the position of the
     /// same character in the first column.
     fn lf_mapping(&self, i: u32) -> u32 {
-        let c = self.occ.symbol_at(i);
-        self.c_array.get(c) + self.occ.rank(c, i)
+        let (c, rank) = self.occ.lf_step(i);
+        self.c_array.get(c) + rank
     }
 }

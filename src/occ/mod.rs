@@ -193,6 +193,33 @@ impl OccTable {
         self.lane_to_symbol[self.lane_at(block, offset) as usize]
     }
 
+    /// Fused LF-step primitive: returns `(symbol_at(pos), rank(symbol_at(pos), pos))` in a
+    /// single pass over `pos`'s block planes, instead of the two independent calls this
+    /// replaces (`symbol_at` + `rank`), which each re-read and re-derive the same block's
+    /// lane mask. Used by [`crate::fm_index::FmIndex::lf_mapping`], the hottest loop in
+    /// `locate` (one call per LF step during `resolve_sa`).
+    #[inline]
+    pub fn lf_step(&self, pos: u32) -> (u8, u32) {
+        let block = (pos / BLOCK_SIZE) as usize;
+        let offset = pos % BLOCK_SIZE;
+        let lane = self.lane_at(block, offset) as usize;
+        let symbol = self.lane_to_symbol[lane];
+
+        let num_lanes = self.num_lanes as usize;
+        let sb = (pos / SUPERBLOCK_SIZE) as usize;
+        let sb_count = self.superblock_checkpoints[sb * num_lanes + lane];
+        let delta = self.block_deltas[block * num_lanes + lane] as u32;
+        let lane_bits = self.lane_mask(block, lane);
+
+        // rank(symbol, pos) counts occurrences in bwt[0..pos), i.e. bits strictly below
+        // `offset` within this block (mirrors `rank`'s `(1 << (offset+1)) - 1` mask for
+        // `i = pos + 1`, minus the bit at `offset` itself).
+        let mask = (1u64 << offset) - 1; // offset in [0, 63]; offset==0 => mask==0
+        let rank = sb_count + delta + (lane_bits & mask).count_ones();
+
+        (symbol, rank)
+    }
+
     /// Reconstruct the full BWT as one `u32` per position, for GPU upload.
     ///
     /// O(n); GPU query paths (`locate`, `mem_resolve`) call this once per index instead of

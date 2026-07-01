@@ -203,6 +203,24 @@ mod tests {
     }
 
     #[test]
+    fn test_lf_step_matches_symbol_at_and_rank() {
+        // Longer-than-one-block text so both block-interior and superblock-boundary
+        // positions get exercised.
+        let s = "ACGT".repeat(50); // 200 chars + sentinel
+        let text = encode(&s);
+        let sa = build_suffix_array(&text);
+        let bwt = build_bwt(&text, &sa);
+        let occ = build_occ_table(&bwt);
+
+        let n = bwt.len() as u32;
+        for pos in 0..n {
+            let (sym, rank) = occ.lf_step(pos);
+            assert_eq!(sym, occ.symbol_at(pos), "symbol mismatch at pos {pos}");
+            assert_eq!(rank, occ.rank(sym, pos), "rank mismatch at pos {pos}");
+        }
+    }
+
+    #[test]
     fn test_occ_compacts_to_effective_alphabet() {
         // "ACGTACGTACGT" + sentinel uses only 5 of the 16 IUPAC symbols ($,A,C,G,T).
         // This is the whole point of the compaction: 11 unused IUPAC lanes cost nothing.
