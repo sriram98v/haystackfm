@@ -18,7 +18,7 @@ pub const SUPERBLOCK_SIZE: u32 = 512;
 /// Level 2 — block deltas (every BLOCK_SIZE positions): u16 count since last superblock.
 /// Level 3 — bitvectors: u64 presence bit per position within the block.
 ///
-/// rank(c, i) = superblock[i/S][c] + delta[i/B][c] + popcount(bitvec[i/B][c] & mask)
+/// `rank(c, i) = superblock[i/S][c] + delta[i/B][c] + popcount(bitvec[i/B][c] & mask)`
 ///
 /// Memory vs single-level (n=250M, ALPHA=16):
 ///   old: n/64 × (16×4 + 16×8)  = 3n bytes   = 750 MB
@@ -29,7 +29,7 @@ pub struct OccTable {
     superblock_checkpoints: Vec<[u32; ALPHABET_SIZE]>,
     /// block_deltas[b][c] = count of c in bwt[sb_start..b*BLOCK_SIZE), where sb = b/(S/B)
     block_deltas: Vec<[u16; ALPHABET_SIZE]>,
-    /// bitvectors[b][c] = 64-bit vector: bit j set iff bwt[b*BLOCK_SIZE + j] == c
+    /// `bitvectors[b][c]` = 64-bit vector: bit j set iff `bwt[b*BLOCK_SIZE + j] == c`
     pub bitvectors: Vec<[u64; ALPHABET_SIZE]>,
     pub text_len: u32,
 }
@@ -42,7 +42,12 @@ impl OccTable {
         bitvectors: Vec<[u64; ALPHABET_SIZE]>,
         text_len: u32,
     ) -> Self {
-        Self { superblock_checkpoints, block_deltas, bitvectors, text_len }
+        Self {
+            superblock_checkpoints,
+            block_deltas,
+            bitvectors,
+            text_len,
+        }
     }
 
     /// Rank query: count of character `c` in bwt[0..i).
@@ -60,7 +65,11 @@ impl OccTable {
         let delta = self.block_deltas[block][c_idx] as u32;
         let bitvec = self.bitvectors[block][c_idx];
 
-        let mask = if offset == 63 { u64::MAX } else { (1u64 << (offset + 1)) - 1 };
+        let mask = if offset == 63 {
+            u64::MAX
+        } else {
+            (1u64 << (offset + 1)) - 1
+        };
 
         sb_count + delta + (bitvec & mask).count_ones()
     }

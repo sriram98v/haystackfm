@@ -130,9 +130,7 @@ fn print_positions_speedup_table() {
     let sep = "─".repeat(70);
     let dbl = "═".repeat(70);
     eprintln!("\n{dbl}");
-    eprintln!(
-        "  MEM Positions CPU vs GPU Speedup  (warmup={WARMUP}, iters={ITERS})"
-    );
+    eprintln!("  MEM Positions CPU vs GPU Speedup  (warmup={WARMUP}, iters={ITERS})");
     eprintln!("{dbl}");
     eprintln!(
         "  {:>6} {:>8} {:>10}  {:>10}  {:>8}",

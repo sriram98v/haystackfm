@@ -1,7 +1,7 @@
 use crate::alphabet::ALPHABET_SIZE;
 use crate::bwt::Bwt;
 
-/// C array: C[c] = number of characters in the text that are lexicographically smaller than c.
+/// C array: `C[c]` = number of characters in the text that are lexicographically smaller than c.
 ///
 /// Covers the full IUPAC alphabet {$=0,A=1,C=2,G=3,T=4,N=5,R=6,Y=7,S=8,W=9,K=10,M=11,B=12,D=13,H=14,V=15}.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -47,7 +47,7 @@ impl CArray {
         Self { data }
     }
 
-    /// Get C[c]: number of characters smaller than c in the text.
+    /// Get `C[c]`: number of characters smaller than c in the text.
     pub fn get(&self, c: u8) -> u32 {
         self.data[c as usize]
     }

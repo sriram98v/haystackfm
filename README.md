@@ -2,7 +2,7 @@
 
 A GPU-accelerated FM-index library for DNA sequence alignment. Runs on native targets (Vulkan / Metal / DX12) via **wgpu** and compiles to **WebAssembly** for in-browser WebGPU use.
 
-Supports the full **16-symbol IUPAC ambiguity alphabet** (A C G T N R Y S W K M B D H V) in both the CPU and GPU query paths.
+Supports the full **16-symbol IUPAC ambiguity alphabet** (A C G T N R Y S W K M B D H V) in both the CPU and GPU query paths, with a pluggable `Alphabet` trait for swapping in custom matching semantics (e.g. exact-match ACGT-only for peer-comparable benchmarks).
 
 ---
 
@@ -17,6 +17,8 @@ Supports the full **16-symbol IUPAC ambiguity alphabet** (A C G T N R Y S W K M 
 | MEM / SMEM finding | Bidirectional FM-index; CPU and GPU paths |
 | GPU MEM pipeline | 3-pass: find intervals → resolve SA positions → map to references |
 | IUPAC ambiguity | Full 16-symbol alphabet in query and reference; GPU parity-tested |
+| Pluggable `Alphabet` trait | Swap matching semantics (`IupacDna` default, `ExactDna` ACGT-only) via `build_cpu_with::<A>` |
+| Lookup-table seeding | Optional depth-k prefix table (`FmIndexConfig::lookup_depth`) skips the first k `backward_search` steps |
 | WASM bindings | `wasm-bindgen` JS/TS API for browser use |
 | Serialization | `to_bytes` / `from_bytes` for index persistence |
 
@@ -125,7 +127,8 @@ const restored = FmIndexHandle.from_bytes(bytes);
 
 ```rust
 // Build
-FmIndex::build_cpu(sequences, config)?          // sync, CPU
+FmIndex::build_cpu(sequences, config)?          // sync, CPU, IupacDna alphabet (default)
+FmIndex::build_cpu_with::<ExactDna>(sequences, config)?  // sync, CPU, custom alphabet
 FmIndex::build(sequences, config).await?        // async, GPU (feature = "gpu")
 
 // Query
@@ -142,7 +145,8 @@ FmIndex::from_bytes(bytes)?                     // FmIndex
 ### `BidirFmIndex`
 
 ```rust
-BidirFmIndex::build_cpu(sequences, config)?
+BidirFmIndex::build_cpu(sequences, config)?               // IupacDna alphabet (default)
+BidirFmIndex::build_cpu_with::<ExactDna>(sequences, config)?  // custom alphabet
 
 // CPU MEM finding — IUPAC-aware; N matches any of A/C/G/T
 bidir.find_smems(query, min_len, locate)        // Vec<Mem>
@@ -196,6 +200,25 @@ Two symbols match when their base sets share at least one nucleotide. Both the C
 
 ---
 
+## Alphabet Trait
+
+Matching semantics are pluggable via the `Alphabet` trait (`src/alphabet.rs`). `FmIndex` and `BidirFmIndex` store a runtime `AlphabetFns` bundle (function pointers + a serialization tag) rather than a generic type parameter, so the index type itself stays alphabet-agnostic.
+
+| Alphabet | Behavior |
+|----------|----------|
+| `IupacDna` (default) | Full 16-symbol IUPAC matching — `N` and other ambiguity codes expand to base-set overlap. Used by `build_cpu` / `build`. |
+| `ExactDna` | Only A/C/G/T match themselves; any ambiguity code (including `N`) produces zero hits. Useful for peer-comparable benchmarks where other tools don't treat `N` as a wildcard. |
+
+```rust
+use webgpu_fmidx::alphabet::ExactDna;
+
+let index = FmIndex::build_cpu_with::<ExactDna>(&seqs, &config)?;
+```
+
+Implement `Alphabet` for a custom type to define your own symbol set and match rules — see the trait docs in `src/alphabet.rs` for the safety contract (stable function pointers, unique serialization tag ≥ 128).
+
+---
+
 ## Architecture
 
 ```
@@ -229,7 +252,8 @@ GPU MEM/SMEM pipeline  (3 passes)
 | Path | Role |
 |------|------|
 | `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic |
-| `src/alphabet.rs` | IUPAC encoding, `compatible_symbols`, `DnaSequence` |
+| `src/fm_index/lookup.rs` | `LookupTable` — depth-k prefix table seeding `backward_search` in O(1) for core-symbol k-mers |
+| `src/alphabet.rs` | IUPAC encoding, `compatible_symbols`, `DnaSequence`, `Alphabet` trait (`IupacDna`, `ExactDna`) |
 | `src/gpu/` | WebGPU pipeline setup, buffer management, `GpuContext` |
 | `src/gpu/locate.rs` | `locate_batch_gpu` — 2-pass GPU locate |
 | `src/gpu/mem_find.rs` | `find_mems_batch_gpu` / `find_mem_intervals_batch_gpu` |

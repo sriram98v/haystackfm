@@ -23,7 +23,7 @@ impl BwtPipelines {
         }
     }
 
-    /// Build the BWT on the GPU: BWT[i] = text[(SA[i] - 1 + n) % n].
+    /// Build the BWT on the GPU: `BWT[i] = text[(SA[i] - 1 + n) % n]`.
     pub async fn build_bwt(&self, ctx: &GpuContext, text: &[u8], sa: &SuffixArray) -> Bwt {
         let n = text.len() as u32;
 

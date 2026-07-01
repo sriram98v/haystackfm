@@ -80,7 +80,7 @@ impl BidirFmIndex {
 
     /// Exclusive end positions of each reference in the concatenated text.
     /// `seq_boundaries()[i]` is the position just past the last base of reference `i`.
-    /// Pass this slice as `ref_boundaries` to [`find_smems_gpu`] / [`find_mems_gpu`].
+    /// Pass this slice as `ref_boundaries` to `find_smems_gpu` / `find_mems_gpu`.
     pub fn seq_boundaries(&self) -> &[u32] {
         &self.fwd.seq_boundaries
     }
@@ -292,8 +292,8 @@ struct SubInterval {
 /// within the per-batch budget.
 #[cfg(feature = "gpu")]
 struct ResolveBatch {
-    intervals_flat: Vec<u32>,    // stride-2: [fwd_lo, fwd_hi] per sub-interval
-    position_offsets: Vec<u32>,  // exclusive prefix-sum (len = n_subs + 1)
+    intervals_flat: Vec<u32>,   // stride-2: [fwd_lo, fwd_hi] per sub-interval
+    position_offsets: Vec<u32>, // exclusive prefix-sum (len = n_subs + 1)
     total_pos: u32,
     slot_map: Vec<(usize, usize, usize)>, // (q, m, dest_start) per sub-interval
 }
@@ -372,7 +372,12 @@ fn make_resolve_batch(subs: Vec<SubInterval>) -> ResolveBatch {
         slot_map.push((sub.q, sub.m, sub.dest_start));
     }
     let total_pos = *position_offsets.last().unwrap();
-    ResolveBatch { intervals_flat, position_offsets, total_pos, slot_map }
+    ResolveBatch {
+        intervals_flat,
+        position_offsets,
+        total_pos,
+        slot_map,
+    }
 }
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
@@ -391,9 +396,12 @@ async fn resolve_mem_hits_gpu(
     ref_boundaries: &[u32],
     max_hits_per_mem: u32,
 ) -> Result<Vec<Vec<crate::gpu::MemHit>>, FmIndexError> {
-    use crate::gpu::{FindIndexBuffers, ResolveIndexBuffers, find_mem_intervals_for_batch, resolve_intervals_batch};
     use crate::gpu::ref_map::map_positions_to_refs;
     use crate::gpu::MemHit;
+    use crate::gpu::{
+        find_mem_intervals_for_batch, resolve_intervals_batch, FindIndexBuffers,
+        ResolveIndexBuffers,
+    };
 
     let budget = ctx.output_budget_u32();
 

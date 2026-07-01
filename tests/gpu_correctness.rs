@@ -348,10 +348,7 @@ fn gpu_bwt_matches_cpu_basic() {
     let gpu_sa = pollster::block_on(sa_pipelines.build_suffix_array(&ctx, &text));
     let gpu_bwt = pollster::block_on(bwt_pipelines.build_bwt(&ctx, &text, &gpu_sa));
 
-    assert_eq!(
-        gpu_bwt, cpu_bwt,
-        "GPU BWT should match CPU BWT for 'ACGT$'"
-    );
+    assert_eq!(gpu_bwt, cpu_bwt, "GPU BWT should match CPU BWT for 'ACGT$'");
 }
 
 #[test]
@@ -372,11 +369,7 @@ fn gpu_bwt_matches_cpu_various() {
         let gpu_sa = pollster::block_on(sa_pipelines.build_suffix_array(&ctx, &text));
         let gpu_bwt = pollster::block_on(bwt_pipelines.build_bwt(&ctx, &text, &gpu_sa));
 
-        assert_eq!(
-            gpu_bwt, cpu_bwt,
-            "GPU BWT mismatch for '{}'",
-            input
-        );
+        assert_eq!(gpu_bwt, cpu_bwt, "GPU BWT mismatch for '{}'", input);
     }
 }
 

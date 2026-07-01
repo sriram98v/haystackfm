@@ -5,7 +5,7 @@ pub mod cpu;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
-/// Suffix array: SA[i] = starting position of the i-th lexicographically smallest suffix.
+/// Suffix array: `SA[i]` = starting position of the i-th lexicographically smallest suffix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuffixArray {
     pub data: Vec<u32>,
@@ -25,8 +25,8 @@ impl SuffixArray {
 
 /// Sampled suffix array for space-efficient locate queries.
 ///
-/// Stores only the ~n/sample_rate sampled entries (where SA[i] % sample_rate == 0).
-/// Uses a bitvector + rank1 structure instead of a sorted Vec<u32> of row indices,
+/// Stores only the ~n/sample_rate sampled entries (where `SA[i] % sample_rate == 0`).
+/// Uses a bitvector + rank1 structure instead of a sorted `Vec<u32>` of row indices,
 /// reducing memory from 8n/sample_rate bytes to n/8 + 4n/64 + 4n/sample_rate bytes.
 ///
 /// For n=250M at rate=4: ~31 MB bitvector + ~16 MB checkpoints + ~250 MB sa_vals
@@ -94,13 +94,17 @@ impl SampledSuffixArray {
         let i = i as usize;
         let word_idx = i / 64;
         let bit_offset = i % 64;
-        let mask = if bit_offset == 0 { 0 } else { (1u64 << bit_offset) - 1 };
+        let mask = if bit_offset == 0 {
+            0
+        } else {
+            (1u64 << bit_offset) - 1
+        };
         let rank = self.rank_checkpoints[word_idx] + (self.bitvector[word_idx] & mask).count_ones();
         Some(self.sa_vals[rank as usize])
     }
 
-    /// Reconstruct the flat sentinel-format Vec<u32> required by GPU shaders.
-    /// flat[i] = SA[i] if sampled, else u32::MAX.
+    /// Reconstruct the flat sentinel-format `Vec<u32>` required by GPU shaders.
+    /// `flat[i] = SA[i]` if sampled, else `u32::MAX`.
     pub fn to_flat_vec(&self, n: usize) -> Vec<u32> {
         let mut flat = vec![u32::MAX; n];
         let mut rank = 0usize;
@@ -215,9 +219,7 @@ mod tests {
         let ssa = SampledSuffixArray::from_full(&sa, 4);
         // Spot-check: get returns Some for every sampled row
         let sampled_count = sa.data.iter().filter(|&&v| v % 4 == 0).count();
-        let found: usize = (0..sa.data.len() as u32)
-            .filter_map(|i| ssa.get(i))
-            .count();
+        let found: usize = (0..sa.data.len() as u32).filter_map(|i| ssa.get(i)).count();
         assert_eq!(found, sampled_count);
     }
 }

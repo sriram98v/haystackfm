@@ -114,9 +114,9 @@ impl LookupTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alphabet::{DnaSequence, encode_char};
-    use crate::fm_index::{FmIndex, FmIndexConfig};
     use crate::alphabet::ExactDna;
+    use crate::alphabet::{encode_char, DnaSequence};
+    use crate::fm_index::{FmIndex, FmIndexConfig};
 
     fn make_index_with_lookup(s: &str, depth: u32) -> FmIndex {
         let seq = DnaSequence::from_str(s).unwrap();

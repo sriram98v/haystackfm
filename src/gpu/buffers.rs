@@ -37,7 +37,7 @@ impl GpuContext {
             })
     }
 
-    /// Download a GPU buffer to a Vec<u32>.
+    /// Download a GPU buffer to a `Vec<u32>`.
     pub async fn download_buffer(&self, buffer: &wgpu::Buffer, count: u32) -> Vec<u32> {
         let size = count as u64 * 4;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {

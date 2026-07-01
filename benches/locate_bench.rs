@@ -121,7 +121,11 @@ fn print_locate_speedup_table() {
 
         let speedup = cpu_ms / gpu_ms;
         let marker = if speedup >= 1.0 { "▲" } else { "▼" };
-        let crossover = if speedup >= 1.0 && prev_speedup < 1.0 { "  ← crossover" } else { "" };
+        let crossover = if speedup >= 1.0 && prev_speedup < 1.0 {
+            "  ← crossover"
+        } else {
+            ""
+        };
         eprintln!(
             "  {:<10} {:>10.3}  {:>10.3}  {:>6.2}x {marker}{crossover}",
             n, cpu_ms, gpu_ms, speedup

@@ -1,6 +1,6 @@
 /// A Maximal Exact Match with GPU-resolved reference positions.
 ///
-/// Returned by [`BidirFmIndex::find_smems_gpu`] and [`BidirFmIndex::find_mems_gpu`].
+/// Returned by [`crate::BidirFmIndex::find_smems_gpu`] and [`crate::BidirFmIndex::find_mems_gpu`].
 /// Positions are resolved via the GPU SA resolve + reference boundary mapping passes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemHit {

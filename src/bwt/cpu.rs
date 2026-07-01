@@ -8,7 +8,7 @@ use rayon::prelude::*;
 
 /// Derive BWT from text and suffix array.
 ///
-/// BWT[i] = text[(SA[i] - 1 + n) % n]
+/// `BWT[i] = text[(SA[i] - 1 + n) % n]`
 ///
 /// Time: O(n), embarrassingly parallel.
 pub fn build_bwt(text: &[u8], sa: &SuffixArray) -> Bwt {

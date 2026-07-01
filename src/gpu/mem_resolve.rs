@@ -55,14 +55,12 @@ impl ResolveIndexBuffers {
         let text_len = index.text_len;
         let num_blocks = (text_len + block_size - 1) / block_size;
 
-        let mut checkpoints_flat: Vec<u32> =
-            Vec::with_capacity((num_blocks * alpha) as usize);
+        let mut checkpoints_flat: Vec<u32> = Vec::with_capacity((num_blocks * alpha) as usize);
         for block in index.occ.flat_block_checkpoints() {
             checkpoints_flat.extend_from_slice(&block);
         }
 
-        let mut bitvectors_flat: Vec<u32> =
-            Vec::with_capacity((num_blocks * alpha * 2) as usize);
+        let mut bitvectors_flat: Vec<u32> = Vec::with_capacity((num_blocks * alpha * 2) as usize);
         for block in &index.occ.bitvectors {
             for &bv64 in block.iter() {
                 bitvectors_flat.push(bv64 as u32);

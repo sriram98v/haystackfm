@@ -35,7 +35,7 @@ impl FmIndex {
 
     /// Locate all occurrences of a pattern, returning raw text positions.
     ///
-    /// Cheaper than [`locate`] when sequence header strings are not needed — avoids
+    /// Cheaper than [`Self::locate`] when sequence header strings are not needed — avoids
     /// heap-allocating and cloning a `String` per hit. Positions are absolute offsets
     /// into the concatenated text (including sentinel bytes between sequences).
     pub fn locate_positions(&self, pattern: &[u8]) -> Vec<u32> {

@@ -102,7 +102,7 @@ impl BidirInterval {
     /// Extend the matched pattern to the left by character `c` (P → cP).
     ///
     /// Corresponds to the standard backward-search step on the **forward**
-    /// FM-index (BWT[i] = T[SA[i]−1] naturally adds to the left of a suffix).
+    /// FM-index (`BWT[i]` = `T[SA[i]−1]` naturally adds to the left of a suffix).
     ///
     /// - The forward interval is updated via the standard LF-mapping on `fwd`.
     /// - The reverse interval narrows by counting how many characters < c

@@ -152,7 +152,10 @@ fn print_mem_speedup_table() {
         );
         let gpu_ms = measure_ms(
             || {
-                let _ = idx.find_smems_gpu(&queries, MIN_LEN, &[], 1024).block_on().unwrap();
+                let _ = idx
+                    .find_smems_gpu(&queries, MIN_LEN, &[], 1024)
+                    .block_on()
+                    .unwrap();
             },
             WARMUP,
             ITERS,
@@ -176,7 +179,10 @@ fn print_mem_speedup_table() {
         );
         let gpu_ms = measure_ms(
             || {
-                let _ = idx.find_mems_gpu(&queries, MIN_LEN, &[], 1024).block_on().unwrap();
+                let _ = idx
+                    .find_mems_gpu(&queries, MIN_LEN, &[], 1024)
+                    .block_on()
+                    .unwrap();
             },
             WARMUP,
             ITERS,
