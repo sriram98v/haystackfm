@@ -91,36 +91,59 @@ impl OccPipelines {
         let blocks_per_sb = (SUPERBLOCK_SIZE / BLOCK_SIZE) as usize;
         let alpha_usize = ALPHABET_SIZE;
 
-        let mut superblock_checkpoints: Vec<[u32; ALPHABET_SIZE]> =
-            Vec::with_capacity(num_superblocks);
-        let mut block_deltas: Vec<[u16; ALPHABET_SIZE]> = Vec::with_capacity(num_blocks_usize);
-        let mut bitvectors: Vec<[u64; ALPHABET_SIZE]> = Vec::with_capacity(num_blocks_usize);
+        // GPU construction always operates over the full 16-symbol IUPAC alphabet (the shader
+        // has no notion of which symbols are actually present), so the Occ table it produces
+        // uses an identity lane map — one lane per symbol, no compaction. CPU construction
+        // (src/occ/cpu.rs) compacts to the effective alphabet instead.
+        let mut symbol_to_lane = [u8::MAX; ALPHABET_SIZE];
+        for (c, lane) in symbol_to_lane.iter_mut().enumerate() {
+            *lane = c as u8;
+        }
+
+        // GPU construction always uses the identity map (num_lanes == ALPHABET_SIZE == 16), so
+        // num_planes = ceil(log2(16)) = 4 — a 4x reduction vs a one-hot bitvector per lane.
+        let num_planes = (u8::BITS - (ALPHABET_SIZE as u8 - 1).leading_zeros()) as usize;
+
+        let mut superblock_checkpoints: Vec<u32> =
+            Vec::with_capacity(num_superblocks * alpha_usize);
+        let mut block_deltas: Vec<u16> = Vec::with_capacity(num_blocks_usize * alpha_usize);
+        let mut planes: Vec<u64> = Vec::with_capacity(num_blocks_usize * num_planes);
 
         let mut cumulative = [0u32; ALPHABET_SIZE];
         let mut sb_base = [0u32; ALPHABET_SIZE];
 
         for b in 0..num_blocks_usize {
             if b % blocks_per_sb == 0 {
-                superblock_checkpoints.push(cumulative);
+                superblock_checkpoints.extend_from_slice(&cumulative);
                 sb_base = cumulative;
             }
 
-            let mut delta = [0u16; ALPHABET_SIZE];
+            let mut block_planes = vec![0u64; num_planes];
             for c in 0..alpha_usize {
-                delta[c] = (cumulative[c] - sb_base[c]) as u16;
-            }
-            block_deltas.push(delta);
+                block_deltas.push((cumulative[c] - sb_base[c]) as u16);
 
-            let mut bv = [0u64; ALPHABET_SIZE];
-            for c in 0..alpha_usize {
                 let lo = bitvec_flat[(b * alpha_usize + c) * 2];
                 let hi = bitvec_flat[(b * alpha_usize + c) * 2 + 1];
-                bv[c] = (hi as u64) << 32 | lo as u64;
+                let bits = (hi as u64) << 32 | lo as u64;
+                // Identity map: lane == symbol code c.
+                for (p, plane) in block_planes.iter_mut().enumerate() {
+                    if (c >> p) & 1 == 1 {
+                        *plane |= bits;
+                    }
+                }
+
                 cumulative[c] += block_counts[b * alpha_usize + c];
             }
-            bitvectors.push(bv);
+            planes.extend_from_slice(&block_planes);
         }
 
-        OccTable::from_parts(superblock_checkpoints, block_deltas, bitvectors, n)
+        OccTable::from_parts(
+            ALPHABET_SIZE as u8,
+            symbol_to_lane,
+            superblock_checkpoints,
+            block_deltas,
+            planes,
+            n,
+        )
     }
 }

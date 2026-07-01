@@ -21,6 +21,7 @@ Supports the full **16-symbol IUPAC ambiguity alphabet** (A C G T N R Y S W K M 
 | Lookup-table seeding | Optional depth-k prefix table (`FmIndexConfig::lookup_depth`) skips the first k `backward_search` steps |
 | WASM bindings | `wasm-bindgen` JS/TS API for browser use |
 | Serialization | `to_bytes` / `from_bytes` for index persistence |
+| Compact Occ table | Bitplane-encoded lanes over the effective symbol alphabet (not the full 16-symbol IUPAC space) — no resident BWT kept after construction |
 
 ---
 
@@ -259,7 +260,7 @@ GPU MEM/SMEM pipeline  (3 passes)
 | `src/gpu/mem_find.rs` | `find_mems_batch_gpu` / `find_mem_intervals_batch_gpu` |
 | `src/gpu/mem_resolve.rs` | SA position resolve pass |
 | `src/gpu/ref_map.rs` | Reference boundary mapping pass |
-| `src/suffix_array/`, `src/bwt/`, `src/occ/` | CPU and GPU implementations |
+| `src/suffix_array/`, `src/bwt/`, `src/occ/` | CPU and GPU implementations. No resident `Bwt` is kept after construction — `OccTable` compacts to the effective symbol alphabet (bitplane-encoded lanes) and reconstructs BWT rows/bytes on demand for GPU upload |
 | `src/wasm/` | `wasm-bindgen` JS/TS bindings |
 | `shaders/` | WGSL compute shaders |
 

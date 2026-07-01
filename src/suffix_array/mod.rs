@@ -23,22 +23,29 @@ impl SuffixArray {
     }
 }
 
+/// Words per superblock for the SA-marker rank checkpoints (8 words = 512 bits, matching
+/// the occ table's `SUPERBLOCK_SIZE`).
+const SA_MARKER_SB_WORDS: usize = 8;
+
 /// Sampled suffix array for space-efficient locate queries.
 ///
 /// Stores only the ~n/sample_rate sampled entries (where `SA[i] % sample_rate == 0`).
-/// Uses a bitvector + rank1 structure instead of a sorted `Vec<u32>` of row indices,
-/// reducing memory from 8n/sample_rate bytes to n/8 + 4n/64 + 4n/sample_rate bytes.
+/// Uses a bitvector + two-level rank1 structure instead of a sorted `Vec<u32>` of row indices:
+/// a `u32` superblock checkpoint every 8 words plus a `u16` per-word delta since the last
+/// superblock (same two-level trick as the occ table), instead of one flat `u32` per word.
 ///
-/// For n=250M at rate=4: ~31 MB bitvector + ~16 MB checkpoints + ~250 MB sa_vals
+/// For n=250M at rate=4: ~31 MB bitvector + ~10 MB checkpoints + ~250 MB sa_vals
 /// vs ~250 MB bwt_rows + ~250 MB sa_vals previously.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SampledSuffixArray {
     /// Bitvector: bit i is set iff SA[i] % sample_rate == 0.
     /// Length: ceil(text_len / 64) words.
     bitvector: Vec<u64>,
-    /// Rank checkpoints: rank_checkpoints[j] = popcount of bitvector[0..j].
-    /// Enables O(1) rank queries: rank(i) = rank_checkpoints[i/64] + popcount(bitvector[i/64] & mask).
-    rank_checkpoints: Vec<u32>,
+    /// superblock_checkpoints[j] = popcount of bitvector[0..j*SA_MARKER_SB_WORDS].
+    superblock_checkpoints: Vec<u32>,
+    /// block_deltas[w] = popcount of bitvector[sb_start..w] where sb_start is the first word
+    /// of w's superblock (i.e. cumulative count since the last superblock checkpoint).
+    block_deltas: Vec<u16>,
     /// SA values at sampled positions, in ascending BWT row order.
     sa_vals: Vec<u32>,
     pub sample_rate: u32,
@@ -61,17 +68,26 @@ impl SampledSuffixArray {
             }
         }
 
-        // Build prefix popcount checkpoints (one per 64-bit word).
-        let mut rank_checkpoints = Vec::with_capacity(num_words + 1);
+        // Build two-level prefix popcount checkpoints: u32 superblock every 8 words, u16 delta
+        // per word since the last superblock (max delta per word is 64, well within u16).
+        let num_superblocks = num_words.div_ceil(SA_MARKER_SB_WORDS);
+        let mut superblock_checkpoints = Vec::with_capacity(num_superblocks);
+        let mut block_deltas = Vec::with_capacity(num_words);
         let mut cumulative = 0u32;
-        for &word in &bitvector {
-            rank_checkpoints.push(cumulative);
+        let mut sb_base = 0u32;
+        for (w, &word) in bitvector.iter().enumerate() {
+            if w % SA_MARKER_SB_WORDS == 0 {
+                superblock_checkpoints.push(cumulative);
+                sb_base = cumulative;
+            }
+            block_deltas.push((cumulative - sb_base) as u16);
             cumulative += word.count_ones();
         }
 
         Self {
             bitvector,
-            rank_checkpoints,
+            superblock_checkpoints,
+            block_deltas,
             sa_vals,
             sample_rate,
             text_len: n as u32,
@@ -99,7 +115,10 @@ impl SampledSuffixArray {
         } else {
             (1u64 << bit_offset) - 1
         };
-        let rank = self.rank_checkpoints[word_idx] + (self.bitvector[word_idx] & mask).count_ones();
+        let sb = word_idx / SA_MARKER_SB_WORDS;
+        let rank = self.superblock_checkpoints[sb]
+            + self.block_deltas[word_idx] as u32
+            + (self.bitvector[word_idx] & mask).count_ones();
         Some(self.sa_vals[rank as usize])
     }
 

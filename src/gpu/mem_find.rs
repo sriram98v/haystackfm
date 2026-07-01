@@ -74,13 +74,13 @@ impl FindIndexBuffers {
 
         let mut all_bitvectors: Vec<u32> =
             Vec::with_capacity(((fwd_num_blocks + rev_num_blocks) * alpha * 2) as usize);
-        for block in &bidir.fwd.occ.bitvectors {
+        for block in &bidir.fwd.occ.bitvectors_full16() {
             for &bv64 in block.iter() {
                 all_bitvectors.push(bv64 as u32);
                 all_bitvectors.push((bv64 >> 32) as u32);
             }
         }
-        for block in &bidir.rev.occ.bitvectors {
+        for block in &bidir.rev.occ.bitvectors_full16() {
             for &bv64 in block.iter() {
                 all_bitvectors.push(bv64 as u32);
                 all_bitvectors.push((bv64 >> 32) as u32);

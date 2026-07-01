@@ -2,7 +2,6 @@
 
 use super::FmIndex;
 use crate::alphabet::alphabet_fns_from_tag;
-use crate::bwt::Bwt;
 use crate::c_array::CArray;
 use crate::error::FmIndexError;
 use crate::fm_index::lookup::LookupTable;
@@ -13,7 +12,6 @@ impl FmIndex {
     /// Serialize the FM-index to bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, FmIndexError> {
         let serializable = SerializableFmIndex {
-            bwt: &self.bwt,
             c_array: &self.c_array,
             occ: &self.occ,
             sa_samples: &self.sa_samples,
@@ -41,7 +39,6 @@ impl FmIndex {
             ))
         })?;
         Ok(Self {
-            bwt: deserialized.bwt,
             c_array: deserialized.c_array,
             occ: deserialized.occ,
             sa_samples: deserialized.sa_samples,
@@ -57,7 +54,6 @@ impl FmIndex {
 
 #[derive(serde::Serialize)]
 struct SerializableFmIndex<'a> {
-    bwt: &'a Bwt,
     c_array: &'a CArray,
     occ: &'a OccTable,
     sa_samples: &'a SampledSuffixArray,
@@ -72,7 +68,6 @@ struct SerializableFmIndex<'a> {
 
 #[derive(serde::Deserialize)]
 struct OwnedSerializableFmIndex {
-    bwt: Bwt,
     c_array: CArray,
     occ: OccTable,
     sa_samples: SampledSuffixArray,

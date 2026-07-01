@@ -7,7 +7,6 @@ pub mod smem;
 
 use crate::alphabet::{self, Alphabet, AlphabetFns, DnaSequence, IupacDna};
 use crate::bwt::cpu::build_bwt;
-use crate::bwt::Bwt;
 use crate::c_array::CArray;
 use crate::error::FmIndexError;
 use crate::fm_index::lookup::LookupTable;
@@ -51,7 +50,6 @@ impl Default for FmIndexConfig {
 /// The FM-index, ready for queries.
 #[derive(Debug, Clone)]
 pub struct FmIndex {
-    pub(crate) bwt: Bwt,
     pub(crate) c_array: CArray,
     pub(crate) occ: OccTable,
     pub(crate) sa_samples: SampledSuffixArray,
@@ -147,8 +145,11 @@ impl FmIndex {
         let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate);
         drop(sa);
 
-        // Build Occ table from BWT (parallelises internally on non-WASM targets)
+        // Build Occ table from BWT (parallelises internally on non-WASM targets), then drop the
+        // BWT — its one-hot presence bitvectors already encode every symbol, so keeping a
+        // separate packed `Bwt` around would duplicate ~0.5 bytes/base of resident memory.
         let occ = build_occ_table(&bwt);
+        drop(bwt);
 
         // Build depth-k lookup table if requested (using alphabet's core symbols as radix)
         let lookup = if config.lookup_depth > 0 {
@@ -164,7 +165,6 @@ impl FmIndex {
         };
 
         Ok(Self {
-            bwt,
             c_array,
             occ,
             sa_samples,
@@ -239,8 +239,9 @@ impl FmIndex {
         // Sample the suffix array
         let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate);
 
+        drop(bwt);
+
         Ok(Self {
-            bwt,
             c_array,
             occ,
             sa_samples,
@@ -257,7 +258,7 @@ impl FmIndex {
     /// LF-mapping: given a position in the BWT, return the position of the
     /// same character in the first column.
     fn lf_mapping(&self, i: u32) -> u32 {
-        let c = self.bwt.get(i as usize);
+        let c = self.occ.symbol_at(i);
         self.c_array.get(c) + self.occ.rank(c, i)
     }
 }
