@@ -8,3 +8,4 @@ Cargo.lock
 /pkg
 /web/node_modules
 /web/dist
+graphify-out/

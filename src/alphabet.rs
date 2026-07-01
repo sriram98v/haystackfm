@@ -146,6 +146,120 @@ pub fn compatible_symbols(code: u8) -> &'static [u8] {
     }
 }
 
+// ── Alphabet trait and built-in implementations ──────────────────────────────
+
+/// Runtime bundle of function pointers that define alphabet matching semantics.
+///
+/// Stored inside [`FmIndex`] so queries call the correct compatibility function
+/// without generic parameters on the struct itself.
+///
+/// [`FmIndex`]: crate::fm_index::FmIndex
+#[derive(Clone, Copy)]
+pub struct AlphabetFns {
+    /// Given a query code, return the slice of reference codes it matches.
+    pub compatible_fn: fn(u8) -> &'static [u8],
+    /// The "core" (unambiguous) symbols used for the depth-k lookup table BFS.
+    pub core_symbols: &'static [u8],
+    /// Small integer tag used for serialization. 0 = [`IupacDna`], 1 = [`ExactDna`].
+    /// Custom implementations should use values ≥ 128.
+    pub tag: u8,
+}
+
+impl std::fmt::Debug for AlphabetFns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AlphabetFns {{ tag: {} }}", self.tag)
+    }
+}
+
+/// Trait for DNA alphabet matching semantics.
+///
+/// Implement this to define custom symbol sets and match rules for use with
+/// [`FmIndex::build_cpu_with`].
+///
+/// # Safety contract
+/// * [`fns`] must return consistent values every time it is called (same pointers).
+/// * [`tag`] must be unique across all impls in use within a program.
+///
+/// [`FmIndex::build_cpu_with`]: crate::fm_index::FmIndex::build_cpu_with
+/// [`fns`]: Alphabet::fns
+/// [`tag`]: AlphabetFns::tag
+pub trait Alphabet: Send + Sync + 'static {
+    /// Return the function-pointer bundle for this alphabet.
+    fn fns() -> AlphabetFns;
+}
+
+/// Reconstruct an [`AlphabetFns`] from a serialized tag.
+///
+/// Returns `None` for unrecognized tags.  Built-in tags: 0 = [`IupacDna`], 1 = [`ExactDna`].
+pub fn alphabet_fns_from_tag(tag: u8) -> Option<AlphabetFns> {
+    match tag {
+        0 => Some(AlphabetFns {
+            compatible_fn: compatible_symbols,
+            core_symbols: &[A, C, G, T],
+            tag: 0,
+        }),
+        1 => Some(AlphabetFns {
+            compatible_fn: ExactDna::compatible,
+            core_symbols: &[A, C, G, T],
+            tag: 1,
+        }),
+        _ => None,
+    }
+}
+
+/// Full IUPAC 16-symbol DNA alphabet with ambiguity-code matching (default).
+///
+/// Query symbol `N` matches any base; other ambiguity codes match via base-set overlap.
+/// This is the default alphabet used by [`FmIndex::build_cpu`].
+///
+/// [`FmIndex::build_cpu`]: crate::fm_index::FmIndex::build_cpu
+pub struct IupacDna;
+
+impl Alphabet for IupacDna {
+    fn fns() -> AlphabetFns {
+        AlphabetFns {
+            compatible_fn: compatible_symbols,
+            core_symbols: &[A, C, G, T],
+            tag: 0,
+        }
+    }
+}
+
+/// Exact-match ACGT alphabet: query N / ambiguity codes produce zero hits.
+///
+/// Only the four canonical bases (A, C, G, T) match themselves; any other
+/// query code returns an empty compatible set. Use this with
+/// [`FmIndex::build_cpu_with::<ExactDna>`] for peer-comparable benchmarks where
+/// ambiguity-code expansion is undesirable.
+///
+/// [`FmIndex::build_cpu_with::<ExactDna>`]: crate::fm_index::FmIndex::build_cpu_with
+pub struct ExactDna;
+
+impl ExactDna {
+    /// Compatible-symbols function for [`ExactDna`]: ACGT → self, everything else → empty.
+    pub fn compatible(code: u8) -> &'static [u8] {
+        match code {
+            x if x == A => &[A],
+            x if x == C => &[C],
+            x if x == G => &[G],
+            x if x == T => &[T],
+            _ => &[],
+        }
+    }
+}
+
+impl Alphabet for ExactDna {
+    fn fns() -> AlphabetFns {
+        AlphabetFns {
+            compatible_fn: ExactDna::compatible,
+            core_symbols: &[A, C, G, T],
+            tag: 1,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// A DNA/RNA sequence with full IUPAC ambiguity code support.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnaSequence {

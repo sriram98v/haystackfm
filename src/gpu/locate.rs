@@ -70,8 +70,8 @@ pub async fn locate_batch_gpu(
 
     // Flatten Occ checkpoints: [block * ALPHA + c]
     let mut checkpoints_flat: Vec<u32> = Vec::with_capacity((num_blocks * alpha) as usize);
-    for block in &index.occ.checkpoints {
-        checkpoints_flat.extend_from_slice(block);
+    for block in index.occ.flat_block_checkpoints() {
+        checkpoints_flat.extend_from_slice(&block);
     }
 
     // Flatten Occ bitvectors: split each u64 into (lo_u32, hi_u32)
@@ -97,7 +97,7 @@ pub async fn locate_batch_gpu(
         queries_flat.push(0); // wgpu requires non-zero-size buffers
     }
 
-    let bwt_u32: Vec<u32> = index.bwt.data.iter().map(|&b| b as u32).collect();
+    let bwt_u32: Vec<u32> = index.bwt.to_u32_vec();
     let sa_samples_data: Vec<u32> = index.sa_samples.to_flat_vec(index.text_len as usize);
     let seq_bounds_data: Vec<u32> = index.seq_boundaries.clone();
 

@@ -20,6 +20,7 @@ pub fn make_index(s: &str) -> webgpu_fmidx::FmIndex {
     let config = webgpu_fmidx::FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: false,
+        ..Default::default()
     };
     webgpu_fmidx::FmIndex::build_cpu(&[seq], &config).unwrap()
 }

@@ -9,7 +9,11 @@
 //! For large-K runs (K=10_000, K=50_000) which require more RAM/time, add:
 //!   cargo bench --features gpu --bench mem_positions_bench -- "positions/K=10000"
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+#[path = "bench_utils.rs"]
+mod bench_utils;
+
+use bench_utils::{gpu_available, measure_ms};
+use criterion::{BenchmarkId, Criterion};
 use pollster::FutureExt as _;
 use webgpu_fmidx::alphabet::DnaSequence;
 use webgpu_fmidx::{BidirFmIndex, FmIndexConfig};
@@ -115,5 +119,83 @@ fn bench_k1000(c: &mut Criterion) {
     bench_positions(c, 1_000);
 }
 
-criterion_group!(benches, bench_k1, bench_k10, bench_k100, bench_k1000);
-criterion_main!(benches);
+// ── Speedup summary ───────────────────────────────────────────────────────────
+
+#[cfg(feature = "gpu")]
+fn print_positions_speedup_table() {
+    const K_VALUES: &[usize] = &[1, 10, 100, 1_000];
+    const WARMUP: usize = 1;
+    const ITERS: usize = 3;
+
+    let sep = "─".repeat(70);
+    let dbl = "═".repeat(70);
+    eprintln!("\n{dbl}");
+    eprintln!(
+        "  MEM Positions CPU vs GPU Speedup  (warmup={WARMUP}, iters={ITERS})"
+    );
+    eprintln!("{dbl}");
+    eprintln!(
+        "  {:>6} {:>8} {:>10}  {:>10}  {:>8}",
+        "K", "Batch", "CPU (ms)", "GPU (ms)", "Speedup"
+    );
+    eprintln!("  {sep}");
+
+    for &k in K_VALUES {
+        let (idx, boundaries) = build_index(k);
+        let iters = if k >= 1_000 { 1 } else { ITERS };
+        for &batch in BATCH_SIZES {
+            let queries = make_queries(&idx, batch, &boundaries);
+
+            let cpu_ms = measure_ms(
+                || {
+                    for q in &queries {
+                        let _ = idx.find_mems(q.as_slice(), MIN_LEN, true);
+                    }
+                },
+                WARMUP,
+                iters,
+            );
+            let gpu_ms = measure_ms(
+                || {
+                    let _ = idx
+                        .find_mems_gpu(&queries, MIN_LEN, &boundaries, 1024)
+                        .block_on()
+                        .unwrap();
+                },
+                WARMUP,
+                iters,
+            );
+
+            let speedup = cpu_ms / gpu_ms;
+            let marker = if speedup >= 1.0 { "▲" } else { "▼" };
+            eprintln!(
+                "  {:>6} {:>8} {:>10.3}  {:>10.3}  {:>6.2}x {marker}",
+                k, batch, cpu_ms, gpu_ms, speedup
+            );
+        }
+        eprintln!("  {sep}");
+    }
+    eprintln!("{dbl}");
+    eprintln!("  ▲ = GPU faster   ▼ = CPU faster");
+    eprintln!("{dbl}\n");
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+fn main() {
+    #[cfg(feature = "gpu")]
+    {
+        if gpu_available() {
+            print_positions_speedup_table();
+        } else {
+            eprintln!("Note: GPU not available – running CPU-only benchmarks.");
+        }
+    }
+
+    let mut c = Criterion::default().configure_from_args();
+    bench_k1(&mut c);
+    bench_k10(&mut c);
+    bench_k100(&mut c);
+    bench_k1000(&mut c);
+    c.final_summary();
+}

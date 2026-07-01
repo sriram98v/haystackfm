@@ -349,7 +349,7 @@ fn gpu_bwt_matches_cpu_basic() {
     let gpu_bwt = pollster::block_on(bwt_pipelines.build_bwt(&ctx, &text, &gpu_sa));
 
     assert_eq!(
-        gpu_bwt.data, cpu_bwt.data,
+        gpu_bwt, cpu_bwt,
         "GPU BWT should match CPU BWT for 'ACGT$'"
     );
 }
@@ -373,7 +373,7 @@ fn gpu_bwt_matches_cpu_various() {
         let gpu_bwt = pollster::block_on(bwt_pipelines.build_bwt(&ctx, &text, &gpu_sa));
 
         assert_eq!(
-            gpu_bwt.data, cpu_bwt.data,
+            gpu_bwt, cpu_bwt,
             "GPU BWT mismatch for '{}'",
             input
         );
@@ -399,7 +399,7 @@ fn gpu_occ_matches_cpu_basic() {
     let n = gpu_bwt.len() as u32;
     for c in 0..ALPHABET_SIZE as u8 {
         for i in 0..=n {
-            let expected = naive_rank(&gpu_bwt.data, c, i);
+            let expected = naive_rank(&gpu_bwt, c, i);
             let actual = gpu_occ.rank(c, i);
             assert_eq!(
                 actual, expected,
@@ -489,6 +489,7 @@ fn gpu_fm_index_count_matches_cpu() {
     let config = FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: true,
+        ..Default::default()
     };
 
     let cpu = FmIndex::build_cpu(&seqs, &config).unwrap();
@@ -518,6 +519,7 @@ fn gpu_fm_index_locate_matches_cpu() {
     let config = FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: true,
+        ..Default::default()
     };
 
     let cpu = FmIndex::build_cpu(&seqs, &config).unwrap();

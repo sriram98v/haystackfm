@@ -1,5 +1,4 @@
 use super::FmIndex;
-use crate::alphabet::compatible_symbols;
 
 impl FmIndex {
     /// Count occurrences of a pattern in the indexed text.
@@ -34,23 +33,66 @@ impl FmIndex {
             .collect()
     }
 
+    /// Locate all occurrences of a pattern, returning raw text positions.
+    ///
+    /// Cheaper than [`locate`] when sequence header strings are not needed — avoids
+    /// heap-allocating and cloning a `String` per hit. Positions are absolute offsets
+    /// into the concatenated text (including sentinel bytes between sequences).
+    pub fn locate_positions(&self, pattern: &[u8]) -> Vec<u32> {
+        self.backward_search(pattern)
+            .into_iter()
+            .flat_map(|(lo, hi)| lo..hi)
+            .map(|i| self.resolve_sa(i))
+            .collect()
+    }
+
     /// Backward search returning a union of SA intervals covering all IUPAC-compatible matches.
     ///
     /// Each step expands the query symbol to all compatible reference symbols via
     /// base-set intersection, collects one interval per compatible symbol, then
     /// merges overlapping intervals before the next step.
+    ///
+    /// When a `lookup` table is present and the last `lookup.depth` symbols are all
+    /// in ACGT, the search is seeded from the table (O(1)) and only the remaining
+    /// prefix characters are processed character-by-character.
     pub(crate) fn backward_search(&self, pattern: &[u8]) -> Vec<(u32, u32)> {
         if pattern.is_empty() {
             return vec![(0, self.text_len)];
         }
 
-        let mut intervals = vec![(0u32, self.text_len)];
+        // Attempt to seed from the depth-k lookup table.
+        let (mut intervals, start_rev_idx) = if let Some(ref lut) = self.lookup {
+            let depth = lut.depth as usize;
+            if pattern.len() >= depth {
+                let suffix = &pattern[pattern.len() - depth..];
+                if let Some(iv) = lut.get(suffix) {
+                    if iv.0 >= iv.1 {
+                        return vec![];
+                    }
+                    (vec![iv], pattern.len() - depth)
+                } else {
+                    (vec![(0u32, self.text_len)], pattern.len())
+                }
+            } else {
+                (vec![(0u32, self.text_len)], pattern.len())
+            }
+        } else {
+            (vec![(0u32, self.text_len)], pattern.len())
+        };
 
-        for &c in pattern.iter().rev() {
-            let compat = compatible_symbols(c);
-            let mut next: Vec<(u32, u32)> = Vec::new();
+        // Scratch buffer reused across steps to avoid per-step allocations.
+        let mut next: Vec<(u32, u32)> = Vec::with_capacity(16);
+
+        let compat_fn = self.alphabet_fns.compatible_fn;
+        for &c in pattern[..start_rev_idx].iter().rev() {
+            let compat = compat_fn(c);
+            next.clear();
             for &(lo, hi) in &intervals {
                 for &r in compat {
+                    // Skip symbols absent from the text — they contribute empty intervals.
+                    if self.c_array.symbol_count(r, self.text_len) == 0 {
+                        continue;
+                    }
                     let c_val = self.c_array.get(r);
                     let new_lo = c_val + self.occ.rank(r, lo);
                     let new_hi = c_val + self.occ.rank(r, hi);
@@ -59,11 +101,14 @@ impl FmIndex {
                     }
                 }
             }
-            next = merge_intervals(next);
+            // Merge only when multiple intervals exist (ACGT path: always 1).
+            if next.len() > 1 {
+                merge_intervals_inplace(&mut next);
+            }
             if next.is_empty() {
                 return vec![];
             }
-            intervals = next;
+            std::mem::swap(&mut intervals, &mut next);
         }
 
         intervals
@@ -129,25 +174,26 @@ impl FmIndex {
     }
 }
 
-/// Merge a list of SA intervals, combining overlapping or adjacent ones.
-fn merge_intervals(mut ivs: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
-    if ivs.is_empty() {
-        return ivs;
-    }
+/// Merge SA intervals in-place, combining overlapping or adjacent ones.
+///
+/// Only called when `ivs.len() > 1` (IUPAC multi-symbol paths).
+fn merge_intervals_inplace(ivs: &mut Vec<(u32, u32)>) {
     ivs.sort_unstable_by_key(|&(lo, _)| lo);
-    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ivs.len());
+    let mut write = 0usize;
     let (mut cur_lo, mut cur_hi) = ivs[0];
-    for &(lo, hi) in &ivs[1..] {
+    for read in 1..ivs.len() {
+        let (lo, hi) = ivs[read];
         if lo <= cur_hi {
             cur_hi = cur_hi.max(hi);
         } else {
-            merged.push((cur_lo, cur_hi));
+            ivs[write] = (cur_lo, cur_hi);
+            write += 1;
             cur_lo = lo;
             cur_hi = hi;
         }
     }
-    merged.push((cur_lo, cur_hi));
-    merged
+    ivs[write] = (cur_lo, cur_hi);
+    ivs.truncate(write + 1);
 }
 
 #[cfg(test)]
@@ -160,6 +206,7 @@ mod tests {
         let config = FmIndexConfig {
             sa_sample_rate: 1, // Full SA for exact testing
             use_gpu: false,
+            ..Default::default()
         };
         FmIndex::build_cpu(&[seq], &config).unwrap()
     }
@@ -172,6 +219,7 @@ mod tests {
         let config = FmIndexConfig {
             sa_sample_rate: 1,
             use_gpu: false,
+            ..Default::default()
         };
         FmIndex::build_cpu(&sequences, &config).unwrap()
     }
@@ -285,6 +333,7 @@ mod tests {
         let config = FmIndexConfig {
             sa_sample_rate: 4,
             use_gpu: false,
+            ..Default::default()
         };
         let idx = FmIndex::build_cpu(&[seq], &config).unwrap();
         // count doesn't use SA, so sampling shouldn't matter
@@ -297,6 +346,7 @@ mod tests {
         let config = FmIndexConfig {
             sa_sample_rate: 4,
             use_gpu: false,
+            ..Default::default()
         };
         let idx = FmIndex::build_cpu(&[seq], &config).unwrap();
         let mut positions = idx.locate(&encode_pattern("ACGT"));

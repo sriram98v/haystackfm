@@ -124,6 +124,7 @@ impl FmIndexBuilder {
         let config = FmIndexConfig {
             sa_sample_rate: self.sa_sample_rate,
             use_gpu: false,
+            ..Default::default()
         };
         let index = FmIndex::build_cpu(&self.sequences, &config).map_err(to_js_err)?;
         Ok(FmIndexHandle { index })
@@ -140,6 +141,7 @@ impl FmIndexBuilder {
         let config = FmIndexConfig {
             sa_sample_rate: self.sa_sample_rate,
             use_gpu: true,
+            ..Default::default()
         };
         let index = FmIndex::build(&self.sequences, &config)
             .await

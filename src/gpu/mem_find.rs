@@ -34,15 +34,86 @@ struct MemFindParams {
     rev_c: [u32; 16],
 }
 
-/// Private core: runs the two GPU MEM-finding passes.
+// ── Cached index buffers ──────────────────────────────────────────────────────
+
+/// GPU buffers for the bidirectional MEM-find index (Occ checkpoints + bitvectors).
 ///
-/// Returns `None` when no MEMs were found (all counts zero).
-/// Otherwise returns `(mems_flat, iv_flat, mem_counts, mem_offsets)` where
-/// `mems_flat` has stride 4: `[query_start, query_end, iv_offset, n_ivs]` per MEM,
-/// `iv_flat` has stride 2: `[fwd_lo, fwd_hi]` per interval.
-async fn run_mem_find_gpu(
+/// Build once per `BidirFmIndex` and reuse across query batches to avoid
+/// re-uploading the same large index data on every call.
+pub(crate) struct FindIndexBuffers {
+    pub chk_buf: wgpu::Buffer,
+    pub bv_buf: wgpu::Buffer,
+    pub fwd_text_len: u32,
+    pub rev_text_len: u32,
+    pub fwd_num_blocks: u32,
+    pub rev_num_blocks: u32,
+    pub fwd_c: [u32; 16],
+    pub rev_c: [u32; 16],
+}
+
+impl FindIndexBuffers {
+    /// Upload fwd + rev Occ checkpoints and bitvectors to the GPU.
+    pub fn new(ctx: &GpuContext, bidir: &BidirFmIndex) -> Self {
+        let block_size: u32 = 64;
+        let alpha = ALPHABET_SIZE as u32;
+        let fwd_text_len = bidir.fwd.text_len;
+        let rev_text_len = bidir.rev.text_len;
+        let fwd_num_blocks = (fwd_text_len + block_size - 1) / block_size;
+        let rev_num_blocks = (rev_text_len + block_size - 1) / block_size;
+        let fwd_c: [u32; 16] = bidir.fwd.c_array.data;
+        let rev_c: [u32; 16] = bidir.rev.c_array.data;
+
+        let mut all_checkpoints: Vec<u32> =
+            Vec::with_capacity(((fwd_num_blocks + rev_num_blocks) * alpha) as usize);
+        for block in bidir.fwd.occ.flat_block_checkpoints() {
+            all_checkpoints.extend_from_slice(&block);
+        }
+        for block in bidir.rev.occ.flat_block_checkpoints() {
+            all_checkpoints.extend_from_slice(&block);
+        }
+
+        let mut all_bitvectors: Vec<u32> =
+            Vec::with_capacity(((fwd_num_blocks + rev_num_blocks) * alpha * 2) as usize);
+        for block in &bidir.fwd.occ.bitvectors {
+            for &bv64 in block.iter() {
+                all_bitvectors.push(bv64 as u32);
+                all_bitvectors.push((bv64 >> 32) as u32);
+            }
+        }
+        for block in &bidir.rev.occ.bitvectors {
+            for &bv64 in block.iter() {
+                all_bitvectors.push(bv64 as u32);
+                all_bitvectors.push((bv64 >> 32) as u32);
+            }
+        }
+
+        let chk_buf = ctx.create_buffer_init("mem_chk", &all_checkpoints);
+        let bv_buf = ctx.create_buffer_init("mem_bv", &all_bitvectors);
+        Self {
+            chk_buf,
+            bv_buf,
+            fwd_text_len,
+            rev_text_len,
+            fwd_num_blocks,
+            rev_num_blocks,
+            fwd_c,
+            rev_c,
+        }
+    }
+}
+
+// ── Two-pass MEM-find dispatch ────────────────────────────────────────────────
+
+/// Run the two-pass MEM-find using pre-uploaded index buffers.
+///
+/// Only allocates per-batch query/output buffers; the heavy index buffers in
+/// `idx` are reused without re-upload across batches.
+///
+/// Returns `None` when no MEMs were found.
+/// Otherwise returns `(mems_flat, iv_flat, mem_counts, mem_offsets)`.
+pub(crate) async fn run_mem_find_batch(
     ctx: &GpuContext,
-    bidir: &BidirFmIndex,
+    idx: &FindIndexBuffers,
     queries: &[&[u8]],
     min_len: usize,
     mode: u32,
@@ -52,42 +123,6 @@ async fn run_mem_find_gpu(
     }
 
     let n_queries = queries.len() as u32;
-    let block_size: u32 = 64;
-    let alpha = ALPHABET_SIZE as u32;
-
-    let fwd_text_len = bidir.fwd.text_len;
-    let rev_text_len = bidir.rev.text_len;
-    let fwd_num_blocks = (fwd_text_len + block_size - 1) / block_size;
-    let rev_num_blocks = (rev_text_len + block_size - 1) / block_size;
-
-    let fwd_c: [u32; 16] = bidir.fwd.c_array.data;
-    let rev_c: [u32; 16] = bidir.rev.c_array.data;
-
-    // Flatten fwd then rev checkpoints into a single buffer.
-    let mut all_checkpoints: Vec<u32> =
-        Vec::with_capacity(((fwd_num_blocks + rev_num_blocks) * alpha) as usize);
-    for block in &bidir.fwd.occ.checkpoints {
-        all_checkpoints.extend_from_slice(block);
-    }
-    for block in &bidir.rev.occ.checkpoints {
-        all_checkpoints.extend_from_slice(block);
-    }
-
-    // Flatten fwd then rev bitvectors (each u64 split lo/hi).
-    let mut all_bitvectors: Vec<u32> =
-        Vec::with_capacity(((fwd_num_blocks + rev_num_blocks) * alpha * 2) as usize);
-    for block in &bidir.fwd.occ.bitvectors {
-        for &bv64 in block.iter() {
-            all_bitvectors.push(bv64 as u32);
-            all_bitvectors.push((bv64 >> 32) as u32);
-        }
-    }
-    for block in &bidir.rev.occ.bitvectors {
-        for &bv64 in block.iter() {
-            all_bitvectors.push(bv64 as u32);
-            all_bitvectors.push((bv64 >> 32) as u32);
-        }
-    }
 
     // Encode queries flat + per-query offsets.
     let mut queries_flat: Vec<u32> = Vec::new();
@@ -103,8 +138,6 @@ async fn run_mem_find_gpu(
         queries_flat.push(0); // wgpu requires non-zero-size buffers
     }
 
-    let chk_buf = ctx.create_buffer_init("mem_chk", &all_checkpoints);
-    let bv_buf = ctx.create_buffer_init("mem_bv", &all_bitvectors);
     let qflat_buf = ctx.create_buffer_init("mem_qflat", &queries_flat);
     let qoff_buf = ctx.create_buffer_init("mem_qoff", &query_offsets);
 
@@ -118,14 +151,14 @@ async fn run_mem_find_gpu(
     let count_params = MemFindParams {
         n_queries,
         min_len: min_len as u32,
-        fwd_text_len,
-        rev_text_len,
-        fwd_num_blocks,
-        rev_num_blocks,
+        fwd_text_len: idx.fwd_text_len,
+        rev_text_len: idx.rev_text_len,
+        fwd_num_blocks: idx.fwd_num_blocks,
+        rev_num_blocks: idx.rev_num_blocks,
         mode,
         total_mems: 0,
-        fwd_c,
-        rev_c,
+        fwd_c: idx.fwd_c,
+        rev_c: idx.rev_c,
     };
     let count_params_buf = ctx.create_uniform_buffer("mem_count_params", &count_params);
 
@@ -144,11 +177,11 @@ async fn run_mem_find_gpu(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: chk_buf.as_entire_binding(),
+                resource: idx.chk_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: bv_buf.as_entire_binding(),
+                resource: idx.bv_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 4,
@@ -236,11 +269,11 @@ async fn run_mem_find_gpu(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: chk_buf.as_entire_binding(),
+                resource: idx.chk_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: bv_buf.as_entire_binding(),
+                resource: idx.bv_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 4,
@@ -270,6 +303,24 @@ async fn run_mem_find_gpu(
     let results_flat = ctx.download_buffer(&mems_out_buf, total_mems * 4).await;
     let iv_flat = ctx.download_buffer(&iv_out_buf, total_ivs.max(1) * 2).await;
     Ok(Some((results_flat, iv_flat, mem_counts, mem_offsets)))
+}
+
+/// Private core: runs the two GPU MEM-finding passes (thin wrapper).
+///
+/// Builds `FindIndexBuffers` from `bidir` and delegates to `run_mem_find_batch`.
+/// Existing callers (`find_mems_batch_gpu`, etc.) use this path unchanged.
+async fn run_mem_find_gpu(
+    ctx: &GpuContext,
+    bidir: &BidirFmIndex,
+    queries: &[&[u8]],
+    min_len: usize,
+    mode: u32,
+) -> Result<Option<(Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>)>, FmIndexError> {
+    if queries.is_empty() {
+        return Ok(None);
+    }
+    let idx = FindIndexBuffers::new(ctx, bidir);
+    run_mem_find_batch(ctx, &idx, queries, min_len, mode).await
 }
 
 /// GPU-accelerated batch MEM/SMEM finding (count + span only).
@@ -329,6 +380,47 @@ pub(crate) async fn find_mem_intervals_batch_gpu(
     let n = queries.len();
     let Some((flat, iv_flat, counts, offsets)) =
         run_mem_find_gpu(ctx, bidir, queries, min_len, mode).await?
+    else {
+        return Ok(vec![vec![]; n]);
+    };
+    let mut output: Vec<Vec<RawMemInterval>> = vec![vec![]; n];
+    for (q, &count) in counts.iter().enumerate() {
+        let off = offsets[q] as usize;
+        let mut hits = Vec::new();
+        for k in 0..count as usize {
+            let base = (off + k) * 4;
+            let qs = flat[base];
+            let qe = flat[base + 1];
+            let iv_off = flat[base + 2] as usize;
+            let n_ivs = flat[base + 3] as usize;
+            for i in 0..n_ivs {
+                hits.push(RawMemInterval {
+                    query_start: qs,
+                    query_end: qe,
+                    fwd_lo: iv_flat[(iv_off + i) * 2],
+                    fwd_hi: iv_flat[(iv_off + i) * 2 + 1],
+                });
+            }
+        }
+        output[q] = hits;
+    }
+    Ok(output)
+}
+
+/// Like `find_mem_intervals_batch_gpu` but reuses pre-uploaded index buffers.
+///
+/// Use inside a batched loop where `FindIndexBuffers` is built once and shared
+/// across query chunks to avoid re-uploading checkpoints/bitvectors.
+pub(crate) async fn find_mem_intervals_for_batch(
+    ctx: &GpuContext,
+    idx: &FindIndexBuffers,
+    queries: &[&[u8]],
+    min_len: usize,
+    mode: u32,
+) -> Result<Vec<Vec<RawMemInterval>>, FmIndexError> {
+    let n = queries.len();
+    let Some((flat, iv_flat, counts, offsets)) =
+        run_mem_find_batch(ctx, idx, queries, min_len, mode).await?
     else {
         return Ok(vec![vec![]; n]);
     };

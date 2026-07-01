@@ -1,4 +1,4 @@
-use crate::alphabet::{self, DnaSequence};
+use crate::alphabet::{self, Alphabet, DnaSequence, IupacDna};
 use crate::error::FmIndexError;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::{FmIndex, FmIndexConfig};
@@ -36,8 +36,21 @@ pub struct BidirFmIndex {
 impl BidirFmIndex {
     // ── Construction ──────────────────────────────────────────────────────────
 
-    /// Build a bidirectional FM-index from DNA sequences using the CPU.
+    /// Build a bidirectional FM-index from DNA sequences using the CPU with [`IupacDna`]
+    /// alphabet (full IUPAC ambiguity-code matching — the default).
+    ///
+    /// To use a different alphabet, call [`build_cpu_with`].
+    ///
+    /// [`build_cpu_with`]: BidirFmIndex::build_cpu_with
     pub fn build_cpu(
+        sequences: &[DnaSequence],
+        config: &FmIndexConfig,
+    ) -> Result<Self, FmIndexError> {
+        Self::build_cpu_with::<IupacDna>(sequences, config)
+    }
+
+    /// Build a bidirectional FM-index using CPU with a custom [`Alphabet`].
+    pub fn build_cpu_with<A: Alphabet>(
         sequences: &[DnaSequence],
         config: &FmIndexConfig,
     ) -> Result<Self, FmIndexError> {
@@ -48,15 +61,17 @@ impl BidirFmIndex {
         let (text, _) = alphabet::concatenate_sequences(sequences)?;
 
         // Forward index.
-        let fwd = FmIndex::build_cpu(sequences, config)?;
+        let fwd = FmIndex::build_cpu_with::<A>(sequences, config)?;
 
         // Reverse index: built on the byte-reversal of the same concatenated text.
         let rev_seq = reverse_as_sequence(&text)?;
-        let rev = FmIndex::build_cpu(
+        let rev = FmIndex::build_cpu_with::<A>(
             &[rev_seq],
             &FmIndexConfig {
                 sa_sample_rate: config.sa_sample_rate,
                 use_gpu: false,
+                lookup_depth: 0,
+                build_threads: config.build_threads,
             },
         )?;
 
@@ -88,6 +103,7 @@ impl BidirFmIndex {
         let rev_config = FmIndexConfig {
             sa_sample_rate: config.sa_sample_rate,
             use_gpu: true,
+            ..Default::default()
         };
 
         // Build sequentially: both paths share the GPU device pool and
@@ -259,7 +275,112 @@ impl BidirFmIndex {
     }
 }
 
+// ── Resolve batching helpers ──────────────────────────────────────────────────
+
+/// A contiguous SA sub-range derived from one MEM interval, carrying enough
+/// context to scatter results back into `output[q][m].positions[dest_start..]`.
+#[cfg(feature = "gpu")]
+struct SubInterval {
+    fwd_lo: u32,
+    fwd_hi: u32, // exclusive; `fwd_hi - fwd_lo` <= budget
+    q: usize,
+    m: usize,
+    dest_start: usize,
+}
+
+/// One GPU resolve dispatch: a batch of sub-intervals whose total hit count fits
+/// within the per-batch budget.
+#[cfg(feature = "gpu")]
+struct ResolveBatch {
+    intervals_flat: Vec<u32>,    // stride-2: [fwd_lo, fwd_hi] per sub-interval
+    position_offsets: Vec<u32>,  // exclusive prefix-sum (len = n_subs + 1)
+    total_pos: u32,
+    slot_map: Vec<(usize, usize, usize)>, // (q, m, dest_start) per sub-interval
+}
+
+/// Split `flat_intervals` into batches whose summed hit count <= `budget`.
+///
+/// Intervals whose raw hit count exceeds `budget` (after capping at
+/// `max_hits_per_mem`) are split into disjoint SA sub-ranges so no data is lost.
+#[cfg(feature = "gpu")]
+fn plan_resolve_batches(
+    flat_intervals: &[crate::gpu::RawMemInterval],
+    index_map: &[(usize, usize)],
+    max_hits_per_mem: u32,
+    budget: u32,
+) -> Vec<ResolveBatch> {
+    // Expand each interval into (possibly many) sub-intervals.
+    let mut subs: Vec<SubInterval> = Vec::new();
+    for (k, iv) in flat_intervals.iter().enumerate() {
+        let (q, m) = index_map[k];
+        let raw = iv.fwd_hi.saturating_sub(iv.fwd_lo);
+        let effective = raw.min(max_hits_per_mem);
+        if effective == 0 {
+            continue;
+        }
+        let mut dest_start = 0usize;
+        let mut lo = iv.fwd_lo;
+        let mut remaining = effective;
+        while remaining > 0 {
+            let chunk = remaining.min(budget);
+            subs.push(SubInterval {
+                fwd_lo: lo,
+                fwd_hi: lo + chunk,
+                q,
+                m,
+                dest_start,
+            });
+            lo += chunk;
+            dest_start += chunk as usize;
+            remaining -= chunk;
+        }
+    }
+
+    // Greedily pack sub-intervals into batches.
+    let mut batches: Vec<ResolveBatch> = Vec::new();
+    let mut current_subs: Vec<SubInterval> = Vec::new();
+    let mut current_total: u32 = 0;
+
+    for sub in subs {
+        let hits = sub.fwd_hi - sub.fwd_lo;
+        if !current_subs.is_empty() && current_total + hits > budget {
+            batches.push(make_resolve_batch(current_subs));
+            current_subs = Vec::new();
+            current_total = 0;
+        }
+        current_total += hits;
+        current_subs.push(sub);
+    }
+    if !current_subs.is_empty() {
+        batches.push(make_resolve_batch(current_subs));
+    }
+    batches
+}
+
+#[cfg(feature = "gpu")]
+fn make_resolve_batch(subs: Vec<SubInterval>) -> ResolveBatch {
+    let mut intervals_flat = Vec::with_capacity(subs.len() * 2);
+    let mut position_offsets = Vec::with_capacity(subs.len() + 1);
+    let mut slot_map = Vec::with_capacity(subs.len());
+    position_offsets.push(0u32);
+    for sub in &subs {
+        intervals_flat.push(sub.fwd_lo);
+        intervals_flat.push(sub.fwd_hi);
+        let hits = sub.fwd_hi - sub.fwd_lo;
+        let prev = *position_offsets.last().unwrap();
+        position_offsets.push(prev + hits);
+        slot_map.push((sub.q, sub.m, sub.dest_start));
+    }
+    let total_pos = *position_offsets.last().unwrap();
+    ResolveBatch { intervals_flat, position_offsets, total_pos, slot_map }
+}
+
+// ── Orchestrator ──────────────────────────────────────────────────────────────
+
 /// Shared GPU pipeline: MEM find → SA resolve → ref boundary map → MemHit assembly.
+///
+/// Uploads index buffers once; batches both the find and resolve phases against
+/// `ctx.output_budget_u32()` to avoid `max_storage_buffer_binding_size` overflow.
 #[cfg(feature = "gpu")]
 async fn resolve_mem_hits_gpu(
     ctx: &crate::gpu::GpuContext,
@@ -270,16 +391,46 @@ async fn resolve_mem_hits_gpu(
     ref_boundaries: &[u32],
     max_hits_per_mem: u32,
 ) -> Result<Vec<Vec<crate::gpu::MemHit>>, FmIndexError> {
-    use crate::gpu::mem_find::find_mem_intervals_batch_gpu;
-    use crate::gpu::mem_resolve::resolve_mem_intervals_gpu;
+    use crate::gpu::{FindIndexBuffers, ResolveIndexBuffers, find_mem_intervals_for_batch, resolve_intervals_batch};
     use crate::gpu::ref_map::map_positions_to_refs;
     use crate::gpu::MemHit;
 
-    let per_query_intervals =
-        find_mem_intervals_batch_gpu(ctx, bidir, encoded, min_len, mode).await?;
+    let budget = ctx.output_budget_u32();
 
-    // Flatten all intervals; record (query_idx, mem_idx) for reassembly.
-    let mut flat_intervals = Vec::new();
+    // Upload index buffers once.
+    let find_idx = FindIndexBuffers::new(ctx, bidir);
+    let resolve_idx = ResolveIndexBuffers::new(ctx, &bidir.fwd)?;
+
+    // ── Find phase ────────────────────────────────────────────────────────────
+    // Chunk queries so queries_flat fits within budget.
+    let mut per_query_intervals: Vec<Vec<crate::gpu::RawMemInterval>> =
+        vec![Vec::new(); encoded.len()];
+
+    let mut chunk_start = 0usize;
+    while chunk_start < encoded.len() {
+        // Accumulate queries until adding the next would exceed budget.
+        let mut flat_len: u32 = 0;
+        let mut chunk_end = chunk_start;
+        while chunk_end < encoded.len() {
+            let q_len = encoded[chunk_end].len() as u32;
+            if chunk_end > chunk_start && flat_len + q_len > budget {
+                break;
+            }
+            flat_len += q_len;
+            chunk_end += 1;
+        }
+
+        let chunk = &encoded[chunk_start..chunk_end];
+        let chunk_ivs = find_mem_intervals_for_batch(ctx, &find_idx, chunk, min_len, mode).await?;
+
+        for (i, ivs) in chunk_ivs.into_iter().enumerate() {
+            per_query_intervals[chunk_start + i] = ivs;
+        }
+        chunk_start = chunk_end;
+    }
+
+    // ── Flatten intervals + build index_map ──────────────────────────────────
+    let mut flat_intervals: Vec<crate::gpu::RawMemInterval> = Vec::new();
     let mut index_map: Vec<(usize, usize)> = Vec::new();
     for (q, mems) in per_query_intervals.iter().enumerate() {
         for (m, iv) in mems.iter().enumerate() {
@@ -288,17 +439,20 @@ async fn resolve_mem_hits_gpu(
         }
     }
 
-    // Build output skeleton.
+    // ── Build output skeleton with empty positions ────────────────────────────
     let mut output: Vec<Vec<MemHit>> = per_query_intervals
         .iter()
         .map(|mems| {
             mems.iter()
-                .map(|iv| MemHit {
-                    query_start: iv.query_start,
-                    query_end: iv.query_end,
-                    match_count: iv.fwd_hi.saturating_sub(iv.fwd_lo),
-                    positions: Vec::new(),
-                    truncated: false,
+                .map(|iv| {
+                    let raw = iv.fwd_hi.saturating_sub(iv.fwd_lo);
+                    MemHit {
+                        query_start: iv.query_start,
+                        query_end: iv.query_end,
+                        match_count: raw,
+                        positions: Vec::new(),
+                        truncated: raw > max_hits_per_mem,
+                    }
                 })
                 .collect()
         })
@@ -308,28 +462,43 @@ async fn resolve_mem_hits_gpu(
         return Ok(output);
     }
 
-    let Some((positions_flat, pos_offsets)) =
-        resolve_mem_intervals_gpu(ctx, &bidir.fwd, &flat_intervals, max_hits_per_mem).await?
-    else {
-        return Ok(output);
-    };
-
-    // Mark truncated MEMs.
+    // Pre-allocate position slots now that we know we'll resolve.
     for (k, iv) in flat_intervals.iter().enumerate() {
-        let raw_count = iv.fwd_hi.saturating_sub(iv.fwd_lo);
-        let resolved = pos_offsets[k + 1] - pos_offsets[k];
-        if raw_count > resolved {
-            let (q, m) = index_map[k];
-            output[q][m].truncated = true;
-        }
+        let (q, m) = index_map[k];
+        let raw = iv.fwd_hi.saturating_sub(iv.fwd_lo);
+        let effective = raw.min(max_hits_per_mem) as usize;
+        output[q][m].positions = vec![(0u32, 0u32); effective];
     }
 
-    let (ref_ids, ref_offs) = map_positions_to_refs(ctx, &positions_flat, ref_boundaries).await?;
+    // ── Resolve phase (batched) ───────────────────────────────────────────────
+    let batches = plan_resolve_batches(&flat_intervals, &index_map, max_hits_per_mem, budget);
 
-    for (k, &(q, m)) in index_map.iter().enumerate() {
-        let start = pos_offsets[k] as usize;
-        let end = pos_offsets[k + 1] as usize;
-        output[q][m].positions = (start..end).map(|i| (ref_ids[i], ref_offs[i])).collect();
+    for batch in batches {
+        if batch.total_pos == 0 {
+            continue;
+        }
+        let positions_flat = resolve_intervals_batch(
+            ctx,
+            &resolve_idx,
+            &batch.intervals_flat,
+            &batch.position_offsets,
+            batch.total_pos,
+        )
+        .await;
+
+        let (ref_ids, ref_offs) =
+            map_positions_to_refs(ctx, &positions_flat, ref_boundaries).await?;
+
+        // Scatter into pre-allocated slots.
+        for (i, &(q, m, dest_start)) in batch.slot_map.iter().enumerate() {
+            let start = batch.position_offsets[i] as usize;
+            let end = batch.position_offsets[i + 1] as usize;
+            let hits = end - start;
+            let dst = &mut output[q][m].positions[dest_start..dest_start + hits];
+            for (j, slot) in dst.iter_mut().enumerate() {
+                *slot = (ref_ids[start + j], ref_offs[start + j]);
+            }
+        }
     }
 
     Ok(output)
@@ -366,6 +535,7 @@ mod tests {
         let config = FmIndexConfig {
             sa_sample_rate: 1,
             use_gpu: false,
+            ..Default::default()
         };
         BidirFmIndex::build_cpu(&[DnaSequence::from_str(s).unwrap()], &config).unwrap()
     }

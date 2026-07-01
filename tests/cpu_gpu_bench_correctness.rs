@@ -75,7 +75,7 @@ fn gpu_bwt_matches_cpu_small() {
     let sa = cpu_sa(&text);
     let cpu = cpu_bwt(&text, &sa);
     let gpu = pollster::block_on(BwtPipelines::new(&ctx).build_bwt(&ctx, &text, &sa));
-    assert_eq!(cpu.data, gpu.data, "BWT mismatch on small input");
+    assert_eq!(cpu, gpu, "BWT mismatch on small input");
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn gpu_bwt_matches_cpu_1k() {
     let sa = cpu_sa(&text);
     let cpu = cpu_bwt(&text, &sa);
     let gpu = pollster::block_on(BwtPipelines::new(&ctx).build_bwt(&ctx, &text, &sa));
-    assert_eq!(cpu.data, gpu.data, "BWT mismatch on 1 K input");
+    assert_eq!(cpu, gpu, "BWT mismatch on 1 K input");
 }
 
 // ── OCC table ────────────────────────────────────────────────────────────────

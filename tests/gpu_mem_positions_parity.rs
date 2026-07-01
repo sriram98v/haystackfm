@@ -12,6 +12,7 @@ mod tests {
         FmIndexConfig {
             sa_sample_rate: 1,
             use_gpu: false,
+            ..Default::default()
         }
     }
 

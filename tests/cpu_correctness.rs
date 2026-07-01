@@ -74,7 +74,7 @@ fn bwt_is_permutation_of_text() {
     let sa = build_suffix_array(&text);
     let bwt = build_bwt(&text, &sa);
 
-    let mut bwt_sorted = bwt.data.clone();
+    let mut bwt_sorted: Vec<u8> = bwt.iter_chars().collect();
     bwt_sorted.sort();
     let mut text_sorted = text.clone();
     text_sorted.sort();
@@ -106,11 +106,11 @@ fn c_array_values_correct() {
     let text = encode("ACGTACGT");
     let sa = build_suffix_array(&text);
     let bwt = build_bwt(&text, &sa);
-    let c_array = CArray::from_text(&bwt.data);
+    let c_array = CArray::from_bwt(&bwt);
 
     // Count each character in BWT (which is a permutation of text)
     let mut freq = [0u32; ALPHABET_SIZE];
-    for &ch in &bwt.data {
+    for ch in bwt.iter_chars() {
         freq[ch as usize] += 1;
     }
 
@@ -138,7 +138,7 @@ fn occ_table_matches_naive_for_all_positions() {
         let n = bwt.len() as u32;
         for c in 0..ALPHABET_SIZE as u8 {
             for i in 0..=n {
-                let expected = naive_rank(&bwt.data, c, i);
+                let expected = naive_rank(&bwt, c, i);
                 let actual = occ.rank(c, i);
                 assert_eq!(
                     actual, expected,
@@ -166,7 +166,7 @@ fn occ_table_multi_block() {
             if i > n {
                 continue;
             }
-            let expected = naive_rank(&bwt.data, c, i);
+            let expected = naive_rank(&bwt, c, i);
             let actual = occ.rank(c, i);
             assert_eq!(
                 actual, expected,

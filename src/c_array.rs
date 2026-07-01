@@ -1,4 +1,5 @@
 use crate::alphabet::ALPHABET_SIZE;
+use crate::bwt::Bwt;
 
 /// C array: C[c] = number of characters in the text that are lexicographically smaller than c.
 ///
@@ -29,9 +30,40 @@ impl CArray {
         Self { data }
     }
 
+    /// Build C array from a packed BWT (4-bit encoded).
+    pub fn from_bwt(bwt: &Bwt) -> Self {
+        let mut freq = [0u32; ALPHABET_SIZE];
+        for ch in bwt.iter_chars() {
+            if (ch as usize) < ALPHABET_SIZE {
+                freq[ch as usize] += 1;
+            }
+        }
+        let mut data = [0u32; ALPHABET_SIZE];
+        let mut sum = 0u32;
+        for i in 0..ALPHABET_SIZE {
+            data[i] = sum;
+            sum += freq[i];
+        }
+        Self { data }
+    }
+
     /// Get C[c]: number of characters smaller than c in the text.
     pub fn get(&self, c: u8) -> u32 {
         self.data[c as usize]
+    }
+
+    /// Number of occurrences of symbol `c` in the text.
+    ///
+    /// Used to skip absent symbols in backward search without calling `rank`.
+    #[inline]
+    pub fn symbol_count(&self, c: u8, text_len: u32) -> u32 {
+        let next = (c as usize) + 1;
+        let upper = if next < ALPHABET_SIZE {
+            self.data[next]
+        } else {
+            text_len
+        };
+        upper - self.data[c as usize]
     }
 }
 

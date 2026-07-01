@@ -123,6 +123,7 @@ fn multi_sequence_queries() {
     let config = webgpu_fmidx::FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: false,
+        ..Default::default()
     };
     let idx = webgpu_fmidx::FmIndex::build_cpu(&seqs, &config).unwrap();
 

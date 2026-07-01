@@ -38,6 +38,7 @@ fn build_index(texts: &[String], sa_sample_rate: usize) -> FmIndex {
         &FmIndexConfig {
             sa_sample_rate: sa_sample_rate as u32,
             use_gpu: false,
+            ..Default::default()
         },
     )
     .unwrap()

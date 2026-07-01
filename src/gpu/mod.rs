@@ -6,7 +6,9 @@ pub mod mem_hit;
 pub mod mem_resolve;
 pub mod ref_map;
 pub use mem_find::RawMemInterval;
+pub(crate) use mem_find::{FindIndexBuffers, find_mem_intervals_for_batch};
 pub use mem_hit::MemHit;
+pub(crate) use mem_resolve::{ResolveIndexBuffers, resolve_intervals_batch};
 pub mod pipeline;
 pub mod prefix_sum;
 pub mod radix_sort;
@@ -66,5 +68,16 @@ impl GpuContext {
     /// Maximum number of u32 elements that fit in a single storage buffer.
     pub fn max_buffer_elements(&self) -> u32 {
         (self.device.limits().max_buffer_size / 4) as u32
+    }
+
+    /// Safe per-batch u32 budget for a single output storage binding.
+    ///
+    /// Uses 90% of `max_storage_buffer_binding_size` to leave headroom for
+    /// alignment padding and other bookkeeping.  All auto-sized batches cap
+    /// their output buffers at this value.
+    pub fn output_budget_u32(&self) -> u32 {
+        let binding = self.device.limits().max_storage_buffer_binding_size as u64;
+        let elems = binding / 4; // bytes → u32 slots
+        (elems * 9 / 10).min(u32::MAX as u64) as u32
     }
 }

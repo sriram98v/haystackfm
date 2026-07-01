@@ -1,4 +1,8 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+#[path = "bench_utils.rs"]
+mod bench_utils;
+
+use bench_utils::{gpu_available, measure_ms};
+use criterion::{BenchmarkId, Criterion};
 use pollster::FutureExt as _;
 use webgpu_fmidx::alphabet::DnaSequence;
 use webgpu_fmidx::{BidirFmIndex, FmIndexConfig};
@@ -111,11 +115,101 @@ fn bench_smem_gpu(_c: &mut Criterion) {}
 #[cfg(not(feature = "gpu"))]
 fn bench_mem_gpu(_c: &mut Criterion) {}
 
-criterion_group!(
-    benches,
-    bench_smem_cpu,
-    bench_smem_gpu,
-    bench_mem_cpu,
-    bench_mem_gpu
-);
-criterion_main!(benches);
+// ── Speedup summary ───────────────────────────────────────────────────────────
+
+#[cfg(feature = "gpu")]
+fn print_mem_speedup_table() {
+    const BATCH_SIZES: &[usize] = &[1, 8, 64];
+    const WARMUP: usize = 1;
+    const ITERS: usize = 3;
+
+    let corpus = random_dna(10_000, 42);
+    let idx = build_bidir(&corpus);
+
+    let sep = "─".repeat(66);
+    let dbl = "═".repeat(66);
+    eprintln!("\n{dbl}");
+    eprintln!("  MEM/SMEM CPU vs GPU Speedup  (warmup={WARMUP}, iters={ITERS})");
+    eprintln!("{dbl}");
+    eprintln!(
+        "  {:<12} {:>6} {:>10}  {:>10}  {:>8}",
+        "Stage", "Batch", "CPU (ms)", "GPU (ms)", "Speedup"
+    );
+    eprintln!("  {sep}");
+
+    for &n in BATCH_SIZES {
+        let queries = make_queries(&corpus, 50, n);
+
+        // SMEM
+        let cpu_ms = measure_ms(
+            || {
+                for q in &queries {
+                    let _ = idx.find_smems(q.as_slice(), MIN_LEN, false);
+                }
+            },
+            WARMUP,
+            ITERS,
+        );
+        let gpu_ms = measure_ms(
+            || {
+                let _ = idx.find_smems_gpu(&queries, MIN_LEN, &[], 1024).block_on().unwrap();
+            },
+            WARMUP,
+            ITERS,
+        );
+        let speedup = cpu_ms / gpu_ms;
+        let marker = if speedup >= 1.0 { "▲" } else { "▼" };
+        eprintln!(
+            "  {:<12} {:>6} {:>10.3}  {:>10.3}  {:>6.2}x {marker}",
+            "SMEM", n, cpu_ms, gpu_ms, speedup
+        );
+
+        // MEM
+        let cpu_ms = measure_ms(
+            || {
+                for q in &queries {
+                    let _ = idx.find_mems(q.as_slice(), MIN_LEN, false);
+                }
+            },
+            WARMUP,
+            ITERS,
+        );
+        let gpu_ms = measure_ms(
+            || {
+                let _ = idx.find_mems_gpu(&queries, MIN_LEN, &[], 1024).block_on().unwrap();
+            },
+            WARMUP,
+            ITERS,
+        );
+        let speedup = cpu_ms / gpu_ms;
+        let marker = if speedup >= 1.0 { "▲" } else { "▼" };
+        eprintln!(
+            "  {:<12} {:>6} {:>10.3}  {:>10.3}  {:>6.2}x {marker}",
+            "MEM", n, cpu_ms, gpu_ms, speedup
+        );
+    }
+    eprintln!("  {sep}");
+    eprintln!("{dbl}");
+    eprintln!("  ▲ = GPU faster   ▼ = CPU faster");
+    eprintln!("{dbl}\n");
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+fn main() {
+    #[cfg(feature = "gpu")]
+    {
+        if gpu_available() {
+            print_mem_speedup_table();
+        } else {
+            eprintln!("Note: GPU not available – running CPU-only benchmarks.");
+        }
+    }
+
+    let mut c = Criterion::default().configure_from_args();
+    bench_smem_cpu(&mut c);
+    bench_smem_gpu(&mut c);
+    bench_mem_cpu(&mut c);
+    bench_mem_gpu(&mut c);
+    c.final_summary();
+}

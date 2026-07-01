@@ -1,4 +1,3 @@
-use crate::alphabet::compatible_symbols;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::BidirFmIndex;
 use crate::fm_index::FmIndex;
@@ -201,9 +200,9 @@ impl BidirFmIndex {
     }
 }
 
-/// Extend each interval in `ivs` right by `c`, using IUPAC base-set intersection.
+/// Extend each interval in `ivs` right by `c`, using the index's alphabet compatibility.
 fn extend_multi_right(ivs: &[BidirInterval], c: u8, rev: &FmIndex) -> Vec<BidirInterval> {
-    let bases = compatible_symbols(c);
+    let bases = (rev.alphabet_fns.compatible_fn)(c);
     let mut result = Vec::new();
     for &base in bases {
         for iv in ivs {
@@ -215,9 +214,9 @@ fn extend_multi_right(ivs: &[BidirInterval], c: u8, rev: &FmIndex) -> Vec<BidirI
     result
 }
 
-/// Extend each interval in `ivs` left by `c`, using IUPAC base-set intersection.
+/// Extend each interval in `ivs` left by `c`, using the index's alphabet compatibility.
 fn extend_multi_left(ivs: &[BidirInterval], c: u8, fwd: &FmIndex) -> Vec<BidirInterval> {
-    let bases = compatible_symbols(c);
+    let bases = (fwd.alphabet_fns.compatible_fn)(c);
     let mut result = Vec::new();
     for &base in bases {
         for iv in ivs {
@@ -243,6 +242,7 @@ mod tests {
         let config = FmIndexConfig {
             sa_sample_rate: 1,
             use_gpu: false,
+            ..Default::default()
         };
         BidirFmIndex::build_cpu(&[DnaSequence::from_str(s).unwrap()], &config).unwrap()
     }
@@ -393,6 +393,7 @@ mod tests {
         let uni_config = FmIndexConfig {
             sa_sample_rate: 1,
             use_gpu: false,
+            ..Default::default()
         };
         let uni =
             FmIndex::build_cpu(&[DnaSequence::from_str(reference).unwrap()], &uni_config).unwrap();

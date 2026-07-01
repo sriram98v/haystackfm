@@ -19,6 +19,7 @@ fn config() -> FmIndexConfig {
     FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: true,
+        ..Default::default()
     }
 }
 

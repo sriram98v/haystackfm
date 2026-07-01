@@ -15,6 +15,7 @@ fn bidir_single(s: &str) -> BidirFmIndex {
     let config = FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: false,
+        ..Default::default()
     };
     BidirFmIndex::build_cpu(&[DnaSequence::from_str(s).unwrap()], &config).unwrap()
 }
@@ -27,6 +28,7 @@ fn bidir_multi(seqs: &[&str]) -> BidirFmIndex {
     let config = FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: false,
+        ..Default::default()
     };
     BidirFmIndex::build_cpu(&dna, &config).unwrap()
 }
@@ -35,6 +37,7 @@ fn uni(s: &str) -> FmIndex {
     let config = FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: false,
+        ..Default::default()
     };
     FmIndex::build_cpu(&[DnaSequence::from_str(s).unwrap()], &config).unwrap()
 }

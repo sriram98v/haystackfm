@@ -66,6 +66,6 @@ impl BwtPipelines {
 
         let bwt_u32 = ctx.download_buffer(&bwt_buf, n).await;
         let data: Vec<u8> = bwt_u32.iter().map(|&v| v as u8).collect();
-        Bwt { data }
+        Bwt::from_unpacked(data)
     }
 }

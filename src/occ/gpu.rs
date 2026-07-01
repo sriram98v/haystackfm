@@ -1,4 +1,4 @@
-use super::{OccTable, BLOCK_SIZE};
+use super::{OccTable, BLOCK_SIZE, SUPERBLOCK_SIZE};
 use crate::alphabet::ALPHABET_SIZE;
 use crate::bwt::Bwt;
 use crate::gpu::GpuContext;
@@ -37,7 +37,7 @@ impl OccPipelines {
         let alpha = ALPHABET_SIZE as u32;
 
         // Upload BWT as u32 array
-        let bwt_u32: Vec<u32> = bwt.data.iter().map(|&b| b as u32).collect();
+        let bwt_u32: Vec<u32> = bwt.to_u32_vec();
         let bwt_buf = ctx.create_buffer_init("occ_bwt", &bwt_u32);
 
         // Allocate output buffers
@@ -83,38 +83,44 @@ impl OccPipelines {
             .download_buffer(&bitvectors_buf, num_blocks * alpha * 2)
             .await;
 
-        // Assemble OccTable on CPU
-        // block_counts layout: [block0_c0, block0_c1, ..., block0_c4, block1_c0, ...]
+        // Assemble two-level OccTable on CPU from GPU block counts and bitvectors.
+        // block_counts layout: [block0_c0, block0_c1, ..., block0_cN, block1_c0, ...]
         // bitvec_flat layout:  [block0_c0_lo, block0_c0_hi, block0_c1_lo, block0_c1_hi, ...]
         let num_blocks_usize = num_blocks as usize;
+        let num_superblocks = n.div_ceil(SUPERBLOCK_SIZE) as usize;
+        let blocks_per_sb = (SUPERBLOCK_SIZE / BLOCK_SIZE) as usize;
         let alpha_usize = ALPHABET_SIZE;
 
-        let mut checkpoints: Vec<[u32; ALPHABET_SIZE]> = Vec::with_capacity(num_blocks_usize);
+        let mut superblock_checkpoints: Vec<[u32; ALPHABET_SIZE]> =
+            Vec::with_capacity(num_superblocks);
+        let mut block_deltas: Vec<[u16; ALPHABET_SIZE]> = Vec::with_capacity(num_blocks_usize);
         let mut bitvectors: Vec<[u64; ALPHABET_SIZE]> = Vec::with_capacity(num_blocks_usize);
 
         let mut cumulative = [0u32; ALPHABET_SIZE];
+        let mut sb_base = [0u32; ALPHABET_SIZE];
 
         for b in 0..num_blocks_usize {
-            // Checkpoint = cumulative counts *before* this block
-            checkpoints.push(cumulative);
+            if b % blocks_per_sb == 0 {
+                superblock_checkpoints.push(cumulative);
+                sb_base = cumulative;
+            }
 
-            // Bitvectors for this block
+            let mut delta = [0u16; ALPHABET_SIZE];
+            for c in 0..alpha_usize {
+                delta[c] = (cumulative[c] - sb_base[c]) as u16;
+            }
+            block_deltas.push(delta);
+
             let mut bv = [0u64; ALPHABET_SIZE];
             for c in 0..alpha_usize {
                 let lo = bitvec_flat[(b * alpha_usize + c) * 2];
                 let hi = bitvec_flat[(b * alpha_usize + c) * 2 + 1];
                 bv[c] = (hi as u64) << 32 | lo as u64;
-                // Accumulate count for next checkpoint
                 cumulative[c] += block_counts[b * alpha_usize + c];
             }
             bitvectors.push(bv);
         }
 
-        OccTable {
-            checkpoints,
-            bitvectors,
-            block_size: BLOCK_SIZE,
-            text_len: n,
-        }
+        OccTable::from_parts(superblock_checkpoints, block_deltas, bitvectors, n)
     }
 }
