@@ -51,28 +51,74 @@ pub const H: u8 = 14;
 /// V = A, C, or G (not T).
 pub const V: u8 = 15;
 
+const fn build_encode_lut() -> [i8; 256] {
+    let mut lut = [-1i8; 256];
+    lut[b'$' as usize] = SENTINEL as i8;
+    lut[b'A' as usize] = A as i8;
+    lut[b'a' as usize] = A as i8;
+    lut[b'C' as usize] = C as i8;
+    lut[b'c' as usize] = C as i8;
+    lut[b'G' as usize] = G as i8;
+    lut[b'g' as usize] = G as i8;
+    lut[b'T' as usize] = T as i8;
+    lut[b't' as usize] = T as i8;
+    lut[b'U' as usize] = T as i8;
+    lut[b'u' as usize] = T as i8;
+    lut[b'N' as usize] = N as i8;
+    lut[b'n' as usize] = N as i8;
+    lut[b'R' as usize] = R as i8;
+    lut[b'r' as usize] = R as i8;
+    lut[b'Y' as usize] = Y as i8;
+    lut[b'y' as usize] = Y as i8;
+    lut[b'S' as usize] = S as i8;
+    lut[b's' as usize] = S as i8;
+    lut[b'W' as usize] = W as i8;
+    lut[b'w' as usize] = W as i8;
+    lut[b'K' as usize] = K as i8;
+    lut[b'k' as usize] = K as i8;
+    lut[b'M' as usize] = M as i8;
+    lut[b'm' as usize] = M as i8;
+    lut[b'B' as usize] = B as i8;
+    lut[b'b' as usize] = B as i8;
+    lut[b'D' as usize] = D as i8;
+    lut[b'd' as usize] = D as i8;
+    lut[b'H' as usize] = H as i8;
+    lut[b'h' as usize] = H as i8;
+    lut[b'V' as usize] = V as i8;
+    lut[b'v' as usize] = V as i8;
+    lut
+}
+
+/// 256-entry lookup table from raw ASCII byte to alphabet index (-1 = invalid).
+/// Built at compile time so `encode_byte` is a single branchless array load.
+static ENCODE_LUT: [i8; 256] = build_encode_lut();
+
+/// Encode a single raw ASCII IUPAC nucleotide byte to its alphabet index.
+///
+/// O(1) table lookup — the preferred entry point when working with `&[u8]` text
+/// (FASTA/FASTQ bytes), matching the convention used by crates like `bio`.
+/// U/u is treated as T (RNA → DNA). Gap bytes `-` and `.` return `None`.
+#[inline]
+pub fn encode_byte(b: u8) -> Option<u8> {
+    let v = ENCODE_LUT[b as usize];
+    if v < 0 {
+        None
+    } else {
+        Some(v as u8)
+    }
+}
+
 /// Encode a single IUPAC nucleotide character to its alphabet index.
 ///
 /// U/u is treated as T (RNA → DNA). Gap characters `-` and `.` return `None`.
+/// Non-ASCII characters always return `None`. Prefer [`encode_byte`] when the
+/// input is already `&[u8]` to avoid the `char` conversion.
+#[inline]
 pub fn encode_char(ch: char) -> Option<u8> {
-    match ch {
-        '$' => Some(SENTINEL),
-        'A' | 'a' => Some(A),
-        'C' | 'c' => Some(C),
-        'G' | 'g' => Some(G),
-        'T' | 't' | 'U' | 'u' => Some(T),
-        'N' | 'n' => Some(N),
-        'R' | 'r' => Some(R),
-        'Y' | 'y' => Some(Y),
-        'S' | 's' => Some(S),
-        'W' | 'w' => Some(W),
-        'K' | 'k' => Some(K),
-        'M' | 'm' => Some(M),
-        'B' | 'b' => Some(B),
-        'D' | 'd' => Some(D),
-        'H' | 'h' => Some(H),
-        'V' | 'v' => Some(V),
-        _ => None,
+    if ch.is_ascii() {
+        encode_byte(ch as u8)
+    } else {
+        None
     }
 }
 
@@ -276,9 +322,12 @@ impl DnaSequence {
             return Err(FmIndexError::EmptySequence);
         }
         let mut bases = Vec::with_capacity(s.len());
-        for (i, ch) in s.chars().enumerate() {
-            match encode_char(ch) {
-                Some(SENTINEL) | None => return Err(FmIndexError::InvalidCharacter(ch, i)),
+        for (i, b) in s.bytes().enumerate() {
+            match encode_byte(b) {
+                Some(SENTINEL) | None => {
+                    let ch = s[i..].chars().next().unwrap_or(b as char);
+                    return Err(FmIndexError::InvalidCharacter(ch, i));
+                }
                 Some(code) => bases.push(code),
             }
         }
