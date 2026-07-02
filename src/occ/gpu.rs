@@ -144,6 +144,7 @@ impl OccPipelines {
             block_deltas,
             planes,
             n,
+            super::OccEncoding::Bitplane,
         )
     }
 }

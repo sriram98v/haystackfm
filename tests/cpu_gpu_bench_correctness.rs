@@ -15,7 +15,7 @@
 use webgpu_fmidx::alphabet::{concatenate_sequences, DnaSequence, ALPHABET_SIZE};
 use webgpu_fmidx::bwt::{cpu::build_bwt as cpu_bwt, gpu::BwtPipelines};
 use webgpu_fmidx::gpu::GpuContext;
-use webgpu_fmidx::occ::{cpu::build_occ_table as cpu_occ, gpu::OccPipelines};
+use webgpu_fmidx::occ::{cpu::build_occ_table as cpu_occ, gpu::OccPipelines, OccEncoding};
 use webgpu_fmidx::suffix_array::{cpu::build_suffix_array as cpu_sa, gpu::SaPipelines};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -123,7 +123,7 @@ fn gpu_occ_matches_cpu_small() {
     let text = encode("ACGTACGTACGTACGT");
     let sa = cpu_sa(&text);
     let bwt = cpu_bwt(&text, &sa);
-    let cpu = cpu_occ(&bwt);
+    let cpu = cpu_occ(&bwt, OccEncoding::Bitplane);
     let gpu = pollster::block_on(OccPipelines::new(&ctx).build_occ_table(&ctx, &bwt));
     // Small input: check every position exhaustively
     for i in 0..=bwt.len() as u32 {
@@ -147,7 +147,7 @@ fn gpu_occ_matches_cpu_1k() {
     let sa = cpu_sa(&text);
     let bwt = cpu_bwt(&text, &sa);
     let n = bwt.len() as u32;
-    let cpu = cpu_occ(&bwt);
+    let cpu = cpu_occ(&bwt, OccEncoding::Bitplane);
     let gpu = pollster::block_on(OccPipelines::new(&ctx).build_occ_table(&ctx, &bwt));
     assert_occ_rank_equal(&cpu, &gpu, n, "1 K OCC");
 }

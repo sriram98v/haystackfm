@@ -4,6 +4,7 @@ use webgpu_fmidx::alphabet::*;
 use webgpu_fmidx::bwt::cpu::{build_bwt, inverse_bwt};
 use webgpu_fmidx::c_array::CArray;
 use webgpu_fmidx::occ::cpu::{build_occ_table, naive_rank};
+use webgpu_fmidx::occ::OccEncoding;
 use webgpu_fmidx::suffix_array::cpu::{build_suffix_array, build_suffix_array_naive};
 
 use common::encode;
@@ -133,7 +134,7 @@ fn occ_table_matches_naive_for_all_positions() {
         let text = encode(input);
         let sa = build_suffix_array(&text);
         let bwt = build_bwt(&text, &sa);
-        let occ = build_occ_table(&bwt);
+        let occ = build_occ_table(&bwt, OccEncoding::Bitplane);
 
         let n = bwt.len() as u32;
         for c in 0..ALPHABET_SIZE as u8 {
@@ -157,7 +158,7 @@ fn occ_table_multi_block() {
     let text = encode(&input);
     let sa = build_suffix_array(&text);
     let bwt = build_bwt(&text, &sa);
-    let occ = build_occ_table(&bwt);
+    let occ = build_occ_table(&bwt, OccEncoding::Bitplane);
 
     let n = bwt.len() as u32;
     for c in 0..ALPHABET_SIZE as u8 {

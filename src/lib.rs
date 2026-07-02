@@ -63,3 +63,4 @@ pub use fm_index::smem::Mem;
 pub use fm_index::{FmIndex, FmIndexConfig};
 #[cfg(feature = "gpu")]
 pub use gpu::MemHit;
+pub use occ::OccEncoding;

@@ -55,19 +55,46 @@ pub struct OccTable {
     /// longer keep a separate resident `Bwt`) don't re-derive it on every call.
     lane_to_symbol: [u8; ALPHABET_SIZE],
     /// superblock_checkpoints[sb*num_lanes + lane] = cumulative count of lane's symbol
-    /// in bwt[0..sb*SUPERBLOCK_SIZE)
+    /// in bwt[0..sb*SUPERBLOCK_SIZE). Touched once per SUPERBLOCK_SIZE (512) positions,
+    /// so it stays a separate array rather than bloating the per-block record.
     superblock_checkpoints: Vec<u32>,
-    /// block_deltas[b*num_lanes + lane] = count since the block's superblock
-    block_deltas: Vec<u16>,
-    /// planes[b*num_planes + p] = bit `p` of the lane index at each position within block `b`
-    /// (bit j set iff bit p of `lane_at(b, j)` is 1). See the struct doc for how a lane's
-    /// one-hot bitvector is recovered from these.
-    planes: Vec<u64>,
+    /// Per-block record, interleaved so one `rank`/`lf_step` call touches a single
+    /// contiguous slice instead of 3 independent arrays (was `block_deltas: Vec<u16>` +
+    /// `planes: Vec<u64>` in separate `Vec`s — each `rank` call was 2-3 cache misses on a
+    /// large index; profiling showed ~58% of `backward_search` self-time was these reads).
+    /// Layout per block: `[deltas: num_lanes x u16][planes-or-bitvecs: (num_planes|num_lanes) x u64]`,
+    /// depending on `encoding` (see [`OccEncoding`]).
+    /// `block_stride` = `num_lanes*2 + (num_planes or num_lanes)*8` bytes; block `b`'s record
+    /// starts at `block_data[b*block_stride..]`.
+    block_data: Vec<u8>,
+    /// Byte stride of one block's record in `block_data`.
+    block_stride: usize,
+    /// Which Level-3 lane encoding `block_data`'s trailing region uses.
+    /// `#[serde(default)]` so indices serialized before this field existed deserialize as
+    /// `Bitplane` (the only encoding that ever existed on disk).
+    #[serde(default)]
+    encoding: OccEncoding,
     pub text_len: u32,
 }
 
 /// Sentinel lane value meaning "symbol never appears in this BWT".
 const NO_LANE: u8 = u8::MAX;
+
+/// Per-block lane encoding used by the occ table's Level 3 storage.
+///
+/// `Bitplane` (default) stores `ceil(log2(num_lanes))` `u64` planes per block — smaller
+/// resident memory, but `rank`/`lf_step` reconstruct a one-hot mask via an AND/XOR loop over
+/// the planes before popcounting. `OneHot` instead stores one `u64` bitvector per lane per
+/// block directly — larger (up to 16x for large alphabets, but the alphabet is already
+/// compacted to the symbols present in the BWT so this is closer to a `num_lanes / num_planes`
+/// factor in practice), but `rank`/`lf_step` skip the reconstruction loop entirely (single
+/// load + popcount). Choose `OneHot` when query latency matters more than resident memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum OccEncoding {
+    #[default]
+    Bitplane,
+    OneHot,
+}
 
 /// Number of bits needed to represent lane indices `[0, num_lanes)`.
 fn num_planes_for(num_lanes: u8) -> u8 {
@@ -81,14 +108,17 @@ fn num_planes_for(num_lanes: u8) -> u8 {
 impl OccTable {
     /// Construct from raw compacted components (used by CPU and GPU builders).
     ///
-    /// `planes` holds `ceil(log2(num_lanes))` `u64` bitplanes per block (see struct docs).
+    /// `lane_data` holds, per block, either `ceil(log2(num_lanes))` `u64` bitplanes
+    /// (`encoding == Bitplane`) or `num_lanes` `u64` one-hot bitvectors (`encoding == OneHot`)
+    /// — see [`OccEncoding`] and struct docs.
     pub fn from_parts(
         num_lanes: u8,
         symbol_to_lane: [u8; ALPHABET_SIZE],
         superblock_checkpoints: Vec<u32>,
         block_deltas: Vec<u16>,
-        planes: Vec<u64>,
+        lane_data: Vec<u64>,
         text_len: u32,
+        encoding: OccEncoding,
     ) -> Self {
         let mut lane_to_symbol = [0u8; ALPHABET_SIZE];
         for (c, &lane) in symbol_to_lane.iter().enumerate() {
@@ -96,15 +126,131 @@ impl OccTable {
                 lane_to_symbol[lane as usize] = c as u8;
             }
         }
+        let num_planes = num_planes_for(num_lanes);
+        let num_lanes_usize = num_lanes as usize;
+        let num_planes_usize = num_planes as usize;
+        // Level-3 record width: `num_planes` u64s for Bitplane, `num_lanes` u64s for OneHot.
+        let lane_data_width = match encoding {
+            OccEncoding::Bitplane => num_planes_usize,
+            OccEncoding::OneHot => num_lanes_usize,
+        };
+        // sb_counts region duplicates each block's superblock checkpoint (normally read from
+        // the separate `superblock_checkpoints` array) so `rank`/`lf_step` touch one cache
+        // line instead of two: LF-walk/backward-search positions are effectively random, so
+        // superblock reuse across consecutive blocks never happens in practice — the
+        // superblock array access was a fresh miss on every call regardless of how rarely it
+        // changes value. Costs `num_lanes*4` bytes/block (duplicated storage) for one fewer
+        // miss per query step.
+        let block_stride = num_lanes_usize * 4 + num_lanes_usize * 2 + lane_data_width * 8;
+        let num_blocks = if num_lanes_usize == 0 {
+            0
+        } else {
+            block_deltas.len() / num_lanes_usize
+        };
+        let blocks_per_sb = (SUPERBLOCK_SIZE / BLOCK_SIZE) as usize;
+        // Interleave the builders' separate `superblock_checkpoints`/`block_deltas`/`lane_data`
+        // arrays into one contiguous, cache-line-sized record per block (see `block_data`
+        // docs): a single `rank`/`lf_step` call then touches one slice instead of striding
+        // through three independently-indexed arrays.
+        let mut block_data = vec![0u8; num_blocks * block_stride];
+        for b in 0..num_blocks {
+            let sb = b / blocks_per_sb.max(1);
+            let rec = &mut block_data[b * block_stride..(b + 1) * block_stride];
+            for lane in 0..num_lanes_usize {
+                let sb_count = superblock_checkpoints[sb * num_lanes_usize + lane];
+                rec[lane * 4..lane * 4 + 4].copy_from_slice(&sb_count.to_ne_bytes());
+            }
+            let deltas_off = num_lanes_usize * 4;
+            for lane in 0..num_lanes_usize {
+                let delta = block_deltas[b * num_lanes_usize + lane];
+                rec[deltas_off + lane * 2..deltas_off + lane * 2 + 2]
+                    .copy_from_slice(&delta.to_ne_bytes());
+            }
+            let lane_data_off = deltas_off + num_lanes_usize * 2;
+            for w in 0..lane_data_width {
+                let word = lane_data[b * lane_data_width + w];
+                rec[lane_data_off + w * 8..lane_data_off + w * 8 + 8]
+                    .copy_from_slice(&word.to_ne_bytes());
+            }
+        }
         Self {
             num_lanes,
-            num_planes: num_planes_for(num_lanes),
+            num_planes,
             symbol_to_lane,
             lane_to_symbol,
             superblock_checkpoints,
-            block_deltas,
-            planes,
+            block_data,
+            block_stride,
+            encoding,
             text_len,
+        }
+    }
+
+    // Unaligned pointer reads instead of `slice[..].try_into().unwrap()`: the safe form
+    // compiles to an extra bounds check plus an array-literal copy per call. Since these run
+    // on every `rank`/`lf_step` call (the hottest loop in the crate), that overhead alone ate
+    // the entire win from interleaving sb_counts+deltas+planes into one cache line.
+    //
+    // Each takes the record's byte `base` (`block * block_stride`, computed once by the
+    // caller) rather than `block` itself: `block_stride` is a runtime field, not a compile-time
+    // constant, so `block * block_stride` is a real multiply — recomputing it independently in
+    // every accessor call (3 per `rank`, plus once per plane in `lane_mask`'s loop) measurably
+    // added instructions back on top of the miss-count win from interleaving.
+    #[inline]
+    fn block_base(&self, block: usize) -> usize {
+        block * self.block_stride
+    }
+
+    #[inline]
+    fn sb_count_at(&self, base: usize, lane: usize) -> u32 {
+        let off = base + lane * 4;
+        debug_assert!(off + 4 <= self.block_data.len());
+        // SAFETY: `off + 4 <= block_data.len()` because `base` is a valid block's offset and
+        // `lane < num_lanes`; the sb_counts region occupies `[0, num_lanes*4)` of each
+        // block's `block_stride`-byte record (see `from_parts`/struct docs).
+        unsafe {
+            self.block_data
+                .as_ptr()
+                .add(off)
+                .cast::<u32>()
+                .read_unaligned()
+        }
+    }
+
+    #[inline]
+    fn delta_at(&self, base: usize, lane: usize) -> u32 {
+        let num_lanes = self.num_lanes as usize;
+        let off = base + num_lanes * 4 + lane * 2;
+        debug_assert!(off + 2 <= self.block_data.len());
+        // SAFETY: `off + 2 <= block_data.len()` because `base` is a valid block's offset and
+        // `lane < num_lanes`; the deltas region occupies
+        // `[num_lanes*4, num_lanes*4 + num_lanes*2)` of each block's record.
+        unsafe {
+            self.block_data
+                .as_ptr()
+                .add(off)
+                .cast::<u16>()
+                .read_unaligned() as u32
+        }
+    }
+
+    #[inline]
+    /// Reads word `w` of the trailing Level-3 region: the `w`-th bitplane under
+    /// `OccEncoding::Bitplane`, or lane `w`'s one-hot bitvector under `OccEncoding::OneHot`.
+    fn word_at(&self, base: usize, w: usize) -> u64 {
+        let num_lanes = self.num_lanes as usize;
+        let off = base + num_lanes * 4 + num_lanes * 2 + w * 8;
+        debug_assert!(off + 8 <= self.block_data.len());
+        // SAFETY: `off + 8 <= block_data.len()` because `base` is a valid block's offset and
+        // `w` is in range for the current encoding (`num_planes` for Bitplane, `num_lanes` for
+        // OneHot); the trailing region occupies `[num_lanes*6, num_lanes*6 + width*8)` of each
+        // block's record.
+        unsafe {
+            self.block_data
+                .as_ptr()
+                .add(off)
+                .cast::<u64>()
+                .read_unaligned()
         }
     }
 
@@ -115,10 +261,16 @@ impl OccTable {
     }
 
     /// One-hot bitvector for `lane` within block `block`: bit j set iff position j of the
-    /// block has that lane. Recovered from the bitplanes via AND/XOR against the lane's bit
-    /// pattern — this is what a resident per-lane bitvector would have stored directly.
+    /// block has that lane. Under `OccEncoding::OneHot` this is a direct load; under
+    /// `OccEncoding::Bitplane` it's recovered via AND/XOR against the lane's bit pattern.
     #[inline]
-    fn lane_mask(&self, block: usize, lane: usize) -> u64 {
+    fn lane_mask(&self, base: usize, lane: usize) -> u64 {
+        if self.encoding == OccEncoding::OneHot {
+            if self.num_lanes as usize == 0 {
+                return 0;
+            }
+            return self.word_at(base, lane);
+        }
         let num_planes = self.num_planes as usize;
         if num_planes == 0 {
             // 0 or 1 lanes total: every occupied position trivially belongs to lane 0.
@@ -126,7 +278,7 @@ impl OccTable {
         }
         let mut mask = u64::MAX;
         for p in 0..num_planes {
-            let plane_val = self.planes[block * num_planes + p];
+            let plane_val = self.word_at(base, p);
             mask &= if (lane >> p) & 1 == 1 {
                 plane_val
             } else {
@@ -136,16 +288,28 @@ impl OccTable {
         mask
     }
 
-    /// Lane index at position `offset` within `block`, recovered from the bitplanes.
+    /// Lane index at position `offset` within the block at byte `base`.
+    /// Under `OccEncoding::OneHot`, at most one lane's bitvector has the bit set at any given
+    /// position, so this scans lanes for the set bit (O(num_lanes), vs O(num_planes) for
+    /// Bitplane's direct decode) — the cost `OneHot` trades away resident memory for.
     #[inline]
-    fn lane_at(&self, block: usize, offset: u32) -> u8 {
+    fn lane_at(&self, base: usize, offset: u32) -> u8 {
+        if self.encoding == OccEncoding::OneHot {
+            let num_lanes = self.num_lanes as usize;
+            for lane in 0..num_lanes {
+                if (self.word_at(base, lane) >> offset) & 1 == 1 {
+                    return lane as u8;
+                }
+            }
+            return 0;
+        }
         let num_planes = self.num_planes as usize;
         if num_planes == 0 {
             return 0;
         }
         let mut lane = 0u8;
         for p in 0..num_planes {
-            let bit = (self.planes[block * num_planes + p] >> offset) & 1;
+            let bit = (self.word_at(base, p) >> offset) & 1;
             lane |= (bit as u8) << p;
         }
         lane
@@ -163,15 +327,14 @@ impl OccTable {
             return 0;
         }
         let lane = lane as usize;
-        let num_lanes = self.num_lanes as usize;
         let pos = i - 1;
         let block = (pos / BLOCK_SIZE) as usize;
         let offset = pos % BLOCK_SIZE;
-        let sb = (pos / SUPERBLOCK_SIZE) as usize;
+        let base = self.block_base(block);
 
-        let sb_count = self.superblock_checkpoints[sb * num_lanes + lane];
-        let delta = self.block_deltas[block * num_lanes + lane] as u32;
-        let lane_bits = self.lane_mask(block, lane);
+        let sb_count = self.sb_count_at(base, lane);
+        let delta = self.delta_at(base, lane);
+        let lane_bits = self.lane_mask(base, lane);
 
         let mask = if offset == 63 {
             u64::MAX
@@ -190,7 +353,8 @@ impl OccTable {
     pub fn symbol_at(&self, pos: u32) -> u8 {
         let block = (pos / BLOCK_SIZE) as usize;
         let offset = pos % BLOCK_SIZE;
-        self.lane_to_symbol[self.lane_at(block, offset) as usize]
+        let base = self.block_base(block);
+        self.lane_to_symbol[self.lane_at(base, offset) as usize]
     }
 
     /// Fused LF-step primitive: returns `(symbol_at(pos), rank(symbol_at(pos), pos))` in a
@@ -202,14 +366,13 @@ impl OccTable {
     pub fn lf_step(&self, pos: u32) -> (u8, u32) {
         let block = (pos / BLOCK_SIZE) as usize;
         let offset = pos % BLOCK_SIZE;
-        let lane = self.lane_at(block, offset) as usize;
+        let base = self.block_base(block);
+        let lane = self.lane_at(base, offset) as usize;
         let symbol = self.lane_to_symbol[lane];
 
-        let num_lanes = self.num_lanes as usize;
-        let sb = (pos / SUPERBLOCK_SIZE) as usize;
-        let sb_count = self.superblock_checkpoints[sb * num_lanes + lane];
-        let delta = self.block_deltas[block * num_lanes + lane] as u32;
-        let lane_bits = self.lane_mask(block, lane);
+        let sb_count = self.sb_count_at(base, lane);
+        let delta = self.delta_at(base, lane);
+        let lane_bits = self.lane_mask(base, lane);
 
         // rank(symbol, pos) counts occurrences in bwt[0..pos), i.e. bits strictly below
         // `offset` within this block (mirrors `rank`'s `(1 << (offset+1)) - 1` mask for
@@ -226,18 +389,12 @@ impl OccTable {
     /// keeping a resident packed `Bwt` around, trading a one-time reconstruction pass for
     /// resident CPU memory.
     pub fn reconstruct_bwt_u32(&self) -> Vec<u32> {
-        let num_planes = self.num_planes.max(1) as usize;
-        let num_blocks = if self.num_planes == 0 {
-            // Degenerate (<=1 lane) case: fall back to block_deltas/superblock layout to size
-            // num_blocks, since there are no planes to divide by.
-            self.block_deltas.len() / self.num_lanes.max(1) as usize
-        } else {
-            self.planes.len() / num_planes
-        };
+        let num_blocks = self.block_data.len() / self.block_stride.max(1);
         let mut out = Vec::with_capacity(num_blocks * BLOCK_SIZE as usize);
         for b in 0..num_blocks {
+            let base = self.block_base(b);
             for offset in 0..BLOCK_SIZE {
-                let sym = self.lane_to_symbol[self.lane_at(b, offset) as usize];
+                let sym = self.lane_to_symbol[self.lane_at(base, offset) as usize];
                 out.push(sym as u32);
             }
         }
@@ -253,11 +410,12 @@ impl OccTable {
     #[cfg(feature = "gpu")]
     pub fn flat_block_checkpoints(&self) -> Vec<[u32; ALPHABET_SIZE]> {
         let blocks_per_sb = (SUPERBLOCK_SIZE / BLOCK_SIZE) as usize;
-        let num_blocks = self.block_deltas.len() / self.num_lanes.max(1) as usize;
+        let num_blocks = self.block_data.len() / self.block_stride.max(1);
         let num_lanes = self.num_lanes as usize;
         (0..num_blocks)
             .map(|b| {
                 let sb = b / blocks_per_sb;
+                let base = self.block_base(b);
                 let mut combined = [0u32; ALPHABET_SIZE];
                 for c in 0..ALPHABET_SIZE {
                     let lane = self.symbol_to_lane[c];
@@ -266,7 +424,7 @@ impl OccTable {
                     }
                     let lane = lane as usize;
                     combined[c] = self.superblock_checkpoints[sb * num_lanes + lane]
-                        + self.block_deltas[b * num_lanes + lane] as u32;
+                        + self.delta_at(base, lane);
                 }
                 combined
             })
@@ -277,16 +435,17 @@ impl OccTable {
     /// [`Self::flat_block_checkpoints`] for why GPU always uses the full alphabet width).
     #[cfg(feature = "gpu")]
     pub fn bitvectors_full16(&self) -> Vec<[u64; ALPHABET_SIZE]> {
-        let num_blocks = self.block_deltas.len() / self.num_lanes.max(1) as usize;
+        let num_blocks = self.block_data.len() / self.block_stride.max(1);
         (0..num_blocks)
             .map(|b| {
+                let base = self.block_base(b);
                 let mut bv = [0u64; ALPHABET_SIZE];
                 for c in 0..ALPHABET_SIZE {
                     let lane = self.symbol_to_lane[c];
                     if lane == NO_LANE {
                         continue;
                     }
-                    bv[c] = self.lane_mask(b, lane as usize);
+                    bv[c] = self.lane_mask(base, lane as usize);
                 }
                 bv
             })

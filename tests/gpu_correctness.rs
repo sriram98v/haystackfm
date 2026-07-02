@@ -10,6 +10,7 @@ use webgpu_fmidx::gpu::radix_sort::RadixSortPipelines;
 use webgpu_fmidx::gpu::GpuContext;
 use webgpu_fmidx::occ::cpu::{build_occ_table, naive_rank};
 use webgpu_fmidx::occ::gpu::OccPipelines;
+use webgpu_fmidx::occ::OccEncoding;
 use webgpu_fmidx::suffix_array::cpu::build_suffix_array;
 use webgpu_fmidx::suffix_array::gpu::SaPipelines;
 
@@ -419,7 +420,7 @@ fn gpu_occ_matches_cpu_various() {
         let gpu_sa = pollster::block_on(sa_pipelines.build_suffix_array(&ctx, &text));
         let gpu_bwt = pollster::block_on(bwt_pipelines.build_bwt(&ctx, &text, &gpu_sa));
         let gpu_occ = pollster::block_on(occ_pipelines.build_occ_table(&ctx, &gpu_bwt));
-        let cpu_occ = build_occ_table(&gpu_bwt);
+        let cpu_occ = build_occ_table(&gpu_bwt, OccEncoding::Bitplane);
 
         let n = gpu_bwt.len() as u32;
         for c in 0..ALPHABET_SIZE as u8 {
@@ -452,7 +453,7 @@ fn gpu_occ_multi_block() {
     let gpu_sa = pollster::block_on(sa_pipelines.build_suffix_array(&ctx, &text));
     let gpu_bwt = pollster::block_on(bwt_pipelines.build_bwt(&ctx, &text, &gpu_sa));
     let gpu_occ = pollster::block_on(occ_pipelines.build_occ_table(&ctx, &gpu_bwt));
-    let cpu_occ = build_occ_table(&gpu_bwt);
+    let cpu_occ = build_occ_table(&gpu_bwt, OccEncoding::Bitplane);
 
     let n = gpu_bwt.len() as u32;
     for c in 0..ALPHABET_SIZE as u8 {

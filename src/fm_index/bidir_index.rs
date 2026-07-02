@@ -72,6 +72,7 @@ impl BidirFmIndex {
                 use_gpu: false,
                 lookup_depth: 0,
                 build_threads: config.build_threads,
+                occ_encoding: config.occ_encoding,
             },
         )?;
 

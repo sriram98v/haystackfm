@@ -11,7 +11,7 @@ use crate::c_array::CArray;
 use crate::error::FmIndexError;
 use crate::fm_index::lookup::LookupTable;
 use crate::occ::cpu::build_occ_table;
-use crate::occ::OccTable;
+use crate::occ::{OccEncoding, OccTable};
 use crate::suffix_array::cpu::build_suffix_array;
 use crate::suffix_array::SampledSuffixArray;
 
@@ -34,6 +34,11 @@ pub struct FmIndexConfig {
     /// sized to this value during `build_cpu`.  0 or 1 → single-threaded.
     /// Note: suffix array construction (psacak) is always single-threaded.
     pub build_threads: u16,
+    /// Occ table Level-3 lane encoding (CPU construction only — GPU construction always uses
+    /// `Bitplane`). `Bitplane` (default) is more memory-compact; `OneHot` skips the bitplane
+    /// AND/XOR reconstruction on every `rank`/`lf_step` call at the cost of more resident
+    /// memory. See [`crate::occ::OccEncoding`].
+    pub occ_encoding: OccEncoding,
 }
 
 impl Default for FmIndexConfig {
@@ -43,6 +48,7 @@ impl Default for FmIndexConfig {
             use_gpu: true,
             lookup_depth: 0,
             build_threads: 1,
+            occ_encoding: OccEncoding::Bitplane,
         }
     }
 }
@@ -148,7 +154,7 @@ impl FmIndex {
         // Build Occ table from BWT (parallelises internally on non-WASM targets), then drop the
         // BWT — its one-hot presence bitvectors already encode every symbol, so keeping a
         // separate packed `Bwt` around would duplicate ~0.5 bytes/base of resident memory.
-        let occ = build_occ_table(&bwt);
+        let occ = build_occ_table(&bwt, config.occ_encoding);
         drop(bwt);
 
         // Build depth-k lookup table if requested (using alphabet's core symbols as radix)

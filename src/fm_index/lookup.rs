@@ -125,6 +125,7 @@ mod tests {
             use_gpu: false,
             lookup_depth: depth,
             build_threads: 1,
+            occ_encoding: Default::default(),
         };
         FmIndex::build_cpu(&[seq], &config).unwrap()
     }
@@ -136,6 +137,7 @@ mod tests {
             use_gpu: false,
             lookup_depth: depth,
             build_threads: 1,
+            occ_encoding: Default::default(),
         };
         FmIndex::build_cpu_with::<ExactDna>(&[seq], &config).unwrap()
     }
@@ -155,6 +157,7 @@ mod tests {
                 use_gpu: false,
                 lookup_depth: 0,
                 build_threads: 1,
+                occ_encoding: Default::default(),
             };
             FmIndex::build_cpu(&[seq], &cfg).unwrap()
         };
@@ -181,6 +184,7 @@ mod tests {
                 use_gpu: false,
                 lookup_depth: 0,
                 build_threads: 1,
+                occ_encoding: Default::default(),
             };
             FmIndex::build_cpu(&[seq], &cfg).unwrap()
         };
@@ -253,6 +257,7 @@ mod tests {
                     use_gpu: false,
                     lookup_depth: 0,
                     build_threads: 1,
+                    occ_encoding: Default::default(),
                 },
             )
             .unwrap()
@@ -282,6 +287,7 @@ mod tests {
                     use_gpu: false,
                     lookup_depth: 0,
                     build_threads: 1,
+                    occ_encoding: Default::default(),
                 },
             )
             .unwrap()

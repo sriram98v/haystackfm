@@ -1,6 +1,6 @@
 //! CPU implementation of the Occ table (rank data structure) over the BWT.
 
-use super::{OccTable, BLOCK_SIZE, SUPERBLOCK_SIZE};
+use super::{OccEncoding, OccTable, BLOCK_SIZE, SUPERBLOCK_SIZE};
 use crate::alphabet::ALPHABET_SIZE;
 use crate::bwt::Bwt;
 
@@ -16,7 +16,11 @@ use rayon::prelude::*;
 ///   plain ACGT[+N] reference) get no storage at all.
 /// Phase 3 (sequential): prefix-sum into superblock u32 checkpoints and per-block u16 deltas,
 ///   written directly in the compact lane layout.
-pub fn build_occ_table(bwt: &Bwt) -> OccTable {
+///
+/// `encoding` selects the Level-3 lane storage — see [`OccEncoding`] for the memory/query-speed
+/// tradeoff. Phase 1's per-block bitvectors are computed identically either way; `encoding`
+/// only changes how they're packed in Phase 3 (bitplanes vs stored directly).
+pub fn build_occ_table(bwt: &Bwt, encoding: OccEncoding) -> OccTable {
     let n = bwt.len() as u32;
     let num_blocks = n.div_ceil(BLOCK_SIZE) as usize;
     let num_superblocks = n.div_ceil(SUPERBLOCK_SIZE) as usize;
@@ -52,17 +56,22 @@ pub fn build_occ_table(bwt: &Bwt) -> OccTable {
     }
     let num_lanes_usize = num_lanes as usize;
 
-    // ceil(log2(num_lanes)) bitplanes encode each position's lane index directly, instead of
-    // one one-hot bitvector per lane (see `occ::OccTable` docs for the memory tradeoff).
+    // Bitplane: ceil(log2(num_lanes)) planes encode each position's lane index directly.
+    // OneHot: one u64 bitvector per lane, stored as-is (see `occ::OccEncoding` for the
+    // memory/query-speed tradeoff).
     let num_planes = if num_lanes <= 1 {
         0
     } else {
         (u8::BITS - (num_lanes - 1).leading_zeros()) as usize
     };
+    let lane_data_width = match encoding {
+        OccEncoding::Bitplane => num_planes,
+        OccEncoding::OneHot => num_lanes_usize,
+    };
 
     let mut superblock_checkpoints = Vec::with_capacity(num_superblocks * num_lanes_usize);
     let mut block_deltas = Vec::with_capacity(num_blocks * num_lanes_usize);
-    let mut planes = Vec::with_capacity(num_blocks * num_planes);
+    let mut lane_data = Vec::with_capacity(num_blocks * lane_data_width);
 
     let mut cumulative = vec![0u32; num_lanes_usize];
     let mut sb_base = vec![0u32; num_lanes_usize];
@@ -73,7 +82,7 @@ pub fn build_occ_table(bwt: &Bwt) -> OccTable {
             sb_base.copy_from_slice(&cumulative);
         }
 
-        let mut block_planes = vec![0u64; num_planes];
+        let mut block_lane_data = vec![0u64; lane_data_width];
         for c in 0..ALPHABET_SIZE {
             let lane = symbol_to_lane[c];
             if lane == u8::MAX {
@@ -81,14 +90,21 @@ pub fn build_occ_table(bwt: &Bwt) -> OccTable {
             }
             let lane = lane as usize;
             block_deltas.push((cumulative[lane] - sb_base[lane]) as u16);
-            for (p, plane) in block_planes.iter_mut().enumerate() {
-                if (lane >> p) & 1 == 1 {
-                    *plane |= block_bits[c];
+            match encoding {
+                OccEncoding::Bitplane => {
+                    for (p, plane) in block_lane_data.iter_mut().enumerate() {
+                        if (lane >> p) & 1 == 1 {
+                            *plane |= block_bits[c];
+                        }
+                    }
+                }
+                OccEncoding::OneHot => {
+                    block_lane_data[lane] = block_bits[c];
                 }
             }
             cumulative[lane] += block_counts[c];
         }
-        planes.extend_from_slice(&block_planes);
+        lane_data.extend_from_slice(&block_lane_data);
     }
 
     OccTable::from_parts(
@@ -96,8 +112,9 @@ pub fn build_occ_table(bwt: &Bwt) -> OccTable {
         symbol_to_lane,
         superblock_checkpoints,
         block_deltas,
-        planes,
+        lane_data,
         n,
+        encoding,
     )
 }
 
@@ -147,7 +164,7 @@ mod tests {
         let text = encode("ACGTACGTACGT");
         let sa = build_suffix_array(&text);
         let bwt = build_bwt(&text, &sa);
-        let occ = build_occ_table(&bwt);
+        let occ = build_occ_table(&bwt, OccEncoding::Bitplane);
 
         let n = bwt.len() as u32;
         for c in 0..ALPHABET_SIZE as u8 {
@@ -170,7 +187,7 @@ mod tests {
         let text = encode(&s);
         let sa = build_suffix_array(&text);
         let bwt = build_bwt(&text, &sa);
-        let occ = build_occ_table(&bwt);
+        let occ = build_occ_table(&bwt, OccEncoding::Bitplane);
 
         let n = bwt.len() as u32;
         for c in 0..ALPHABET_SIZE as u8 {
@@ -187,7 +204,7 @@ mod tests {
         let text = encode("ACGTACGTACGT");
         let sa = build_suffix_array(&text);
         let bwt = build_bwt(&text, &sa);
-        let occ = build_occ_table(&bwt);
+        let occ = build_occ_table(&bwt, OccEncoding::Bitplane);
 
         // rank(c, 0) should always be 0
         for c in 0..ALPHABET_SIZE as u8 {
@@ -210,7 +227,7 @@ mod tests {
         let text = encode(&s);
         let sa = build_suffix_array(&text);
         let bwt = build_bwt(&text, &sa);
-        let occ = build_occ_table(&bwt);
+        let occ = build_occ_table(&bwt, OccEncoding::Bitplane);
 
         let n = bwt.len() as u32;
         for pos in 0..n {
@@ -227,7 +244,7 @@ mod tests {
         let text = encode("ACGTACGTACGT");
         let sa = build_suffix_array(&text);
         let bwt = build_bwt(&text, &sa);
-        let occ = build_occ_table(&bwt);
+        let occ = build_occ_table(&bwt, OccEncoding::Bitplane);
 
         assert_eq!(occ.num_lanes(), 5, "expected exactly {{$,A,C,G,T}} lanes");
 
@@ -243,5 +260,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_bitplane_and_onehot_encodings_agree() {
+        // Bitplane and OneHot must be observationally identical: same rank, symbol_at,
+        // lf_step, and reconstruct_bwt_u32 for every position/symbol, over text spanning
+        // multiple blocks and superblocks so both encodings' boundary handling is exercised.
+        let s = "ACGT".repeat(50); // 200 chars + sentinel
+        let text = encode(&s);
+        let sa = build_suffix_array(&text);
+        let bwt = build_bwt(&text, &sa);
+
+        let bitplane = build_occ_table(&bwt, OccEncoding::Bitplane);
+        let onehot = build_occ_table(&bwt, OccEncoding::OneHot);
+
+        assert_eq!(bitplane.num_lanes(), onehot.num_lanes());
+
+        let n = bwt.len() as u32;
+        for c in 0..ALPHABET_SIZE as u8 {
+            for i in 0..=n {
+                assert_eq!(
+                    bitplane.rank(c, i),
+                    onehot.rank(c, i),
+                    "rank({c}, {i}) mismatch between encodings"
+                );
+            }
+        }
+        for pos in 0..n {
+            assert_eq!(
+                bitplane.symbol_at(pos),
+                onehot.symbol_at(pos),
+                "symbol_at({pos}) mismatch"
+            );
+            assert_eq!(
+                bitplane.lf_step(pos),
+                onehot.lf_step(pos),
+                "lf_step({pos}) mismatch"
+            );
+        }
+        assert_eq!(
+            bitplane.reconstruct_bwt_u32(),
+            onehot.reconstruct_bwt_u32(),
+            "reconstruct_bwt_u32 mismatch"
+        );
     }
 }
