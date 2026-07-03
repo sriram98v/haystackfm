@@ -27,25 +27,34 @@ impl SuffixArray {
 /// the occ table's `SUPERBLOCK_SIZE`).
 const SA_MARKER_SB_WORDS: usize = 8;
 
+/// Bytes per interleaved per-word record: 8 (bitvector word) + 4 (superblock checkpoint,
+/// duplicated into every word of its superblock) + 2 (delta since that checkpoint).
+const SA_RECORD_STRIDE: usize = 14;
+
 /// Sampled suffix array for space-efficient locate queries.
 ///
 /// Stores only the ~n/sample_rate sampled entries (where `SA[i] % sample_rate == 0`).
-/// Uses a bitvector + two-level rank1 structure instead of a sorted `Vec<u32>` of row indices:
-/// a `u32` superblock checkpoint every 8 words plus a `u16` per-word delta since the last
-/// superblock (same two-level trick as the occ table), instead of one flat `u32` per word.
+/// Uses a bitvector + two-level rank1 structure instead of a sorted `Vec<u32>` of row indices.
 ///
-/// For n=250M at rate=4: ~31 MB bitvector + ~10 MB checkpoints + ~250 MB sa_vals
-/// vs ~250 MB bwt_rows + ~250 MB sa_vals previously.
+/// The bitvector word, its superblock's cumulative popcount checkpoint, and its delta since
+/// that checkpoint are interleaved into one `SA_RECORD_STRIDE`-byte record per word (mirroring
+/// the occ table's `block_data` interleaving, see `occ::OccTable`) instead of three independent
+/// arrays. `resolve_sa`'s LF-walk touches a random word on every step, so without interleaving
+/// each `get` call was 2-3 separate cache misses (bitvector word, superblock checkpoint, delta)
+/// on top of the `sa_vals` lookup; interleaving collapses those into one record access.
+/// The superblock checkpoint is duplicated across all `SA_MARKER_SB_WORDS` words of its
+/// superblock (rather than looked up in a separate table) for the same reason the occ table
+/// duplicates its `sb_counts`: random access means superblock reuse across calls never happens
+/// anyway, so sharing the value doesn't save memory traffic, only adds a second cache line.
+///
+/// For n=250M at rate=4: ~55 MB word_data + ~250 MB sa_vals vs ~250 MB bwt_rows + ~250 MB
+/// sa_vals previously.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SampledSuffixArray {
-    /// Bitvector: bit i is set iff SA[i] % sample_rate == 0.
-    /// Length: ceil(text_len / 64) words.
-    bitvector: Vec<u64>,
-    /// superblock_checkpoints[j] = popcount of bitvector[0..j*SA_MARKER_SB_WORDS].
-    superblock_checkpoints: Vec<u32>,
-    /// block_deltas[w] = popcount of bitvector[sb_start..w] where sb_start is the first word
-    /// of w's superblock (i.e. cumulative count since the last superblock checkpoint).
-    block_deltas: Vec<u16>,
+    /// Interleaved per-word records, `SA_RECORD_STRIDE` bytes each: bitvector word (bit i set
+    /// iff `SA[i] % sample_rate == 0`), superblock checkpoint, delta. Word `w`'s record starts
+    /// at `word_data[w * SA_RECORD_STRIDE..]`. Length: `ceil(text_len / 64) * SA_RECORD_STRIDE`.
+    word_data: Vec<u8>,
     /// SA values at sampled positions, in ascending BWT row order.
     sa_vals: Vec<u32>,
     pub sample_rate: u32,
@@ -68,29 +77,74 @@ impl SampledSuffixArray {
             }
         }
 
-        // Build two-level prefix popcount checkpoints: u32 superblock every 8 words, u16 delta
-        // per word since the last superblock (max delta per word is 64, well within u16).
-        let num_superblocks = num_words.div_ceil(SA_MARKER_SB_WORDS);
-        let mut superblock_checkpoints = Vec::with_capacity(num_superblocks);
-        let mut block_deltas = Vec::with_capacity(num_words);
+        // Interleave each word with its superblock checkpoint (u32, duplicated across the
+        // superblock) and its delta since that checkpoint (u16, max delta per word is 64,
+        // well within range).
+        let mut word_data = vec![0u8; num_words * SA_RECORD_STRIDE];
         let mut cumulative = 0u32;
         let mut sb_base = 0u32;
         for (w, &word) in bitvector.iter().enumerate() {
             if w % SA_MARKER_SB_WORDS == 0 {
-                superblock_checkpoints.push(cumulative);
                 sb_base = cumulative;
             }
-            block_deltas.push((cumulative - sb_base) as u16);
+            let delta = (cumulative - sb_base) as u16;
+            let rec = &mut word_data[w * SA_RECORD_STRIDE..(w + 1) * SA_RECORD_STRIDE];
+            rec[0..8].copy_from_slice(&word.to_ne_bytes());
+            rec[8..12].copy_from_slice(&sb_base.to_ne_bytes());
+            rec[12..14].copy_from_slice(&delta.to_ne_bytes());
             cumulative += word.count_ones();
         }
 
         Self {
-            bitvector,
-            superblock_checkpoints,
-            block_deltas,
+            word_data,
             sa_vals,
             sample_rate,
             text_len: n as u32,
+        }
+    }
+
+    #[inline]
+    fn word_at(&self, word_idx: usize) -> u64 {
+        let off = word_idx * SA_RECORD_STRIDE;
+        debug_assert!(off + 8 <= self.word_data.len());
+        // SAFETY: `off + 8 <= word_data.len()` because `word_idx` is a valid word index and
+        // the bitvector word occupies the first 8 bytes of each `SA_RECORD_STRIDE`-byte record.
+        unsafe {
+            self.word_data
+                .as_ptr()
+                .add(off)
+                .cast::<u64>()
+                .read_unaligned()
+        }
+    }
+
+    #[inline]
+    fn sb_count_at(&self, word_idx: usize) -> u32 {
+        let off = word_idx * SA_RECORD_STRIDE + 8;
+        debug_assert!(off + 4 <= self.word_data.len());
+        // SAFETY: `off + 4 <= word_data.len()`; the superblock checkpoint occupies bytes
+        // `[8, 12)` of each record.
+        unsafe {
+            self.word_data
+                .as_ptr()
+                .add(off)
+                .cast::<u32>()
+                .read_unaligned()
+        }
+    }
+
+    #[inline]
+    fn delta_at(&self, word_idx: usize) -> u32 {
+        let off = word_idx * SA_RECORD_STRIDE + 12;
+        debug_assert!(off + 2 <= self.word_data.len());
+        // SAFETY: `off + 2 <= word_data.len()`; the delta occupies bytes `[12, 14)` of each
+        // record.
+        unsafe {
+            self.word_data
+                .as_ptr()
+                .add(off)
+                .cast::<u16>()
+                .read_unaligned() as u32
         }
     }
 
@@ -98,27 +152,26 @@ impl SampledSuffixArray {
     #[inline]
     pub fn is_sampled(&self, i: u32) -> bool {
         let i = i as usize;
-        (self.bitvector[i / 64] >> (i % 64)) & 1 == 1
+        (self.word_at(i / 64) >> (i % 64)) & 1 == 1
     }
 
     /// Return the SA value for BWT row `i` if it is sampled.
     #[inline]
     pub fn get(&self, i: u32) -> Option<u32> {
-        if !self.is_sampled(i) {
-            return None;
-        }
         let i = i as usize;
         let word_idx = i / 64;
         let bit_offset = i % 64;
+        let word = self.word_at(word_idx);
+        if (word >> bit_offset) & 1 == 0 {
+            return None;
+        }
         let mask = if bit_offset == 0 {
             0
         } else {
             (1u64 << bit_offset) - 1
         };
-        let sb = word_idx / SA_MARKER_SB_WORDS;
-        let rank = self.superblock_checkpoints[sb]
-            + self.block_deltas[word_idx] as u32
-            + (self.bitvector[word_idx] & mask).count_ones();
+        let rank =
+            self.sb_count_at(word_idx) + self.delta_at(word_idx) + (word & mask).count_ones();
         Some(self.sa_vals[rank as usize])
     }
 
@@ -127,8 +180,9 @@ impl SampledSuffixArray {
     pub fn to_flat_vec(&self, n: usize) -> Vec<u32> {
         let mut flat = vec![u32::MAX; n];
         let mut rank = 0usize;
-        for (word_idx, &word) in self.bitvector.iter().enumerate() {
-            let mut w = word;
+        let num_words = self.word_data.len() / SA_RECORD_STRIDE;
+        for word_idx in 0..num_words {
+            let mut w = self.word_at(word_idx);
             while w != 0 {
                 let bit = w.trailing_zeros() as usize;
                 let pos = word_idx * 64 + bit;
