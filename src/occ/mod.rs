@@ -260,6 +260,19 @@ impl OccTable {
         self.num_lanes
     }
 
+    /// Issue a software prefetch for the block record containing BWT position `pos`, ahead
+    /// of a future `lf_step(pos)` call. Used by `resolve_sa_batch`'s lockstep LF-walk to hide
+    /// miss latency: while one lane's current-round `lf_step` result is consumed, the next
+    /// round's block for another lane is already in flight.
+    #[inline]
+    pub(crate) fn prefetch_block(&self, pos: u32) {
+        let block = (pos / BLOCK_SIZE) as usize;
+        let base = self.block_base(block);
+        if base < self.block_data.len() {
+            crate::prefetch::prefetch_read(unsafe { self.block_data.as_ptr().add(base) });
+        }
+    }
+
     /// One-hot bitvector for `lane` within block `block`: bit j set iff position j of the
     /// block has that lane. Under `OccEncoding::OneHot` this is a direct load; under
     /// `OccEncoding::Bitplane` it's recovered via AND/XOR against the lane's bit pattern.
@@ -357,6 +370,31 @@ impl OccTable {
         self.lane_to_symbol[self.lane_at(base, offset) as usize]
     }
 
+    /// Fused decode of `(lane, lane_mask)` at `offset` in one sweep over the block's planes,
+    /// for `OccEncoding::Bitplane` only. `lane_at` + `lane_mask(base, lane)` each independently
+    /// loop `0..num_planes` re-reading the same plane words — `lane_at` to extract bit `p` at
+    /// `offset`, `lane_mask` to AND/XOR the full plane against that same bit. Since the bit
+    /// `lane_mask` tests per plane (`(lane >> p) & 1`) is exactly the bit `lane_at` just
+    /// extracted from that same plane at `offset`, both can be computed from a single load per
+    /// plane instead of two. Halves the plane reads in `lf_step`'s LF-walk (the hottest loop in
+    /// `locate`'s `resolve_sa`).
+    #[inline]
+    fn lane_and_mask_bitplane(&self, base: usize, offset: u32) -> (u8, u64) {
+        let num_planes = self.num_planes as usize;
+        if num_planes == 0 {
+            return (0, u64::MAX);
+        }
+        let mut lane = 0u8;
+        let mut mask = u64::MAX;
+        for p in 0..num_planes {
+            let plane_val = self.word_at(base, p);
+            let bit = (plane_val >> offset) & 1;
+            lane |= (bit as u8) << p;
+            mask &= if bit == 1 { plane_val } else { !plane_val };
+        }
+        (lane, mask)
+    }
+
     /// Fused LF-step primitive: returns `(symbol_at(pos), rank(symbol_at(pos), pos))` in a
     /// single pass over `pos`'s block planes, instead of the two independent calls this
     /// replaces (`symbol_at` + `rank`), which each re-read and re-derive the same block's
@@ -367,12 +405,18 @@ impl OccTable {
         let block = (pos / BLOCK_SIZE) as usize;
         let offset = pos % BLOCK_SIZE;
         let base = self.block_base(block);
-        let lane = self.lane_at(base, offset) as usize;
+
+        let (lane, lane_bits) = if self.encoding == OccEncoding::Bitplane {
+            self.lane_and_mask_bitplane(base, offset)
+        } else {
+            let lane = self.lane_at(base, offset);
+            (lane, self.lane_mask(base, lane as usize))
+        };
+        let lane = lane as usize;
         let symbol = self.lane_to_symbol[lane];
 
         let sb_count = self.sb_count_at(base, lane);
         let delta = self.delta_at(base, lane);
-        let lane_bits = self.lane_mask(base, lane);
 
         // rank(symbol, pos) counts occurrences in bwt[0..pos), i.e. bits strictly below
         // `offset` within this block (mirrors `rank`'s `(1 << (offset+1)) - 1` mask for

@@ -148,6 +148,17 @@ impl SampledSuffixArray {
         }
     }
 
+    /// Issue a software prefetch for the interleaved word record covering BWT row `i`, ahead
+    /// of a future `get(i)` call. Used by `resolve_sa_batch`'s lockstep LF-walk (see
+    /// `fm_index/query.rs`) to overlap this record's fetch with other lanes' work.
+    #[inline]
+    pub(crate) fn prefetch(&self, i: u32) {
+        let off = (i as usize / 64) * SA_RECORD_STRIDE;
+        if off < self.word_data.len() {
+            crate::prefetch::prefetch_read(unsafe { self.word_data.as_ptr().add(off) });
+        }
+    }
+
     /// Check if BWT row `i` has a sampled SA value.
     #[inline]
     pub fn is_sampled(&self, i: u32) -> bool {

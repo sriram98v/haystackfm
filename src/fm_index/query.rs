@@ -20,11 +20,16 @@ impl FmIndex {
     ///
     /// IUPAC ambiguity codes are resolved via base-set intersection (see `count`).
     pub fn locate(&self, pattern: &[u8]) -> Vec<(String, u32)> {
-        self.backward_search(pattern)
+        let rows: Vec<u32> = self
+            .backward_search(pattern)
             .into_iter()
             .flat_map(|(lo, hi)| lo..hi)
-            .map(|i| {
-                let text_pos = self.resolve_sa(i);
+            .collect();
+        let mut text_positions = Vec::with_capacity(rows.len());
+        self.resolve_sa_batch(&rows, &mut text_positions);
+        text_positions
+            .into_iter()
+            .map(|text_pos| {
                 let (seq_idx, pos_in_seq) = self
                     .map_position(text_pos)
                     .expect("resolved SA position must be within text bounds");
@@ -39,11 +44,14 @@ impl FmIndex {
     /// heap-allocating and cloning a `String` per hit. Positions are absolute offsets
     /// into the concatenated text (including sentinel bytes between sequences).
     pub fn locate_positions(&self, pattern: &[u8]) -> Vec<u32> {
-        self.backward_search(pattern)
+        let rows: Vec<u32> = self
+            .backward_search(pattern)
             .into_iter()
             .flat_map(|(lo, hi)| lo..hi)
-            .map(|i| self.resolve_sa(i))
-            .collect()
+            .collect();
+        let mut out = Vec::with_capacity(rows.len());
+        self.resolve_sa_batch(&rows, &mut out);
+        out
     }
 
     /// Backward search returning a union of SA intervals covering all IUPAC-compatible matches.
@@ -125,6 +133,54 @@ impl FmIndex {
             }
             i = self.lf_mapping(i);
             steps += 1;
+        }
+    }
+
+    /// Resolve many BWT rows to text positions, driving all LF-walks in lockstep instead of
+    /// one at a time.
+    ///
+    /// Each row's LF-walk is independent of every other row's — `resolve_sa` in a loop over
+    /// `rows` runs them fully serially, exposing the raw pointer-chasing latency of each
+    /// `sa_samples.get`/`lf_step` miss with nothing to overlap it with. Interleaving the walks
+    /// (SoA: one `cur`/`steps` slot per still-active row) means the CPU's out-of-order window
+    /// has many independent memory accesses in flight per round instead of one, and a software
+    /// prefetch issued for every active row's next access, one full round ahead of when it's
+    /// read, gives the miss extra time to resolve before it's needed. `locate`/`locate_positions`
+    /// use this instead of the old `flat_map(lo..hi).map(resolve_sa)`; results are appended to
+    /// `out` in `rows` order (same order the old per-row map produced).
+    pub(crate) fn resolve_sa_batch(&self, rows: &[u32], out: &mut Vec<u32>) {
+        // Written by index as lanes retire (out of order), so pre-size rather than push.
+        out.clear();
+        out.resize(rows.len(), 0);
+        let mut cur: Vec<u32> = rows.to_vec();
+        let mut steps: Vec<u32> = vec![0; rows.len()];
+        // Indices into `cur`/`steps` still walking; shrinks as rows hit a sampled row.
+        let mut active: Vec<u32> = (0..rows.len() as u32).collect();
+        let mut next_active: Vec<u32> = Vec::with_capacity(active.len());
+
+        while !active.is_empty() {
+            // Phase A: issue prefetches for every active lane's current position before
+            // Phase B reads any of them, so each lane's miss overlaps with the others'
+            // prefetch issue + Phase B's arithmetic instead of stalling immediately.
+            for &lane in &active {
+                let pos = cur[lane as usize];
+                self.sa_samples.prefetch(pos);
+                self.occ.prefetch_block(pos);
+            }
+
+            next_active.clear();
+            for &lane in &active {
+                let idx = lane as usize;
+                let pos = cur[idx];
+                if let Some(sa_val) = self.sa_samples.get(pos) {
+                    out[idx] = sa_val + steps[idx];
+                } else {
+                    cur[idx] = self.lf_mapping(pos);
+                    steps[idx] += 1;
+                    next_active.push(lane);
+                }
+            }
+            std::mem::swap(&mut active, &mut next_active);
         }
     }
 
@@ -379,5 +435,25 @@ mod tests {
         assert_eq!(idx.map_position(3), Some((0, 3)));
         assert_eq!(idx.map_position(5), Some((1, 0)));
         assert_eq!(idx.map_position(8), Some((1, 3)));
+    }
+
+    #[test]
+    fn test_resolve_sa_batch_matches_scalar() {
+        // sa_sample_rate default (not 1) so resolve_sa's LF-walk actually takes >0 steps.
+        let seq = DnaSequence::from_str("ACGTACGTACGTACGTACGTACGTACGT").unwrap();
+        let config = FmIndexConfig {
+            sa_sample_rate: 4,
+            use_gpu: false,
+            ..Default::default()
+        };
+        let idx = FmIndex::build_cpu(&[seq], &config).unwrap();
+
+        let rows: Vec<u32> = (0..idx.text_len).collect();
+        let scalar: Vec<u32> = rows.iter().map(|&i| idx.resolve_sa(i)).collect();
+
+        let mut batch = Vec::new();
+        idx.resolve_sa_batch(&rows, &mut batch);
+
+        assert_eq!(batch, scalar);
     }
 }
