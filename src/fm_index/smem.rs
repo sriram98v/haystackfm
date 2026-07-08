@@ -147,9 +147,11 @@ impl BidirFmIndex {
     fn raw_mem_from(&self, query: &[u8], i: usize, min_len: usize) -> Option<RawMem> {
         let n = query.len();
         // Track a set of active intervals; N-wildcard may produce multiple branches.
+        // `ivs` always holds the last non-empty extension, so no per-step snapshot/clone is
+        // needed — on break it is exactly the accepted right-maximal interval set.
         let mut ivs: Vec<BidirInterval> = vec![self.full_interval()];
         let mut j = i;
-        let mut last_valid: Option<(Vec<BidirInterval>, usize)> = None;
+        let mut matched = false;
 
         // Right extension phase: uses the reverse index.
         while j < n {
@@ -159,10 +161,13 @@ impl BidirFmIndex {
             }
             ivs = next;
             j += 1;
-            last_valid = Some((ivs.clone(), j));
+            matched = true;
         }
 
-        let (valid_ivs, end) = last_valid?;
+        if !matched {
+            return None;
+        }
+        let (valid_ivs, end) = (ivs, j);
 
         if end - i < min_len {
             return None;
