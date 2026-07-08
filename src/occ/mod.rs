@@ -335,7 +335,15 @@ impl OccTable {
         if lane == NO_LANE {
             return 0;
         }
-        let lane = lane as usize;
+        self.rank_at_lane(lane as usize, i)
+    }
+
+    /// Core rank arithmetic for a known dense `lane`, with `i > 0`. All reads land in the
+    /// single contiguous block record at `base`, so a rank costs one block miss. Factored out
+    /// so [`rank_pair`](Self::rank_pair) and [`rank_many`](Self::rank_many) can reuse it after
+    /// resolving the lane once.
+    #[inline]
+    fn rank_at_lane(&self, lane: usize, i: u32) -> u32 {
         let pos = i - 1;
         let block = (pos / BLOCK_SIZE) as usize;
         let offset = pos % BLOCK_SIZE;
@@ -352,6 +360,46 @@ impl OccTable {
         };
 
         sb_count + delta + (lane_bits & mask).count_ones()
+    }
+
+    /// Fused rank of the two borders of one SA interval for the same symbol `c`:
+    /// `(rank(c, lo), rank(c, hi))`. Resolves `c`'s lane once and prefetches **both** block
+    /// records before computing either, so `hi`'s block miss overlaps `lo`'s work instead of
+    /// serializing after it — the two ranks per backward-search step become ~one miss apart.
+    #[inline]
+    pub fn rank_pair(&self, c: u8, lo: u32, hi: u32) -> (u32, u32) {
+        let lane = self.symbol_to_lane[c as usize];
+        if lane == NO_LANE {
+            return (0, 0);
+        }
+        let lane = lane as usize;
+        if lo != 0 {
+            self.prefetch_block(lo - 1);
+        }
+        if hi != 0 {
+            self.prefetch_block(hi - 1);
+        }
+        let rlo = if lo == 0 { 0 } else { self.rank_at_lane(lane, lo) };
+        let rhi = if hi == 0 { 0 } else { self.rank_at_lane(lane, hi) };
+        (rlo, rhi)
+    }
+
+    /// Batched rank: `out[k] = rank(queries[k].0, queries[k].1)` for many independent
+    /// `(symbol, idx)` pairs, phase-split to hide cache-miss latency — the same
+    /// memory-level-parallelism trick `resolve_sa_batch` uses for the LF-walk. Phase 1 issues
+    /// a prefetch for every query's block; phase 2 computes the ranks, by which point many of
+    /// the block records are already in flight so the misses overlap instead of each stalling
+    /// its own query. Intended as the rank primitive under a batched backward search.
+    pub fn rank_many(&self, queries: &[(u8, u32)], out: &mut [u32]) {
+        debug_assert_eq!(queries.len(), out.len());
+        for &(_, i) in queries {
+            if i != 0 {
+                self.prefetch_block(i - 1);
+            }
+        }
+        for (slot, &(c, i)) in out.iter_mut().zip(queries) {
+            *slot = self.rank(c, i);
+        }
     }
 
     /// Symbol at BWT position `pos`, recovered from the occ bitplanes.

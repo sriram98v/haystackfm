@@ -305,4 +305,49 @@ mod tests {
             "reconstruct_bwt_u32 mismatch"
         );
     }
+
+    #[test]
+    fn rank_pair_matches_scalar_rank() {
+        let text = encode(&"ACGTTGCAACGT".repeat(30));
+        let sa = build_suffix_array(&text);
+        let bwt = build_bwt(&text, &sa);
+        let n = bwt.len() as u32;
+        for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+            let occ = build_occ_table(&bwt, enc);
+            for c in 0..ALPHABET_SIZE as u8 {
+                // A spread of (lo, hi) border pairs, including lo == hi and the i == 0 edge.
+                for lo in (0..=n).step_by(7) {
+                    for hi in (lo..=n).step_by(11) {
+                        assert_eq!(
+                            occ.rank_pair(c, lo, hi),
+                            (occ.rank(c, lo), occ.rank(c, hi)),
+                            "rank_pair({c}, {lo}, {hi}) mismatch ({enc:?})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rank_many_matches_scalar_rank() {
+        let text = encode(&"GATTACAGATTACA".repeat(20));
+        let sa = build_suffix_array(&text);
+        let bwt = build_bwt(&text, &sa);
+        let n = bwt.len() as u32;
+        for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+            let occ = build_occ_table(&bwt, enc);
+            let mut queries: Vec<(u8, u32)> = Vec::new();
+            for c in 0..ALPHABET_SIZE as u8 {
+                for i in (0..=n).step_by(5) {
+                    queries.push((c, i));
+                }
+            }
+            let mut out = vec![0u32; queries.len()];
+            occ.rank_many(&queries, &mut out);
+            for (&(c, i), &got) in queries.iter().zip(&out) {
+                assert_eq!(got, occ.rank(c, i), "rank_many({c}, {i}) mismatch ({enc:?})");
+            }
+        }
+    }
 }

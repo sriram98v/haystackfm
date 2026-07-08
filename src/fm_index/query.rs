@@ -102,8 +102,9 @@ impl FmIndex {
                         continue;
                     }
                     let c_val = self.c_array.get(r);
-                    let new_lo = c_val + self.occ.rank(r, lo);
-                    let new_hi = c_val + self.occ.rank(r, hi);
+                    let (rank_lo, rank_hi) = self.occ.rank_pair(r, lo, hi);
+                    let new_lo = c_val + rank_lo;
+                    let new_hi = c_val + rank_hi;
                     if new_lo < new_hi {
                         next.push((new_lo, new_hi));
                     }
