@@ -73,24 +73,33 @@ impl BidirFmIndex {
             return vec![];
         }
 
-        let n = query.len();
-        let mut smems: Vec<Mem> = Vec::new();
-        let mut i = 0;
+        // Collect every MEM (one per left-maximal start), then keep the SMEMs.
+        //
+        // An SMEM is a MEM whose query interval is not contained in any other MEM's query
+        // interval, so we filter the (correct, complete) MEM set to its containment-maximal
+        // elements. This deliberately costs ≈ `find_mems`; Phase 2 replaces it with a
+        // single-pass BWA-MEM SMEM sweep that restores speed. It fixes the previous
+        // pivot-advance bug, which dropped SMEMs starting earlier but ending later than an
+        // already-emitted MEM (see `bug-fmidx.md`).
+        let mut raws = self.collect_raw_mems(query, min_len);
+        raws.sort_by_key(|m| (m.query_start, m.query_end));
+        raws.dedup_by_key(|m| (m.query_start, m.query_end));
 
-        while i < n {
-            let (mem_opt, next_i) = self.smem_from(query, i, min_len, locate);
+        let intervals: Vec<(usize, usize)> =
+            raws.iter().map(|m| (m.query_start, m.query_end)).collect();
 
-            if let Some(mem) = mem_opt {
-                // Advance past the SMEM's right boundary to avoid finding
-                // redundant sub-MEMs that are dominated by this one.
-                let end = mem.query_end;
-                smems.push(mem);
-                i = end;
-            } else {
-                i = next_i;
+        let mut smems = Vec::new();
+        for (idx, raw) in raws.into_iter().enumerate() {
+            let (s, e) = (raw.query_start, raw.query_end);
+            // Contained in another MEM => not super-maximal. Post-dedup no two intervals are
+            // equal, so `j != idx` already excludes self; the `!=` guard is belt-and-braces.
+            let contained = intervals.iter().enumerate().any(|(j, &(s2, e2))| {
+                j != idx && s2 <= s && e <= e2 && (s2, e2) != (s, e)
+            });
+            if !contained {
+                smems.push(self.locate_raw(raw, locate));
             }
         }
-
         smems
     }
 
@@ -106,23 +115,12 @@ impl BidirFmIndex {
             return vec![];
         }
 
-        let n = query.len();
-        let mut mems: Vec<Mem> = Vec::new();
-        // Deduplicate by (start, end) since multiple i values can produce the same MEM.
-        let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
-
-        for i in 0..n {
-            let (mem_opt, _) = self.smem_from(query, i, min_len, locate);
-            if let Some(mem) = mem_opt {
-                let key = (mem.query_start, mem.query_end);
-                if seen.insert(key) {
-                    mems.push(mem);
-                }
-            }
-        }
-
-        mems.sort_by_key(|m| (m.query_start, m.query_end));
-        mems
+        let mut raws = self.collect_raw_mems(query, min_len);
+        raws.sort_by_key(|m| (m.query_start, m.query_end));
+        raws.dedup_by_key(|m| (m.query_start, m.query_end));
+        raws.into_iter()
+            .map(|raw| self.locate_raw(raw, locate))
+            .collect()
     }
 
     /// Find the right-maximal, left-maximal seed starting at query position `i`.
@@ -132,13 +130,21 @@ impl BidirFmIndex {
     /// Returns `(Some(Mem), next_i)` on success where `next_i = i + 1` (the
     /// `find_smems` outer loop may choose a larger advance).
     /// Returns `(None, i + 1)` when no valid seed exists at `i`.
-    fn smem_from(
-        &self,
-        query: &[u8],
-        i: usize,
-        min_len: usize,
-        locate: bool,
-    ) -> (Option<Mem>, usize) {
+    /// Collect the raw MEM anchored at every start position (one per left-maximal start),
+    /// without resolving positions. Shared by [`find_mems`](Self::find_mems) and
+    /// [`find_smems`](Self::find_smems).
+    fn collect_raw_mems(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
+        (0..query.len())
+            .filter_map(|i| self.raw_mem_from(query, i, min_len))
+            .collect()
+    }
+
+    /// Right-maximal, left-maximal seed starting at query position `i`, *without* resolving
+    /// positions. `N` bases in `query` are treated as wildcards matching any of A/C/G/T.
+    ///
+    /// Returns `None` when no valid seed of length ≥ `min_len` exists at `i`. The returned
+    /// `query_start` is always `i`, so distinct `i` yield distinct MEMs.
+    fn raw_mem_from(&self, query: &[u8], i: usize, min_len: usize) -> Option<RawMem> {
         let n = query.len();
         // Track a set of active intervals; N-wildcard may produce multiple branches.
         let mut ivs: Vec<BidirInterval> = vec![self.full_interval()];
@@ -156,48 +162,57 @@ impl BidirFmIndex {
             last_valid = Some((ivs.clone(), j));
         }
 
-        let (valid_ivs, end) = match last_valid {
-            Some(v) => v,
-            None => return (None, i + 1),
-        };
+        let (valid_ivs, end) = last_valid?;
 
-        let len = end - i;
-        if len < min_len {
-            return (None, i + 1);
+        if end - i < min_len {
+            return None;
         }
 
-        // Left-maximality check: uses the forward index.
-        // Not left-maximal when ANY interval in the set can be extended left.
-        let left_maximal = if i == 0 {
-            true
-        } else {
-            extend_multi_left(&valid_ivs, query[i - 1], &self.fwd).is_empty()
-        };
-
+        // Left-maximality check: uses the forward index. Not left-maximal when ANY interval
+        // in the set can be extended left.
+        let left_maximal =
+            i == 0 || extend_multi_left(&valid_ivs, query[i - 1], &self.fwd).is_empty();
         if !left_maximal {
-            return (None, i + 1);
+            return None;
         }
 
         let match_count: u32 = valid_ivs.iter().map(|iv| iv.size()).sum();
 
+        Some(RawMem {
+            query_start: i,
+            query_end: end,
+            match_count,
+            ivs: valid_ivs,
+        })
+    }
+
+    /// Resolve a [`RawMem`] into a public [`Mem`], locating reference positions only when
+    /// `locate` is set.
+    fn locate_raw(&self, raw: RawMem, locate: bool) -> Mem {
         let positions = if locate {
-            valid_ivs
+            raw.ivs
                 .iter()
                 .flat_map(|iv| self.locate_interval(iv))
                 .collect()
         } else {
             Vec::new()
         };
-
-        let mem = Mem {
-            query_start: i,
-            query_end: end,
-            match_count,
+        Mem {
+            query_start: raw.query_start,
+            query_end: raw.query_end,
+            match_count: raw.match_count,
             positions,
-        };
-
-        (Some(mem), i + 1)
+        }
     }
+}
+
+/// A MEM before its reference positions are resolved: query interval, occurrence count, and
+/// the accepted bidirectional SA intervals (kept so only survivors need locating).
+struct RawMem {
+    query_start: usize,
+    query_end: usize,
+    match_count: u32,
+    ivs: Vec<BidirInterval>,
 }
 
 /// Extend each interval in `ivs` right by `c`, using the index's alphabet compatibility.
@@ -597,5 +612,130 @@ mod tests {
         assert_eq!(smems.len(), 1);
         assert_eq!(smems[0].query_start, 0);
         assert_eq!(smems[0].query_end, 2);
+    }
+
+    // ── Regression: SMEM-drop bug (bug-fmidx.md) ──────────────────────────────
+
+    fn bidir_multi(seqs: &[(&str, &str)]) -> BidirFmIndex {
+        let config = FmIndexConfig {
+            sa_sample_rate: 1,
+            use_gpu: false,
+            ..Default::default()
+        };
+        let dna: Vec<DnaSequence> = seqs
+            .iter()
+            .map(|(s, h)| DnaSequence::from_str_with_header(s, h).unwrap())
+            .collect();
+        BidirFmIndex::build_cpu(&dna, &config).unwrap()
+    }
+
+    /// Verbatim reproducer from `bug-fmidx.md`: two overlapping MEMs where neither query
+    /// interval contains the other (`[4,30)` and `[5,176)`) are both SMEMs. The old
+    /// pivot-advance logic emitted only the left-starting one and dropped the longer seed.
+    #[test]
+    fn smem_drops_valid_longer_seed() {
+        let query = "CGTTCTGGAAGCAATGGCTTTCCTTGAGGAATCCCACCCAGGGATCTTTGAAAACTCTTGT\
+                     CTTGAAACGATGGAAGTTGTTCAGCAAACAAGAGTGGACAAACTAACTCAAGGTCGCCAGA\
+                     CTTATGACTGGACATTGAATAGAAACCAACCAGCTGCAACTGCTTTGGCCAACA";
+        let ref_wrong = &query[4..30]; // 26 bp  -> query[4..30)
+        let ref_correct = &query[5..176]; // 171 bp -> query[5..176)
+
+        let idx = bidir_multi(&[(ref_wrong, "REF_WRONG"), (ref_correct, "REF_CORRECT")]);
+        let q = encode(query);
+
+        let smems = idx.find_smems(&q, 19, true);
+        let mems = idx.find_mems(&q, 19, true);
+
+        let hits = |ms: &[Mem], header: &str| {
+            ms.iter()
+                .any(|m| m.positions.iter().any(|(h, _)| h == header))
+        };
+
+        // find_mems already finds REF_CORRECT (sanity: index content is correct).
+        assert!(hits(&mems, "REF_CORRECT"));
+        // find_smems must now also return the 171 bp SMEM to REF_CORRECT.
+        assert!(
+            hits(&smems, "REF_CORRECT"),
+            "find_smems dropped the valid 171 bp SMEM to REF_CORRECT"
+        );
+        assert!(hits(&smems, "REF_WRONG"), "find_smems dropped REF_WRONG");
+    }
+
+    /// Left/right mirror of the reproducer: the longer seed starts *earlier* and the shorter
+    /// one ends later. Both remain SMEMs.
+    #[test]
+    fn smem_keeps_both_when_shorter_starts_later() {
+        let query = "CGTTCTGGAAGCAATGGCTTTCCTTGAGGAATCCCACCCAGGGATCTTTGAAAACTCTTGT\
+                     CTTGAAACGATGGAAGTTGTTCAGCAAACAAGAGTGGACAAACTAACTCAAGGTCGCCAGA\
+                     CTTATGACTGGACATTGAATAGAAACCAACCAGCTGCAACTGCTTTGGCCAACA";
+        // Longer seed [0..171); shorter competing seed [150..176) — neither contains the other.
+        let ref_long = &query[0..171];
+        let ref_short = &query[150..176];
+
+        let idx = bidir_multi(&[(ref_long, "REF_LONG"), (ref_short, "REF_SHORT")]);
+        let q = encode(query);
+        let smems = idx.find_smems(&q, 19, true);
+
+        let hits = |header: &str| {
+            smems
+                .iter()
+                .any(|m| m.positions.iter().any(|(h, _)| h == header))
+        };
+        assert!(hits("REF_LONG"), "dropped the leading long SMEM");
+        assert!(hits("REF_SHORT"), "dropped the trailing short SMEM");
+    }
+
+    /// `find_smems` must equal the containment-maximal filter of `find_mems` on randomized
+    /// queries with planted overlapping seeds to two references. This is the oracle that
+    /// keeps the (future) single-pass SMEM algorithm honest.
+    #[test]
+    fn smems_equal_containment_filtered_mems_randomized() {
+        // Tiny deterministic LCG for reproducibility without extra deps.
+        let mut state: u64 = 0xDEADBEEFCAFEF00D;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        let bases = [b'A', b'C', b'G', b'T'];
+        let rand_dna = |n: usize, next: &mut dyn FnMut() -> u32| -> String {
+            (0..n).map(|_| bases[(next() % 4) as usize] as char).collect()
+        };
+
+        for _ in 0..40 {
+            let full = rand_dna(200, &mut next);
+            // Two overlapping references carved from the query, plus random flank noise.
+            let a = &full[10..60];
+            let b = &full[40..160];
+            let idx = bidir_multi(&[
+                (a, "A"),
+                (b, "B"),
+                (&rand_dna(80, &mut next), "NOISE"),
+            ]);
+            let q = encode(&full);
+            let min_len = 15;
+
+            let smems = idx.find_smems(&q, min_len, false);
+            let mems = idx.find_mems(&q, min_len, false);
+
+            // Oracle: containment-maximal filter over the MEM intervals.
+            let ivs: Vec<(usize, usize)> =
+                mems.iter().map(|m| (m.query_start, m.query_end)).collect();
+            let mut expected: Vec<(usize, usize)> = ivs
+                .iter()
+                .filter(|&&(s, e)| {
+                    !ivs.iter().any(|&(s2, e2)| {
+                        (s2, e2) != (s, e) && s2 <= s && e <= e2
+                    })
+                })
+                .copied()
+                .collect();
+            expected.sort();
+
+            let mut got: Vec<(usize, usize)> =
+                smems.iter().map(|m| (m.query_start, m.query_end)).collect();
+            got.sort();
+
+            assert_eq!(got, expected, "SMEMs != containment-maximal MEMs\nquery={full}");
+        }
     }
 }
