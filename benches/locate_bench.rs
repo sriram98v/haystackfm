@@ -24,6 +24,7 @@ fn build_index(corpus: &str) -> FmIndex {
     let config = FmIndexConfig {
         sa_sample_rate: 32,
         use_gpu: false,
+        ..Default::default()
     };
     FmIndex::build_cpu(&[seq], &config).unwrap()
 }

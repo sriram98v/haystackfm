@@ -24,6 +24,7 @@ use webgpu_fmidx::alphabet::concatenate_sequences;
 use webgpu_fmidx::bwt::cpu::build_bwt as cpu_build_bwt;
 use webgpu_fmidx::fm_index::{FmIndex, FmIndexConfig};
 use webgpu_fmidx::occ::cpu::build_occ_table as cpu_build_occ;
+use webgpu_fmidx::occ::OccEncoding;
 use webgpu_fmidx::suffix_array::cpu::build_suffix_array as cpu_build_sa;
 
 #[cfg(feature = "gpu")]
@@ -98,7 +99,8 @@ fn print_speedup_table() {
         );
 
         // OCC (SA + BWT pre-built via CPU for both)
-        let cpu_occ_ms = measure_ms(|| drop(cpu_build_occ(&bwt)), WARMUP, ITERS);
+        let cpu_occ_ms =
+            measure_ms(|| drop(cpu_build_occ(&bwt, OccEncoding::Bitplane)), WARMUP, ITERS);
         let gpu_occ_ms = measure_ms(
             || {
                 drop(pollster::block_on(
@@ -115,6 +117,7 @@ fn print_speedup_table() {
                 let cfg = FmIndexConfig {
                     sa_sample_rate: 32,
                     use_gpu: false,
+                    ..Default::default()
                 };
                 drop(FmIndex::build_cpu(&[seq.clone()], &cfg).unwrap());
             },
@@ -126,6 +129,7 @@ fn print_speedup_table() {
                 let cfg = FmIndexConfig {
                     sa_sample_rate: 32,
                     use_gpu: true,
+                    ..Default::default()
                 };
                 drop(pollster::block_on(FmIndex::build(&[seq.clone()], &cfg)).unwrap());
             },
@@ -241,7 +245,7 @@ fn bench_occ_construction(c: &mut Criterion) {
         let bwt = cpu_build_bwt(&text, &sa);
 
         group.bench_function(BenchmarkId::new("cpu", size), |b| {
-            b.iter(|| cpu_build_occ(&bwt))
+            b.iter(|| cpu_build_occ(&bwt, OccEncoding::Bitplane))
         });
 
         #[cfg(feature = "gpu")]
@@ -264,6 +268,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
         let cpu_cfg = FmIndexConfig {
             sa_sample_rate: 32,
             use_gpu: false,
+            ..Default::default()
         };
 
         group.bench_function(BenchmarkId::new("cpu", size), |b| {
@@ -275,6 +280,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
             let gpu_cfg = FmIndexConfig {
                 sa_sample_rate: 32,
                 use_gpu: true,
+                ..Default::default()
             };
             group.bench_function(BenchmarkId::new("gpu", size), |b| {
                 b.iter(|| pollster::block_on(FmIndex::build(&[seq.clone()], &gpu_cfg)).unwrap())
