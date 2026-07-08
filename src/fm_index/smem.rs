@@ -73,15 +73,14 @@ impl BidirFmIndex {
             return vec![];
         }
 
-        // Collect every MEM (one per left-maximal start), then keep the SMEMs.
-        //
-        // An SMEM is a MEM whose query interval is not contained in any other MEM's query
-        // interval, so we filter the (correct, complete) MEM set to its containment-maximal
-        // elements. This deliberately costs ≈ `find_mems`; Phase 2 replaces it with a
-        // single-pass BWA-MEM SMEM sweep that restores speed. It fixes the previous
-        // pivot-advance bug, which dropped SMEMs starting earlier but ending later than an
-        // already-emitted MEM (see `bug-fmidx.md`).
-        let mut raws = self.collect_raw_mems(query, min_len);
+        // Single-pass BWA-MEM SMEM sweep: jump the pivot by each pivot's forward reach,
+        // collecting MEM candidates (forward-collected right-maximal prefixes, each
+        // backward-extended to its true left boundary and verified). Every SMEM is captured
+        // by some visited pivot, so filtering the candidates to their containment-maximal
+        // elements yields exactly the SMEMs. This both fixes the old pivot-advance bug
+        // (which lacked backward extension, dropping SMEMs starting before the next pivot —
+        // see `bug-fmidx.md`) and avoids the O(n²) re-extension of the interim fix.
+        let mut raws = self.collect_smem_candidates(query, min_len);
         raws.sort_by_key(|m| (m.query_start, m.query_end));
         raws.dedup_by_key(|m| (m.query_start, m.query_end));
 
@@ -137,6 +136,109 @@ impl BidirFmIndex {
         (0..query.len())
             .filter_map(|i| self.raw_mem_from(query, i, min_len))
             .collect()
+    }
+
+    /// Single-pass BWA-MEM collection of MEM candidates that contain every SMEM.
+    ///
+    /// Visits pivots left-to-right, advancing each time by the pivot's *forward reach* (the
+    /// end of the longest match anchored at the pivot). At each pivot it forward-extends,
+    /// recording every right-maximal prefix `[pivot, e)` (a right-end where the interval set's
+    /// coverage drops), then backward-extends each recorded prefix to its true left boundary
+    /// and keeps it if the result verifies as a MEM of length ≥ `min_len`.
+    ///
+    /// Correctness: max right-reach is monotonic in the start position, so any SMEM starting
+    /// after a pivot must extend past that pivot's reach and therefore covers the next pivot —
+    /// hence every SMEM is anchored by some visited pivot and appears here (possibly alongside
+    /// non-super MEMs, which the caller's containment filter removes).
+    fn collect_smem_candidates(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
+        let n = query.len();
+        let mut out: Vec<RawMem> = Vec::new();
+        let mut pivot = 0;
+
+        while pivot < n {
+            // Forward extension from `pivot`, collecting right-maximal prefixes as
+            // (interval set for query[pivot..end), end).
+            let mut curr = extend_multi_right(&[self.full_interval()], query[pivot], &self.rev);
+            if curr.is_empty() {
+                pivot += 1; // query[pivot] absent from the text
+                continue;
+            }
+            let mut cov = coverage(&curr);
+            let mut prefixes: Vec<(Vec<BidirInterval>, usize)> = Vec::new();
+            let mut j = pivot + 1;
+            loop {
+                if j == n {
+                    prefixes.push((curr, n));
+                    break;
+                }
+                let next = extend_multi_right(&curr, query[j], &self.rev);
+                let ncov = coverage(&next);
+                if ncov != cov {
+                    // Some occurrences of query[pivot..j) do not extend right by query[j];
+                    // [pivot, j) is a right-maximal prefix.
+                    prefixes.push((curr.clone(), j));
+                }
+                if next.is_empty() {
+                    break;
+                }
+                curr = next;
+                cov = ncov;
+                j += 1;
+            }
+
+            // The longest prefix's end is the forward reach; advance the pivot there.
+            let reach = prefixes.last().map(|(_, e)| *e).unwrap_or(pivot + 1);
+
+            // Backward-extend each right-maximal prefix to its left boundary → MEM candidate.
+            for (ivs, end) in prefixes {
+                // Do NOT cull by `end - pivot` here: backward extension can lengthen the match
+                // well past the pivot-anchored prefix (a short prefix at a post-jump pivot can
+                // extend left into a long MEM). Filter by the final `end - start` only.
+                let (bivs, start) = self.extend_left_maximally(ivs, query, pivot);
+                if end - start < min_len {
+                    continue;
+                }
+                // Verify right-maximality (left-maximality is guaranteed by the backward stop):
+                // the whole set must fail to extend right by query[end].
+                let right_maximal =
+                    end == n || extend_multi_right(&bivs, query[end], &self.rev).is_empty();
+                if !right_maximal {
+                    continue;
+                }
+                let match_count: u32 = bivs.iter().map(|iv| iv.size()).sum();
+                out.push(RawMem {
+                    query_start: start,
+                    query_end: end,
+                    match_count,
+                    ivs: bivs,
+                });
+            }
+
+            pivot = reach.max(pivot + 1);
+        }
+
+        out
+    }
+
+    /// Extend an interval set as far left as possible from left boundary `from`, returning the
+    /// widened set and the resulting start position. Stops when the next left extension is
+    /// empty (left-maximal) or the query start is reached.
+    fn extend_left_maximally(
+        &self,
+        mut ivs: Vec<BidirInterval>,
+        query: &[u8],
+        from: usize,
+    ) -> (Vec<BidirInterval>, usize) {
+        let mut start = from;
+        while start > 0 {
+            let next = extend_multi_left(&ivs, query[start - 1], &self.fwd);
+            if next.is_empty() {
+                break;
+            }
+            ivs = next;
+            start -= 1;
+        }
+        (ivs, start)
     }
 
     /// Right-maximal, left-maximal seed starting at query position `i`, *without* resolving
@@ -218,6 +320,11 @@ struct RawMem {
     query_end: usize,
     match_count: u32,
     ivs: Vec<BidirInterval>,
+}
+
+/// Total number of text occurrences represented by an interval set.
+fn coverage(ivs: &[BidirInterval]) -> u32 {
+    ivs.iter().map(|iv| iv.size()).sum()
 }
 
 /// Extend each interval in `ivs` right by `c`, using the index's alphabet compatibility.
@@ -706,16 +813,27 @@ mod tests {
             (0..n).map(|_| bases[(next() % 4) as usize] as char).collect()
         };
 
-        for _ in 0..40 {
+        // A few references may carry ambiguity codes so extensions branch into interval
+        // sets (the case that makes our SMEM enumeration harder than textbook BWA).
+        let iupac = [b'A', b'C', b'G', b'T', b'N', b'R', b'Y'];
+        let rand_iupac = |n: usize, next: &mut dyn FnMut() -> u32| -> String {
+            (0..n)
+                .map(|_| iupac[(next() % iupac.len() as u32) as usize] as char)
+                .collect()
+        };
+
+        for iter in 0..80 {
             let full = rand_dna(200, &mut next);
             // Two overlapping references carved from the query, plus random flank noise.
+            // Every other iteration injects IUPAC/N noise to exercise branching.
             let a = &full[10..60];
             let b = &full[40..160];
-            let idx = bidir_multi(&[
-                (a, "A"),
-                (b, "B"),
-                (&rand_dna(80, &mut next), "NOISE"),
-            ]);
+            let noise = if iter % 2 == 0 {
+                rand_iupac(80, &mut next)
+            } else {
+                rand_dna(80, &mut next)
+            };
+            let idx = bidir_multi(&[(a, "A"), (b, "B"), (&noise, "NOISE")]);
             let q = encode(&full);
             let min_len = 15;
 
