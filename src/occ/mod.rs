@@ -142,11 +142,7 @@ impl OccTable {
         // changes value. Costs `num_lanes*4` bytes/block (duplicated storage) for one fewer
         // miss per query step.
         let block_stride = num_lanes_usize * 4 + num_lanes_usize * 2 + lane_data_width * 8;
-        let num_blocks = if num_lanes_usize == 0 {
-            0
-        } else {
-            block_deltas.len() / num_lanes_usize
-        };
+        let num_blocks = block_deltas.len().checked_div(num_lanes_usize).unwrap_or(0);
         let blocks_per_sb = (SUPERBLOCK_SIZE / BLOCK_SIZE) as usize;
         // Interleave the builders' separate `superblock_checkpoints`/`block_deltas`/`lane_data`
         // arrays into one contiguous, cache-line-sized record per block (see `block_data`
