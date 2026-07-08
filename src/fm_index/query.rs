@@ -54,6 +54,159 @@ impl FmIndex {
         out
     }
 
+    /// Batched [`locate_positions`] over many patterns at once.
+    ///
+    /// Drives every pattern's backward search in lockstep so the per-step interval-border
+    /// rank queries across all still-active patterns are issued together through
+    /// [`OccTable::rank_many`](crate::occ::OccTable::rank_many) — the same memory-level
+    /// parallelism `resolve_sa_batch` applies to the LF-walk, now on the backward-search
+    /// ranks that dominate `locate`. All resolved rows are then gathered and mapped to text
+    /// positions in a single `resolve_sa_batch`.
+    ///
+    /// Patterns whose IUPAC expansion branches into more than one SA interval fall back to the
+    /// scalar [`backward_search`](Self::backward_search) (correctness over speed for the rare
+    /// ambiguous case). Results are per-pattern in input order; each inner `Vec` holds the
+    /// same absolute text offsets `locate_positions` would return (order within a pattern is
+    /// not guaranteed to match the scalar path).
+    pub fn locate_positions_many(&self, patterns: &[&[u8]]) -> Vec<Vec<u32>> {
+        // Cache-sized lockstep window: enough independent ranks in flight to hide miss
+        // latency, but small enough that the prefetched block records stay resident (batching
+        // *all* patterns at once evicts them before they're read — a net loss).
+        const CHUNK: usize = 256;
+
+        let n = patterns.len();
+
+        // Resolve each possible query byte once to its single present compatible symbol.
+        // `SINGLE(sym)` = fast path; `BRANCH` = >1 present symbol (scalar fallback);
+        // `NONE` = no present symbol (empty result).
+        const BRANCH: i16 = -2;
+        const NONE: i16 = -1;
+        let compat_fn = self.alphabet_fns.compatible_fn;
+        let mut resolve = [NONE; 256];
+        for (byte, slot) in resolve.iter_mut().enumerate() {
+            let mut present: Option<u8> = None;
+            let mut branch = false;
+            for &r in compat_fn(byte as u8) {
+                if self.c_array.symbol_count(r, self.text_len) > 0 {
+                    if present.is_some() {
+                        branch = true;
+                        break;
+                    }
+                    present = Some(r);
+                }
+            }
+            *slot = if branch {
+                BRANCH
+            } else {
+                match present {
+                    Some(r) => r as i16,
+                    None => NONE,
+                }
+            };
+        }
+
+        let mut rows: Vec<u32> = Vec::new();
+        let mut spans: Vec<(usize, usize)> = vec![(0, 0); n];
+
+        // Per-chunk fast-path state (reused across chunks).
+        let mut lo = vec![0u32; CHUNK];
+        let mut hi = vec![0u32; CHUNK];
+        let mut rev_idx = vec![0usize; CHUNK];
+        let mut done = vec![false; CHUNK];
+        let mut empty = vec![false; CHUNK];
+        let mut fallback = vec![false; CHUNK];
+        let mut rq: Vec<(u8, u32)> = Vec::with_capacity(CHUNK * 2);
+        let mut pair_query: Vec<usize> = Vec::with_capacity(CHUNK);
+        let mut pair_sym: Vec<u8> = Vec::with_capacity(CHUNK);
+        let mut ranks: Vec<u32> = Vec::with_capacity(CHUNK * 2);
+
+        let mut base = 0;
+        while base < n {
+            let chunk = (n - base).min(CHUNK);
+
+            for j in 0..chunk {
+                let pat = patterns[base + j];
+                lo[j] = 0;
+                hi[j] = self.text_len;
+                rev_idx[j] = pat.len();
+                done[j] = pat.is_empty(); // empty pattern -> whole-text interval
+                empty[j] = false;
+                fallback[j] = false;
+            }
+
+            // Lockstep backward search over this chunk.
+            loop {
+                rq.clear();
+                pair_query.clear();
+                pair_sym.clear();
+                for j in 0..chunk {
+                    if done[j] || empty[j] || fallback[j] {
+                        continue;
+                    }
+                    let c = patterns[base + j][rev_idx[j] - 1];
+                    let r = resolve[c as usize];
+                    if r == BRANCH {
+                        fallback[j] = true;
+                        continue;
+                    }
+                    if r == NONE {
+                        empty[j] = true;
+                        done[j] = true;
+                        continue;
+                    }
+                    pair_query.push(j);
+                    pair_sym.push(r as u8);
+                    rq.push((r as u8, lo[j]));
+                    rq.push((r as u8, hi[j]));
+                }
+                if rq.is_empty() {
+                    break;
+                }
+                ranks.resize(rq.len(), 0);
+                self.occ.rank_many(&rq, &mut ranks);
+                for (p, &j) in pair_query.iter().enumerate() {
+                    let c_val = self.c_array.get(pair_sym[p]);
+                    let new_lo = c_val + ranks[p * 2];
+                    let new_hi = c_val + ranks[p * 2 + 1];
+                    if new_lo >= new_hi {
+                        empty[j] = true;
+                        done[j] = true;
+                    } else {
+                        lo[j] = new_lo;
+                        hi[j] = new_hi;
+                        rev_idx[j] -= 1;
+                        if rev_idx[j] == 0 {
+                            done[j] = true;
+                        }
+                    }
+                }
+            }
+
+            // Gather this chunk's rows (fallback patterns via the scalar branching search).
+            for j in 0..chunk {
+                let start = rows.len();
+                if fallback[j] {
+                    for (l, h) in self.backward_search(patterns[base + j]) {
+                        rows.extend(l..h);
+                    }
+                } else if !empty[j] {
+                    rows.extend(lo[j]..hi[j]);
+                }
+                spans[base + j] = (start, rows.len());
+            }
+
+            base += chunk;
+        }
+
+        let mut resolved = Vec::with_capacity(rows.len());
+        self.resolve_sa_batch(&rows, &mut resolved);
+
+        spans
+            .into_iter()
+            .map(|(s, e)| resolved[s..e].to_vec())
+            .collect()
+    }
+
     /// Backward search returning a union of SA intervals covering all IUPAC-compatible matches.
     ///
     /// Each step expands the query symbol to all compatible reference symbols via
@@ -456,5 +609,28 @@ mod tests {
         idx.resolve_sa_batch(&rows, &mut batch);
 
         assert_eq!(batch, scalar);
+    }
+
+    #[test]
+    fn locate_positions_many_matches_scalar() {
+        use crate::alphabet::encode_char;
+        let enc = |s: &str| -> Vec<u8> { s.chars().filter_map(encode_char).collect() };
+
+        // Multi-sequence index; queries include hits (various lengths), a miss, an exact
+        // full-sequence match, and (with IUPAC 'N') a branching query to exercise fallback.
+        let idx = make_index_multi(&["ACGTACGTTTGCA", "GGCATTACAGGGT", "TTACAGGGTACGT"]);
+        let queries_s = ["ACGT", "TTACAGGGT", "GTAC", "ZZZZ_MISS", "A", "TTGCA", "ANGT"];
+        let queries: Vec<Vec<u8>> = queries_s.iter().map(|s| enc(s)).collect();
+        let refs: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
+
+        let batched = idx.locate_positions_many(&refs);
+        assert_eq!(batched.len(), refs.len());
+        for (k, q) in refs.iter().enumerate() {
+            let mut want = idx.locate_positions(q);
+            want.sort_unstable();
+            let mut got = batched[k].clone();
+            got.sort_unstable();
+            assert_eq!(got, want, "query {k} ({:?}) mismatch", queries_s[k]);
+        }
     }
 }
