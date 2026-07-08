@@ -99,8 +99,11 @@ fn print_speedup_table() {
         );
 
         // OCC (SA + BWT pre-built via CPU for both)
-        let cpu_occ_ms =
-            measure_ms(|| drop(cpu_build_occ(&bwt, OccEncoding::Bitplane)), WARMUP, ITERS);
+        let cpu_occ_ms = measure_ms(
+            || drop(cpu_build_occ(&bwt, OccEncoding::Bitplane)),
+            WARMUP,
+            ITERS,
+        );
         let gpu_occ_ms = measure_ms(
             || {
                 drop(pollster::block_on(

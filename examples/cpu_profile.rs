@@ -25,14 +25,19 @@ impl Rng {
     }
     fn dna(&mut self, len: usize) -> String {
         const B: [u8; 4] = *b"ACGT";
-        (0..len).map(|_| B[(self.next() % 4) as usize] as char).collect()
+        (0..len)
+            .map(|_| B[(self.next() % 4) as usize] as char)
+            .collect()
     }
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("all");
-    let ref_len: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2_000_000);
+    let ref_len: usize = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2_000_000);
     let n_queries: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(50_000);
     let query_len: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(100);
 
@@ -40,7 +45,11 @@ fn main() {
     let reference = rng.dna(ref_len);
     let ref_seq = DnaSequence::from_str(&reference).unwrap();
 
-    let cfg = FmIndexConfig { sa_sample_rate: 32, use_gpu: false, ..Default::default() };
+    let cfg = FmIndexConfig {
+        sa_sample_rate: 32,
+        use_gpu: false,
+        ..Default::default()
+    };
 
     eprintln!("building indices over {ref_len} bp ...");
     let fwd = FmIndex::build_cpu(&[ref_seq.clone()], &cfg).unwrap();
@@ -55,7 +64,12 @@ fn main() {
             // encode to alphabet values 1..4
             ref_bytes[start..start + query_len]
                 .iter()
-                .map(|&b| match b { b'A' => 1u8, b'C' => 2, b'G' => 3, _ => 4 })
+                .map(|&b| match b {
+                    b'A' => 1u8,
+                    b'C' => 2,
+                    b'G' => 3,
+                    _ => 4,
+                })
                 .collect()
         })
         .collect();

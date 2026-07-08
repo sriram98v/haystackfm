@@ -346,7 +346,11 @@ mod tests {
             let mut out = vec![0u32; queries.len()];
             occ.rank_many(&queries, &mut out);
             for (&(c, i), &got) in queries.iter().zip(&out) {
-                assert_eq!(got, occ.rank(c, i), "rank_many({c}, {i}) mismatch ({enc:?})");
+                assert_eq!(
+                    got,
+                    occ.rank(c, i),
+                    "rank_many({c}, {i}) mismatch ({enc:?})"
+                );
             }
         }
     }

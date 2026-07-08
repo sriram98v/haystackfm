@@ -619,7 +619,15 @@ mod tests {
         // Multi-sequence index; queries include hits (various lengths), a miss, an exact
         // full-sequence match, and (with IUPAC 'N') a branching query to exercise fallback.
         let idx = make_index_multi(&["ACGTACGTTTGCA", "GGCATTACAGGGT", "TTACAGGGTACGT"]);
-        let queries_s = ["ACGT", "TTACAGGGT", "GTAC", "ZZZZ_MISS", "A", "TTGCA", "ANGT"];
+        let queries_s = [
+            "ACGT",
+            "TTACAGGGT",
+            "GTAC",
+            "ZZZZ_MISS",
+            "A",
+            "TTGCA",
+            "ANGT",
+        ];
         let queries: Vec<Vec<u8>> = queries_s.iter().map(|s| enc(s)).collect();
         let refs: Vec<&[u8]> = queries.iter().map(|q| q.as_slice()).collect();
 

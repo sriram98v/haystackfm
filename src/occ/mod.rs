@@ -379,8 +379,16 @@ impl OccTable {
         if hi != 0 {
             self.prefetch_block(hi - 1);
         }
-        let rlo = if lo == 0 { 0 } else { self.rank_at_lane(lane, lo) };
-        let rhi = if hi == 0 { 0 } else { self.rank_at_lane(lane, hi) };
+        let rlo = if lo == 0 {
+            0
+        } else {
+            self.rank_at_lane(lane, lo)
+        };
+        let rhi = if hi == 0 {
+            0
+        } else {
+            self.rank_at_lane(lane, hi)
+        };
         (rlo, rhi)
     }
 

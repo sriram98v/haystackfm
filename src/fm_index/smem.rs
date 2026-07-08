@@ -92,9 +92,10 @@ impl BidirFmIndex {
             let (s, e) = (raw.query_start, raw.query_end);
             // Contained in another MEM => not super-maximal. Post-dedup no two intervals are
             // equal, so `j != idx` already excludes self; the `!=` guard is belt-and-braces.
-            let contained = intervals.iter().enumerate().any(|(j, &(s2, e2))| {
-                j != idx && s2 <= s && e <= e2 && (s2, e2) != (s, e)
-            });
+            let contained = intervals
+                .iter()
+                .enumerate()
+                .any(|(j, &(s2, e2))| j != idx && s2 <= s && e <= e2 && (s2, e2) != (s, e));
             if !contained {
                 smems.push(self.locate_raw(raw, locate));
             }
@@ -805,12 +806,16 @@ mod tests {
         // Tiny deterministic LCG for reproducibility without extra deps.
         let mut state: u64 = 0xDEADBEEFCAFEF00D;
         let mut next = || {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 33) as u32
         };
         let bases = [b'A', b'C', b'G', b'T'];
         let rand_dna = |n: usize, next: &mut dyn FnMut() -> u32| -> String {
-            (0..n).map(|_| bases[(next() % 4) as usize] as char).collect()
+            (0..n)
+                .map(|_| bases[(next() % 4) as usize] as char)
+                .collect()
         };
 
         // A few references may carry ambiguity codes so extensions branch into interval
@@ -846,9 +851,8 @@ mod tests {
             let mut expected: Vec<(usize, usize)> = ivs
                 .iter()
                 .filter(|&&(s, e)| {
-                    !ivs.iter().any(|&(s2, e2)| {
-                        (s2, e2) != (s, e) && s2 <= s && e <= e2
-                    })
+                    !ivs.iter()
+                        .any(|&(s2, e2)| (s2, e2) != (s, e) && s2 <= s && e <= e2)
                 })
                 .copied()
                 .collect();
@@ -858,7 +862,10 @@ mod tests {
                 smems.iter().map(|m| (m.query_start, m.query_end)).collect();
             got.sort();
 
-            assert_eq!(got, expected, "SMEMs != containment-maximal MEMs\nquery={full}");
+            assert_eq!(
+                got, expected,
+                "SMEMs != containment-maximal MEMs\nquery={full}"
+            );
         }
     }
 }
