@@ -4,6 +4,7 @@ version = "0.5.1"
 edition = "2021"
 description = "GPU-accelerated FM-index construction for DNA sequences via WebGPU"
 license = "MIT"
+repository = "https://github.com/sriram98v/webgpu-fmidx"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
