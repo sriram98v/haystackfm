@@ -40,9 +40,10 @@ let seq = DnaSequence::from_str("ACGTACGT")?;
 let config = FmIndexConfig::default();
 let index = FmIndex::build_cpu(&[seq], &config)?;
 
-let pattern = webgpu_fmidx::alphabet::encode_str("ACGT")?;
-assert_eq!(index.count(&pattern), 2);
-let positions = index.locate(&pattern); // Vec<(seq_id, offset)>
+// Encode a query pattern (a DnaSequence holds the IUPAC-encoded bytes).
+let query = DnaSequence::from_str("ACGT")?;
+assert_eq!(index.count(query.as_slice()), 2);
+let positions = index.locate(query.as_slice()); // Vec<(seq_id, offset)>
 ```
 
 ### Native — GPU (Vulkan / Metal / DX12)
@@ -53,7 +54,7 @@ cargo add webgpu-fmidx --features gpu
 
 ```rust
 use webgpu_fmidx::{DnaSequence, FmIndex, FmIndexConfig};
-use webgpu_fmidx::gpu::locate_batch_gpu;
+use webgpu_fmidx::gpu::locate::locate_batch_gpu;
 
 let seqs = vec![DnaSequence::from_str("ACGTACGT")?];
 let config = FmIndexConfig::default();
@@ -63,7 +64,8 @@ let index = FmIndex::build(&seqs, &config).await?;
 
 // GPU batch locate (IUPAC-aware)
 let ctx = webgpu_fmidx::gpu::GpuContext::new().await?;
-let queries: Vec<&[u8]> = vec![&encoded_pattern];
+let query = DnaSequence::from_str("ACGT")?;
+let queries: Vec<&[u8]> = vec![query.as_slice()];
 let hits = locate_batch_gpu(&ctx, &index, &queries).await?;
 // hits[i] = Vec<(seq_id, offset_within_seq)>
 ```
@@ -77,19 +79,20 @@ let refs = vec![DnaSequence::from_str("ACGTACGTACGT")?];
 let config = FmIndexConfig::default();
 let bidir = BidirFmIndex::build_cpu(&refs, &config)?;
 
-let query = webgpu_fmidx::alphabet::encode_str("ACGT")?;
+let query = DnaSequence::from_str("ACGT")?;
 
 // CPU — returns Vec<Mem>
-let smems = bidir.find_smems(&query, /*min_len=*/18, /*locate=*/true);
-let mems  = bidir.find_mems(&query,  /*min_len=*/18, /*locate=*/true);
+let smems = bidir.find_smems(query.as_slice(), /*min_len=*/18, /*locate=*/true);
+let mems  = bidir.find_mems(query.as_slice(),  /*min_len=*/18, /*locate=*/true);
 
-// GPU batch — returns Vec<Vec<MemHit>>
+// GPU batch — returns Vec<Vec<MemHit>>. The GPU context is drawn from a
+// process-wide cache, so no `GpuContext` argument is passed.
 #[cfg(feature = "gpu")]
 {
-    use webgpu_fmidx::gpu::GpuContext;
-    let ctx = GpuContext::new().await?;
-    let smem_hits = bidir.find_smems_gpu(&ctx, &[query.as_slice()], 18).await?;
-    let mem_hits  = bidir.find_mems_gpu(&ctx,  &[query.as_slice()], 18).await?;
+    let boundaries = bidir.seq_boundaries();      // reference-sequence boundaries
+    let queries = [query.clone()];                // &[DnaSequence]
+    let smem_hits = bidir.find_smems_gpu(&queries, /*min_len=*/18, boundaries, /*max_hits_per_mem=*/1024).await?;
+    let mem_hits  = bidir.find_mems_gpu(&queries,  18, boundaries, 1024).await?;
     // smem_hits[query_i] = Vec<MemHit> with resolved reference positions
 }
 ```
@@ -112,7 +115,7 @@ builder.add_fasta(`>seq1\nACGTACGT\n>seq2\nTGCATGCA`);
 const handle = await builder.build_gpu();    // or builder.build_cpu()
 
 console.log(handle.count("ACGT"));           // number of occurrences
-console.log(handle.locate("ACGT"));          // Uint32Array of positions
+console.log(handle.locate("ACGT"));          // Array of [seqId, offset] pairs
 console.log(handle.text_len());              // total text length
 console.log(handle.num_sequences());         // number of indexed sequences
 
@@ -153,9 +156,10 @@ BidirFmIndex::build_cpu_with::<ExactDna>(sequences, config)?  // custom alphabet
 bidir.find_smems(query, min_len, locate)        // Vec<Mem>
 bidir.find_mems(query, min_len, locate)         // Vec<Mem>
 
-// GPU MEM finding (feature = "gpu")
-bidir.find_smems_gpu(&ctx, queries, min_len).await?  // Vec<Vec<MemHit>>
-bidir.find_mems_gpu(&ctx,  queries, min_len).await?  // Vec<Vec<MemHit>>
+// GPU MEM finding (feature = "gpu"); `queries: &[DnaSequence]`,
+// `ref_boundaries` from `bidir.seq_boundaries()`, GPU context from the cache
+bidir.find_smems_gpu(queries, min_len, ref_boundaries, max_hits_per_mem).await?  // Vec<Vec<MemHit>>
+bidir.find_mems_gpu(queries,  min_len, ref_boundaries, max_hits_per_mem).await?  // Vec<Vec<MemHit>>
 ```
 
 ### `Mem` / `MemHit`
@@ -259,7 +263,7 @@ GPU MEM/SMEM pipeline  (3 passes)
 | `src/alphabet.rs` | IUPAC encoding, `compatible_symbols`, `DnaSequence`, `Alphabet` trait (`IupacDna`, `ExactDna`) |
 | `src/gpu/` | WebGPU pipeline setup, buffer management, `GpuContext` |
 | `src/gpu/locate.rs` | `locate_batch_gpu` — 2-pass GPU locate |
-| `src/gpu/mem_find.rs` | `find_mems_batch_gpu` / `find_mem_intervals_batch_gpu` |
+| `src/gpu/mem_find.rs` | `find_mems_batch_gpu` / `find_smems_batch_gpu` / `find_all_mems_batch_gpu` |
 | `src/gpu/mem_resolve.rs` | SA position resolve pass |
 | `src/gpu/ref_map.rs` | Reference boundary mapping pass |
 | `src/suffix_array/`, `src/bwt/`, `src/occ/` | CPU and GPU implementations. No resident `Bwt` is kept after construction — `OccTable` compacts to the effective symbol alphabet (bitplane-encoded lanes) and reconstructs BWT rows/bytes on demand for GPU upload |
