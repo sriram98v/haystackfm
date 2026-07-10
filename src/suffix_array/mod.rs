@@ -33,7 +33,8 @@ const SA_RECORD_STRIDE: usize = 14;
 
 /// Sampled suffix array for space-efficient locate queries.
 ///
-/// Stores only the ~n/sample_rate sampled entries (where `SA[i] % sample_rate == 0`).
+/// Stores only the ~n/sample_rate sampled entries (`SA[i] % sample_rate == 0`, plus any
+/// `force_sampled` positions such as per-sequence starts — see [`Self::from_full`]).
 /// Uses a bitvector + two-level rank1 structure instead of a sorted `Vec<u32>` of row indices.
 ///
 /// The bitvector word, its superblock's cumulative popcount checkpoint, and its delta since
@@ -63,15 +64,24 @@ pub struct SampledSuffixArray {
 
 impl SampledSuffixArray {
     /// Build a sampled SA from a full SA.
-    pub fn from_full(sa: &SuffixArray, sample_rate: u32) -> Self {
+    pub fn from_full(sa: &SuffixArray, sample_rate: u32, force_sampled: &[u32]) -> Self {
         let n = sa.data.len();
         let num_words = n.div_ceil(64);
+
+        // Positions that must be sampled regardless of `sample_rate`. For a multi-sequence text
+        // these are the per-sequence start positions: `resolve_sa`'s LF-walk decrements the text
+        // position one step at a time until it reaches a sampled row, so anchoring a sample at
+        // every sequence start guarantees the walk terminates *at* that start — a normal-base row
+        // with an unambiguous LF — before it can step onto a sentinel. All per-sequence sentinels
+        // share the same byte value, so LF *into* the sentinel bucket is ambiguous; never walking
+        // across a sentinel is what keeps multi-sequence locate correct at `sample_rate >= 2`.
+        let forced: std::collections::HashSet<u32> = force_sampled.iter().copied().collect();
 
         let mut bitvector = vec![0u64; num_words];
         let mut sa_vals = Vec::new();
 
         for (i, &sa_val) in sa.data.iter().enumerate() {
-            if sa_val.is_multiple_of(sample_rate) {
+            if sa_val.is_multiple_of(sample_rate) || forced.contains(&sa_val) {
                 bitvector[i / 64] |= 1u64 << (i % 64);
                 sa_vals.push(sa_val);
             }
@@ -234,7 +244,7 @@ mod tests {
     fn test_sampled_sa_get_matches_full() {
         let (sa, _) = make_sa("ACGTACGTACGT");
         let sample_rate = 4;
-        let ssa = SampledSuffixArray::from_full(&sa, sample_rate);
+        let ssa = SampledSuffixArray::from_full(&sa, sample_rate, &[]);
 
         for (i, &sa_val) in sa.data.iter().enumerate() {
             if sa_val % sample_rate == 0 {
@@ -251,7 +261,7 @@ mod tests {
     fn test_sampled_sa_to_flat_vec() {
         let (sa, _) = make_sa("ACGTACGTACGT");
         let sample_rate = 4;
-        let ssa = SampledSuffixArray::from_full(&sa, sample_rate);
+        let ssa = SampledSuffixArray::from_full(&sa, sample_rate, &[]);
         let n = sa.data.len();
         let flat = ssa.to_flat_vec(n);
 
@@ -267,7 +277,7 @@ mod tests {
     #[test]
     fn test_sampled_sa_rate_1_covers_all() {
         let (sa, _) = make_sa("ACGTACGT");
-        let ssa = SampledSuffixArray::from_full(&sa, 1);
+        let ssa = SampledSuffixArray::from_full(&sa, 1, &[]);
         for (i, &sa_val) in sa.data.iter().enumerate() {
             assert_eq!(ssa.get(i as u32), Some(sa_val));
         }
@@ -279,7 +289,7 @@ mod tests {
         let s = "ACGT".repeat(50);
         let (sa, _) = make_sa(&s);
         let sample_rate = 8;
-        let ssa = SampledSuffixArray::from_full(&sa, sample_rate);
+        let ssa = SampledSuffixArray::from_full(&sa, sample_rate, &[]);
         let n = sa.data.len();
         let flat = ssa.to_flat_vec(n);
         for (i, &sa_val) in sa.data.iter().enumerate() {
@@ -300,7 +310,7 @@ mod tests {
         let sa = build_suffix_array(&text);
         let bwt = build_bwt(&text, &sa);
         let _ = bwt; // just ensure SSA can be built from same SA
-        let ssa = SampledSuffixArray::from_full(&sa, 4);
+        let ssa = SampledSuffixArray::from_full(&sa, 4, &[]);
         // Spot-check: get returns Some for every sampled row
         let sampled_count = sa.data.iter().filter(|&&v| v % 4 == 0).count();
         let found: usize = (0..sa.data.len() as u32).filter_map(|i| ssa.get(i)).count();

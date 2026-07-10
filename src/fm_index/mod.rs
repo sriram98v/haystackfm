@@ -148,7 +148,18 @@ impl FmIndex {
         drop(text);
 
         // Sample SA then free it before building Occ (saves ~4n bytes of peak memory)
-        let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate);
+        // Every sequence start must be sampled so `resolve_sa`'s LF-walk never crosses a
+        // sentinel (all sentinels share one byte value → ambiguous LF). `seq_boundaries[k]` is
+        // the start of sequence k+1, so the starts are `0` plus every boundary but the last.
+        let seq_starts: Vec<u32> = std::iter::once(0)
+            .chain(
+                seq_boundaries
+                    .iter()
+                    .take(seq_boundaries.len().saturating_sub(1))
+                    .copied(),
+            )
+            .collect();
+        let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate, &seq_starts);
         drop(sa);
 
         // Build Occ table from BWT (parallelises internally on non-WASM targets), then drop the
@@ -243,7 +254,18 @@ impl FmIndex {
         let occ = occ_pipelines.build_occ_table(&ctx, &bwt).await;
 
         // Sample the suffix array
-        let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate);
+        // Every sequence start must be sampled so `resolve_sa`'s LF-walk never crosses a
+        // sentinel (all sentinels share one byte value → ambiguous LF). `seq_boundaries[k]` is
+        // the start of sequence k+1, so the starts are `0` plus every boundary but the last.
+        let seq_starts: Vec<u32> = std::iter::once(0)
+            .chain(
+                seq_boundaries
+                    .iter()
+                    .take(seq_boundaries.len().saturating_sub(1))
+                    .copied(),
+            )
+            .collect();
+        let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate, &seq_starts);
 
         drop(bwt);
 

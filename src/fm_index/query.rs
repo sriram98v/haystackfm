@@ -438,6 +438,60 @@ mod tests {
         s.chars().map(|c| encode_char(c).unwrap()).collect()
     }
 
+    /// Regression: multi-sequence `locate` must be correct at every sample rate, not just
+    /// `sa_sample_rate == 1`. All per-sequence sentinels share one byte value, so a sampled-SA
+    /// LF-walk that crosses a sequence boundary lands on the wrong sentinel and resolves into the
+    /// wrong sequence — unless every sequence start is force-sampled (see
+    /// `SampledSuffixArray::from_full`). Before that fix this panicked / returned shifted
+    /// positions for any rate >= 2 (the default is 32).
+    #[test]
+    fn multi_sequence_locate_correct_across_sample_rates() {
+        let seqs = [
+            "ACGTACGTACGTTTTTACGGGACACAC",
+            "TTTTGGGGCCCCAAAATTTTACGTACGT",
+            "ACACACACGTGTGTGTACGTACGTACGT",
+            "GGGGGGGGTTTTTTTTCCCCCCCCAAAA",
+        ];
+        let sequences: Vec<DnaSequence> = seqs
+            .iter()
+            .map(|s| DnaSequence::from_str(s).unwrap())
+            .collect();
+
+        // Full-SA oracle: rate 1 needs no LF-walk, so it is always correct.
+        let oracle = {
+            let cfg = FmIndexConfig {
+                sa_sample_rate: 1,
+                use_gpu: false,
+                ..Default::default()
+            };
+            FmIndex::build_cpu(&sequences, &cfg).unwrap()
+        };
+
+        let patterns = ["A", "ACGT", "ACAC", "TTTT", "GGGG", "CCCCAAAA", "ACGTACGT"];
+        for rate in [2u32, 3, 4, 8, 16, 32] {
+            let cfg = FmIndexConfig {
+                sa_sample_rate: rate,
+                use_gpu: false,
+                ..Default::default()
+            };
+            let idx = FmIndex::build_cpu(&sequences, &cfg).unwrap();
+            for p in patterns {
+                let e = encode_pattern(p);
+                let mut want = oracle.locate_positions(&e);
+                let mut got = idx.locate_positions(&e);
+                want.sort_unstable();
+                got.sort_unstable();
+                assert_eq!(got, want, "rate {rate}, pattern {p:?}");
+                // locate() (header + within-sequence position) must not panic and agree in count.
+                assert_eq!(
+                    idx.locate(&e).len(),
+                    want.len(),
+                    "rate {rate}, pattern {p:?} locate"
+                );
+            }
+        }
+    }
+
     /// Count overlapping occurrences of pattern in text.
     fn naive_count(text: &str, pattern: &str) -> u32 {
         if pattern.is_empty() || pattern.len() > text.len() {
