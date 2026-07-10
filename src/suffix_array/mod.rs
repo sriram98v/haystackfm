@@ -64,7 +64,11 @@ pub struct SampledSuffixArray {
 
 impl SampledSuffixArray {
     /// Build a sampled SA from a full SA.
-    pub fn from_full(sa: &SuffixArray, sample_rate: u32, force_sampled: &[u32]) -> Self {
+    ///
+    /// Internal construction primitive (crate-visible only): callers must pass the correct
+    /// `force_sampled` set — omitting per-sequence starts silently breaks multi-sequence locate
+    /// at `sample_rate >= 2`.
+    pub(crate) fn from_full(sa: &SuffixArray, sample_rate: u32, force_sampled: &[u32]) -> Self {
         let n = sa.data.len();
         let num_words = n.div_ceil(64);
 
