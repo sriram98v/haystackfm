@@ -8,6 +8,9 @@ Cargo.lock
 /pkg
 /web/node_modules
 /web/dist
+/web/pkg
+/docs/book
+/site
 graphify-out/
 
 # Local dev planning notes (kept out of the repo)

@@ -1,0 +1,21 @@
+[book]
+title = "haystackfm"
+description = "GPU-accelerated FM-index for DNA sequences — native (wgpu) and in-browser WebGPU."
+authors = ["sriram98v"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/sriram98v/haystackfm"
+git-repository-icon = "fab-github"
+edit-url-template = "https://github.com/sriram98v/haystackfm/edit/main/docs/{path}"
+additional-css = ["theme/haystackfm.css"]
+
+[output.html.playground]
+runnable = false
+
+[output.html.fold]
+enable = true
+level = 1

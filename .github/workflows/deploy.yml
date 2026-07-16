@@ -1,4 +1,4 @@
-name: Deploy Demo
+name: Deploy Site
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   deploy:
-    name: Build and deploy demo
+    name: Build and deploy docs + demo
     runs-on: ubuntu-latest
 
     steps:
@@ -46,7 +46,7 @@ jobs:
             --target web \
             --out-dir web/pkg
 
-      # ── Node / Vite build ──────────────────────────────────────────────────
+      # ── Node / Vite demo build ─────────────────────────────────────────────
       - name: Set up Node 20
         uses: actions/setup-node@v7
         with:
@@ -60,11 +60,29 @@ jobs:
 
       - name: Build demo
         working-directory: web
-        # Set VITE_BASE_URL so Vite prefixes assets with /<repo-name>/
-        # which is where GitHub Pages serves the site.
+        # The demo is served under /<repo>/demo/, so Vite must prefix assets
+        # with that path.
         env:
-          VITE_BASE_URL: /${{ github.event.repository.name }}/
+          VITE_BASE_URL: /${{ github.event.repository.name }}/demo/
         run: npx vite build
+
+      # ── mdBook docs build ──────────────────────────────────────────────────
+      - name: Install mdBook
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook
+
+      - name: Build docs
+        working-directory: docs
+        run: mdbook build
+
+      # ── Assemble site (docs at root, demo under /demo) ─────────────────────
+      - name: Assemble site
+        run: |
+          rm -rf site
+          cp -r docs/book site
+          cp -r web/dist site/demo
+          touch site/.nojekyll
 
       # ── Deploy to web branch ───────────────────────────────────────────────
       - name: Deploy to web branch
@@ -72,6 +90,6 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: web
-          publish_dir: web/dist
+          publish_dir: site
           # Keep a clean branch — no git history bloat from built assets
           force_orphan: true

@@ -11,7 +11,7 @@ readme = "README.md"
 authors = ["sriram98v <sriram.98v@gmail.com>"]
 keywords = ["fm-index", "bioinformatics", "webgpu", "dna", "suffix-array"]
 categories = ["algorithms", "science", "data-structures", "wasm"]
-exclude = ["/web", "/graphify-out", "/.pi", "/.claude"]
+exclude = ["/web", "/docs", "/.github", "/graphify-out", "/.pi", "/.claude", "/CLAUDE.md"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
