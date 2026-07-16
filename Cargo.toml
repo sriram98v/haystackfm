@@ -29,7 +29,7 @@ serde = { version = "1", features = ["derive"] }
 bincode = "1"
 
 # GPU (optional)
-wgpu = { version = "24", optional = true }
+wgpu = { version = "30", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
 futures-channel = { version = "0.3", optional = true }
