@@ -1,6 +1,6 @@
 [package]
 name = "haystackfm"
-version = "0.6.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.87"
 description = "GPU-accelerated FM-index construction for DNA sequences via WebGPU"

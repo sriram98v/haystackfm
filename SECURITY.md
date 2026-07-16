@@ -7,8 +7,8 @@ maintained — please upgrade to the newest release before reporting.
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.6.x   | :white_check_mark: |
-| < 0.6   | :x:                |
+| 0.1.x   | :white_check_mark: |
+| < 0.1   | :x:                |
 
 ## Reporting a Vulnerability
 
