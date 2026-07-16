@@ -54,7 +54,7 @@ impl FmIndex {
         out
     }
 
-    /// Batched [`locate_positions`] over many patterns at once.
+    /// Batched `locate_positions` over many patterns at once.
     ///
     /// Drives every pattern's backward search in lockstep so the per-step interval-border
     /// rank queries across all still-active patterns are issued together through
@@ -64,7 +64,7 @@ impl FmIndex {
     /// positions in a single `resolve_sa_batch`.
     ///
     /// Patterns whose IUPAC expansion branches into more than one SA interval fall back to the
-    /// scalar [`backward_search`](Self::backward_search) (correctness over speed for the rare
+    /// scalar `backward_search` (correctness over speed for the rare
     /// ambiguous case). Results are per-pattern in input order; each inner `Vec` holds the
     /// same absolute text offsets `locate_positions` would return (order within a pattern is
     /// not guaranteed to match the scalar path).

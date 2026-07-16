@@ -251,7 +251,7 @@ impl OccTable {
     }
 
     /// Number of distinct symbols with a dedicated occ lane (`<= ALPHABET_SIZE`).
-    /// A plain ACGT[+N][+$] reference compacts down to 5-6; GPU-built tables always use 16.
+    /// A plain ACGT (+N, +$) reference compacts down to 5-6; GPU-built tables always use 16.
     pub fn num_lanes(&self) -> u8 {
         self.num_lanes
     }
@@ -450,7 +450,7 @@ impl OccTable {
     /// Fused LF-step primitive: returns `(symbol_at(pos), rank(symbol_at(pos), pos))` in a
     /// single pass over `pos`'s block planes, instead of the two independent calls this
     /// replaces (`symbol_at` + `rank`), which each re-read and re-derive the same block's
-    /// lane mask. Used by [`crate::fm_index::FmIndex::lf_mapping`], the hottest loop in
+    /// lane mask. Used by `FmIndex::lf_mapping`, the hottest loop in
     /// `locate` (one call per LF step during `resolve_sa`).
     #[inline]
     pub fn lf_step(&self, pos: u32) -> (u8, u32) {

@@ -15,11 +15,11 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
+//! ```rust
 //! use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
 //!
 //! let seq = DnaSequence::from_str("ACGTACGT").unwrap();
-//! let config = FmIndexConfig { sa_sample_rate: 4, use_gpu: false };
+//! let config = FmIndexConfig { sa_sample_rate: 4, ..Default::default() };
 //! let index = FmIndex::build_cpu(&[seq], &config).unwrap();
 //!
 //! let pattern = [1u8, 2, 3, 4]; // A C G T (encoded)
@@ -31,14 +31,14 @@
 //! For sequence alignment workloads, [`BidirFmIndex`] supports efficient
 //! Super-Maximal Exact Match (SMEM) finding via the Lam et al. 2009 algorithm:
 //!
-//! ```rust,ignore
+//! ```rust
 //! use haystackfm::{DnaSequence, BidirFmIndex, FmIndexConfig};
 //!
 //! let seq = DnaSequence::from_str("ACGTACGT").unwrap();
-//! let config = FmIndexConfig { sa_sample_rate: 4, use_gpu: false };
+//! let config = FmIndexConfig { sa_sample_rate: 4, ..Default::default() };
 //! let bidir = BidirFmIndex::build_cpu(&[seq], &config).unwrap();
 //! let query = DnaSequence::from_str("ACGT").unwrap();
-//! let smems = bidir.find_smems(query.as_slice(), 1);
+//! let smems = bidir.find_smems(query.as_slice(), 1, /*locate=*/true);
 //! ```
 
 pub mod alphabet;

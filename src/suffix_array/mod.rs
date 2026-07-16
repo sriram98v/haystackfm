@@ -34,7 +34,7 @@ const SA_RECORD_STRIDE: usize = 14;
 /// Sampled suffix array for space-efficient locate queries.
 ///
 /// Stores only the ~n/sample_rate sampled entries (`SA[i] % sample_rate == 0`, plus any
-/// `force_sampled` positions such as per-sequence starts — see [`Self::from_full`]).
+/// `force_sampled` positions such as per-sequence starts — see `from_full`).
 /// Uses a bitvector + two-level rank1 structure instead of a sorted `Vec<u32>` of row indices.
 ///
 /// The bitvector word, its superblock's cumulative popcount checkpoint, and its delta since
