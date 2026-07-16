@@ -3,10 +3,10 @@
 
 #[cfg(feature = "gpu")]
 mod tests {
-    use pollster::FutureExt as _;
-    use std::collections::HashSet;
     use haystackfm::alphabet::DnaSequence;
     use haystackfm::{BidirFmIndex, FmIndexConfig, MemHit};
+    use pollster::FutureExt as _;
+    use std::collections::HashSet;
 
     fn cpu_config() -> FmIndexConfig {
         FmIndexConfig {

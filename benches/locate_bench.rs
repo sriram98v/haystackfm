@@ -3,9 +3,9 @@ mod bench_utils;
 
 use bench_utils::{gpu_available, measure_ms};
 use criterion::{BenchmarkId, Criterion};
-use pollster::FutureExt as _;
 use haystackfm::alphabet::{encode_char, DnaSequence};
 use haystackfm::fm_index::{FmIndex, FmIndexConfig};
+use pollster::FutureExt as _;
 
 fn random_dna(len: usize, seed: u64) -> String {
     use rand::Rng;

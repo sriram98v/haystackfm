@@ -33,7 +33,7 @@ impl OccPipelines {
     /// The CPU then prefix-sums block_counts to produce the checkpoint array.
     pub async fn build_occ_table(&self, ctx: &GpuContext, bwt: &Bwt) -> OccTable {
         let n = bwt.len() as u32;
-        let num_blocks = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let num_blocks = n.div_ceil(BLOCK_SIZE);
         let alpha = ALPHABET_SIZE as u32;
 
         // Upload BWT as u32 array

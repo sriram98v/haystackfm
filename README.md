@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/haystackfm/badge.svg)](https://docs.rs/haystackfm)
 [![CI](https://github.com/sriram98v/haystackfm/actions/workflows/ci.yml/badge.svg)](https://github.com/sriram98v/haystackfm/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-![MSRV](https://img.shields.io/badge/MSRV-1.76-blue.svg)
+![MSRV](https://img.shields.io/badge/MSRV-1.87-blue.svg)
 
 A GPU-accelerated FM-index library for DNA sequence alignment. Runs on native targets (Vulkan / Metal / DX12) via **wgpu** and compiles to **WebAssembly** for in-browser WebGPU use.
 

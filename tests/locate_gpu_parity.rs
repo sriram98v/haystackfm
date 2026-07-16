@@ -3,9 +3,9 @@
 
 #[cfg(feature = "gpu")]
 mod tests {
-    use pollster::FutureExt as _;
     use haystackfm::alphabet::encode_char;
     use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
+    use pollster::FutureExt as _;
 
     fn cpu_config() -> FmIndexConfig {
         FmIndexConfig {

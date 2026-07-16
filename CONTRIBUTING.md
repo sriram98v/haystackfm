@@ -13,8 +13,7 @@ cd haystackfm
 cargo build            # CPU only (default features)
 ```
 
-The Minimum Supported Rust Version (MSRV) is **1.76** (the floor required by `wgpu 24`).
-CPU-only builds work on older toolchains, but CI and releases target 1.76+.
+The Minimum Supported Rust Version (MSRV) is **1.87**. CI and releases target 1.87+.
 
 ## Feature flags
 

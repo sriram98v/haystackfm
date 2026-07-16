@@ -1,3 +1,5 @@
+use haystackfm::alphabet::encode_char;
+use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
 /// Property-based correctness tests for the FM-index.
 ///
 /// Inspired by genedex (https://github.com/feldroop/genedex). For every randomly
@@ -11,8 +13,6 @@
 /// - Any substring extracted from the indexed text must appear in `locate` results
 use proptest::prelude::*;
 use std::collections::HashSet;
-use haystackfm::alphabet::encode_char;
-use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 

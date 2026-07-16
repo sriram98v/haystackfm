@@ -90,6 +90,6 @@ impl GpuContext {
 
     /// Compute the number of workgroups needed for n elements with given workgroup size.
     pub fn workgroup_count(n: u32, workgroup_size: u32) -> u32 {
-        (n + workgroup_size - 1) / workgroup_size
+        n.div_ceil(workgroup_size)
     }
 }

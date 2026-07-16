@@ -53,7 +53,7 @@ impl ResolveIndexBuffers {
         let block_size: u32 = 64;
         let alpha = ALPHABET_SIZE as u32;
         let text_len = index.text_len;
-        let num_blocks = (text_len + block_size - 1) / block_size;
+        let num_blocks = text_len.div_ceil(block_size);
 
         let mut checkpoints_flat: Vec<u32> = Vec::with_capacity((num_blocks * alpha) as usize);
         for block in index.occ.flat_block_checkpoints() {
@@ -158,7 +158,7 @@ pub(crate) async fn resolve_intervals_batch(
     );
 
     let wg_size: u32 = 64;
-    ctx.dispatch(&pipeline, &bg, ((total_pos + wg_size - 1) / wg_size, 1, 1));
+    ctx.dispatch(&pipeline, &bg, (total_pos.div_ceil(wg_size), 1, 1));
 
     ctx.download_buffer(&pos_out_buf, total_pos).await
 }
@@ -175,6 +175,7 @@ pub(crate) async fn resolve_intervals_batch(
 ///
 /// Positions are capped at `max_hits_per_mem` per MEM interval to prevent
 /// output buffer explosion on repetitive references.
+#[allow(dead_code)] // per-call variant; resident path is used instead. kept for reference/reuse.
 pub(crate) async fn resolve_mem_intervals_gpu(
     ctx: &GpuContext,
     index: &FmIndex,

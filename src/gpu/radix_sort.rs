@@ -46,6 +46,7 @@ impl RadixSortPipelines {
     /// We always ensure the final result is in `keys_a` / `vals_a` by copying if needed.
     ///
     /// Returns (keys_buffer, vals_buffer) containing the sorted data.
+    #[allow(clippy::too_many_arguments)]
     pub fn sort(
         &self,
         ctx: &GpuContext,

@@ -61,7 +61,7 @@ pub async fn locate_batch_gpu(
     let num_queries = queries.len() as u32;
     let text_len = index.text_len;
     let block_size: u32 = 64;
-    let num_blocks = (text_len + block_size - 1) / block_size;
+    let num_blocks = text_len.div_ceil(block_size);
     let num_seqs = index.num_sequences;
     let sample_rate = index.sa_samples.sample_rate;
     let alpha = ALPHABET_SIZE as u32;
@@ -157,7 +157,7 @@ pub async fn locate_batch_gpu(
     ctx.dispatch(
         &search_pipeline,
         &search_bg,
-        ((num_queries + wg_size - 1) / wg_size, 1, 1),
+        (num_queries.div_ceil(wg_size), 1, 1),
     );
 
     let intervals = ctx
@@ -255,7 +255,7 @@ pub async fn locate_batch_gpu(
     ctx.dispatch(
         &resolve_pipeline,
         &resolve_bg,
-        ((total_matches + wg_size - 1) / wg_size, 1, 1),
+        (total_matches.div_ceil(wg_size), 1, 1),
     );
 
     let results_flat = ctx.download_buffer(&results_buf, total_matches * 2).await;

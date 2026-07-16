@@ -58,8 +58,8 @@ impl FindIndexBuffers {
         let alpha = ALPHABET_SIZE as u32;
         let fwd_text_len = bidir.fwd.text_len;
         let rev_text_len = bidir.rev.text_len;
-        let fwd_num_blocks = (fwd_text_len + block_size - 1) / block_size;
-        let rev_num_blocks = (rev_text_len + block_size - 1) / block_size;
+        let fwd_num_blocks = fwd_text_len.div_ceil(block_size);
+        let rev_num_blocks = rev_text_len.div_ceil(block_size);
         let fwd_c: [u32; 16] = bidir.fwd.c_array.data;
         let rev_c: [u32; 16] = bidir.rev.c_array.data;
 
@@ -206,7 +206,7 @@ pub(crate) async fn run_mem_find_batch(
     ctx.dispatch(
         &count_pipeline,
         &count_bg,
-        ((n_queries + wg_size - 1) / wg_size, 1, 1),
+        (n_queries.div_ceil(wg_size), 1, 1),
     );
 
     // Download stride-2 pass1 data: [mem_count, iv_count] per query.
@@ -297,7 +297,7 @@ pub(crate) async fn run_mem_find_batch(
     ctx.dispatch(
         &write_pipeline,
         &write_bg,
-        ((n_queries + wg_size - 1) / wg_size, 1, 1),
+        (n_queries.div_ceil(wg_size), 1, 1),
     );
 
     let results_flat = ctx.download_buffer(&mems_out_buf, total_mems * 4).await;
@@ -370,6 +370,7 @@ pub async fn find_mems_batch_gpu(
 /// Returns raw SA intervals per MEM — used by the 3-pass GPU position-resolve pipeline
 /// (`mem_resolve.wgsl` → `ref_map.wgsl`). Each `RawMemInterval` carries the query span
 /// and the forward SA interval `[fwd_lo, fwd_hi)`; callers resolve positions from it.
+#[allow(dead_code)] // per-call variant; resident path is used instead. kept for reference/reuse.
 pub(crate) async fn find_mem_intervals_batch_gpu(
     ctx: &GpuContext,
     bidir: &BidirFmIndex,

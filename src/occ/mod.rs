@@ -513,13 +513,13 @@ impl OccTable {
                 let sb = b / blocks_per_sb;
                 let base = self.block_base(b);
                 let mut combined = [0u32; ALPHABET_SIZE];
-                for c in 0..ALPHABET_SIZE {
+                for (c, slot) in combined.iter_mut().enumerate() {
                     let lane = self.symbol_to_lane[c];
                     if lane == NO_LANE {
                         continue;
                     }
                     let lane = lane as usize;
-                    combined[c] = self.superblock_checkpoints[sb * num_lanes + lane]
+                    *slot = self.superblock_checkpoints[sb * num_lanes + lane]
                         + self.delta_at(base, lane);
                 }
                 combined
@@ -536,12 +536,12 @@ impl OccTable {
             .map(|b| {
                 let base = self.block_base(b);
                 let mut bv = [0u64; ALPHABET_SIZE];
-                for c in 0..ALPHABET_SIZE {
+                for (c, slot) in bv.iter_mut().enumerate() {
                     let lane = self.symbol_to_lane[c];
                     if lane == NO_LANE {
                         continue;
                     }
-                    bv[c] = self.lane_mask(base, lane as usize);
+                    *slot = self.lane_mask(base, lane as usize);
                 }
                 bv
             })

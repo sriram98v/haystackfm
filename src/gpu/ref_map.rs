@@ -74,7 +74,7 @@ pub(crate) async fn map_positions_to_refs(
     );
 
     let wg_size: u32 = 64;
-    ctx.dispatch(&pipeline, &bg, ((total_pos + wg_size - 1) / wg_size, 1, 1));
+    ctx.dispatch(&pipeline, &bg, (total_pos.div_ceil(wg_size), 1, 1));
 
     let ref_ids = ctx.download_buffer(&rid_buf, total_pos).await;
     let offsets = ctx.download_buffer(&off_buf, total_pos).await;

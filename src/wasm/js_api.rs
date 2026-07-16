@@ -25,7 +25,7 @@ fn parse_fasta(input: &str) -> Result<Vec<DnaSequence>, JsValue> {
         if line.is_empty() {
             continue;
         }
-        if line.starts_with('>') {
+        if let Some(rest) = line.strip_prefix('>') {
             // Flush previous sequence.
             if let Some(seq_str) = current_seq.take() {
                 if !seq_str.is_empty() {
@@ -35,7 +35,7 @@ fn parse_fasta(input: &str) -> Result<Vec<DnaSequence>, JsValue> {
                     );
                 }
             }
-            current_header = Some(line[1..].trim().to_string());
+            current_header = Some(rest.trim().to_string());
             current_seq = Some(String::new());
         } else {
             match current_seq.as_mut() {

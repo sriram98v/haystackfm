@@ -14,9 +14,9 @@ mod bench_utils;
 
 use bench_utils::{gpu_available, measure_ms};
 use criterion::{BenchmarkId, Criterion};
-use pollster::FutureExt as _;
 use haystackfm::alphabet::DnaSequence;
 use haystackfm::{BidirFmIndex, FmIndexConfig};
+use pollster::FutureExt as _;
 
 const REF_LEN: usize = 2_000;
 const QUERY_LEN: usize = 50;
