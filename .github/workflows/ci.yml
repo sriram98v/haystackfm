@@ -28,7 +28,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy -- -D warnings
+      - uses: Swatinem/rust-cache@v2
+      # Lint every feature (gpu/wasm compile on the host runner even without a
+      # physical GPU — only running GPU kernels needs a device).
+      - run: cargo clippy --all-features -- -D warnings
+
+  build:
+    name: Build (all features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-features
 
   test:
     name: Tests

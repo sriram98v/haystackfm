@@ -1,0 +1,4 @@
+# Code owners are requested for review automatically on every PR.
+# Enable "Require review from Code Owners" in branch protection for `main`
+# so that all changes require owner approval before merge.
+* @sriram98v

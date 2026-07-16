@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest a new capability or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do that the crate doesn't support today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What API or behavior would you like? Sketch a signature if you can.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Construction (SA / BWT / Occ)
+        - Query (count / locate / MEM / SMEM)
+        - GPU / WGSL
+        - WASM / browser
+        - API ergonomics / docs
+        - Other

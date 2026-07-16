@@ -1,0 +1,58 @@
+name: Bug report
+description: Report incorrect behavior, a crash, or a panic
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please fill out the sections below.
+        For **security** issues, do not file here — see [SECURITY.md](../blob/main/SECURITY.md).
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal code snippet or input that triggers the bug.
+      render: rust
+    validations:
+      required: true
+  - type: dropdown
+    id: path
+    attributes:
+      label: Which path?
+      options:
+        - CPU construction
+        - CPU query (count/locate/MEM)
+        - GPU construction
+        - GPU query
+        - WASM / browser
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Crate version
+      placeholder: "0.6.0"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Rust version, and (for GPU) backend/GPU or browser.
+      placeholder: "Linux, rustc 1.82, Vulkan / RTX 3090"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / backtrace
+      description: Any panic message or `RUST_BACKTRACE=1` output.
+      render: shell

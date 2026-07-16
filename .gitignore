@@ -9,3 +9,8 @@ Cargo.lock
 /web/node_modules
 /web/dist
 graphify-out/
+
+# Local dev planning notes (kept out of the repo)
+/plan.md
+/todo.md
+/benchmark-integration-plan.md
