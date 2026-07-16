@@ -49,7 +49,7 @@ let index = FmIndex::build_cpu(&[seq], &config)?;
 // Encode a query pattern (a DnaSequence holds the IUPAC-encoded bytes).
 let query = DnaSequence::from_str("ACGT")?;
 assert_eq!(index.count(query.as_slice()), 2);
-let positions = index.locate(query.as_slice()); // Vec<(seq_id, offset)>
+let positions = index.locate(query.as_slice()); // Vec<(String, u32)> — (seq name, offset)
 ```
 
 ### Native — GPU (Vulkan / Metal / DX12)
@@ -143,7 +143,7 @@ FmIndex::build(sequences, config).await?        // async, GPU (feature = "gpu")
 
 // Query
 index.count(pattern)                            // u32 — number of occurrences
-index.locate(pattern)                           // Vec<(seq_id, offset)>
+index.locate(pattern)                           // Vec<(String, u32)> — (seq name, offset)
 index.text_len()                                // u32
 index.num_sequences()                           // u32
 
@@ -175,7 +175,7 @@ pub struct Mem {
     pub query_start: usize,       // 0-based inclusive
     pub query_end:   usize,       // 0-based exclusive
     pub match_count: u32,         // SA interval size
-    pub positions:   Vec<(u32, u32)>, // (seq_id, offset) — empty when locate=false
+    pub positions:   Vec<(String, u32)>, // (seq name, offset) — empty when locate=false
 }
 
 pub struct MemHit {               // GPU result type
