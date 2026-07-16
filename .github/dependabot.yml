@@ -12,6 +12,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # Hold major bumps: they tend to be breaking ports (wgpu, bincode, etc.).
+    # Revisit them deliberately (e.g. during the planned overhaul), not weekly.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
