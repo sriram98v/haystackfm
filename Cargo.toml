@@ -31,7 +31,7 @@ bincode = "1"
 # GPU (optional)
 wgpu = { version = "24", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
-pollster = { version = "0.4", optional = true }
+pollster = { version = "1.0", optional = true }
 futures-channel = { version = "0.3", optional = true }
 
 # WASM (optional)
@@ -55,7 +55,7 @@ codegen-units = 1
 [dev-dependencies]
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
-pollster = "0.4"
+pollster = "1.0"
 rand = "0.9"
 
 [[bench]]
