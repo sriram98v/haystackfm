@@ -1,4 +1,10 @@
-# webgpu-fmidx
+# haystackfm
+
+[![Crates.io](https://img.shields.io/crates/v/haystackfm.svg)](https://crates.io/crates/haystackfm)
+[![Docs.rs](https://docs.rs/haystackfm/badge.svg)](https://docs.rs/haystackfm)
+[![CI](https://github.com/sriram98v/haystackfm/actions/workflows/ci.yml/badge.svg)](https://github.com/sriram98v/haystackfm/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![MSRV](https://img.shields.io/badge/MSRV-1.76-blue.svg)
 
 A GPU-accelerated FM-index library for DNA sequence alignment. Runs on native targets (Vulkan / Metal / DX12) via **wgpu** and compiles to **WebAssembly** for in-browser WebGPU use.
 
@@ -30,11 +36,11 @@ Supports the full **16-symbol IUPAC ambiguity alphabet** (A C G T N R Y S W K M 
 ### Native — CPU only
 
 ```bash
-cargo add webgpu-fmidx
+cargo add haystackfm
 ```
 
 ```rust
-use webgpu_fmidx::{DnaSequence, FmIndex, FmIndexConfig};
+use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
 
 let seq = DnaSequence::from_str("ACGTACGT")?;
 let config = FmIndexConfig::default();
@@ -49,12 +55,12 @@ let positions = index.locate(query.as_slice()); // Vec<(seq_id, offset)>
 ### Native — GPU (Vulkan / Metal / DX12)
 
 ```bash
-cargo add webgpu-fmidx --features gpu
+cargo add haystackfm --features gpu
 ```
 
 ```rust
-use webgpu_fmidx::{DnaSequence, FmIndex, FmIndexConfig};
-use webgpu_fmidx::gpu::locate::locate_batch_gpu;
+use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
+use haystackfm::gpu::locate::locate_batch_gpu;
 
 let seqs = vec![DnaSequence::from_str("ACGTACGT")?];
 let config = FmIndexConfig::default();
@@ -63,7 +69,7 @@ let config = FmIndexConfig::default();
 let index = FmIndex::build(&seqs, &config).await?;
 
 // GPU batch locate (IUPAC-aware)
-let ctx = webgpu_fmidx::gpu::GpuContext::new().await?;
+let ctx = haystackfm::gpu::GpuContext::new().await?;
 let query = DnaSequence::from_str("ACGT")?;
 let queries: Vec<&[u8]> = vec![query.as_slice()];
 let hits = locate_batch_gpu(&ctx, &index, &queries).await?;
@@ -73,7 +79,7 @@ let hits = locate_batch_gpu(&ctx, &index, &queries).await?;
 ### MEM / SMEM finding
 
 ```rust
-use webgpu_fmidx::{DnaSequence, BidirFmIndex, FmIndexConfig};
+use haystackfm::{DnaSequence, BidirFmIndex, FmIndexConfig};
 
 let refs = vec![DnaSequence::from_str("ACGTACGTACGT")?];
 let config = FmIndexConfig::default();
@@ -100,12 +106,12 @@ let mems  = bidir.find_mems(query.as_slice(),  /*min_len=*/18, /*locate=*/true);
 ### WebAssembly (browser WebGPU)
 
 ```bash
-cargo add webgpu-fmidx --features wasm
+cargo add haystackfm --features wasm
 wasm-pack build --target web --features wasm
 ```
 
 ```typescript
-import init, { FmIndexBuilder, FmIndexHandle } from "./pkg/webgpu_fmidx.js";
+import init, { FmIndexBuilder, FmIndexHandle } from "./pkg/haystackfm.js";
 
 await init();
 
@@ -215,7 +221,7 @@ Matching semantics are pluggable via the `Alphabet` trait (`src/alphabet.rs`). `
 | `ExactDna` | Only A/C/G/T match themselves; any ambiguity code (including `N`) produces zero hits. Useful for peer-comparable benchmarks where other tools don't treat `N` as a wildcard. |
 
 ```rust
-use webgpu_fmidx::alphabet::ExactDna;
+use haystackfm::alphabet::ExactDna;
 
 let index = FmIndex::build_cpu_with::<ExactDna>(&seqs, &config)?;
 ```
@@ -309,6 +315,15 @@ cargo bench --features gpu --bench mem_positions_bench
 
 ---
 
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the build/test/lint
+workflow and PR conventions, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community
+expectations. To report a security issue, see [SECURITY.md](SECURITY.md).
+
 ## License
 
-MIT
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion
+in this crate by you shall be licensed as above, without any additional terms or conditions.

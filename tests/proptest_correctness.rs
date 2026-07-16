@@ -11,8 +11,8 @@
 /// - Any substring extracted from the indexed text must appear in `locate` results
 use proptest::prelude::*;
 use std::collections::HashSet;
-use webgpu_fmidx::alphabet::encode_char;
-use webgpu_fmidx::{DnaSequence, FmIndex, FmIndexConfig};
+use haystackfm::alphabet::encode_char;
+use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 

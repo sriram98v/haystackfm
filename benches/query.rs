@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use webgpu_fmidx::alphabet::{encode_char, DnaSequence};
-use webgpu_fmidx::fm_index::{FmIndex, FmIndexConfig};
+use haystackfm::alphabet::{encode_char, DnaSequence};
+use haystackfm::fm_index::{FmIndex, FmIndexConfig};
 
 fn random_dna(len: usize) -> String {
     use rand::Rng;

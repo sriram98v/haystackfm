@@ -2,17 +2,17 @@
 
 mod common;
 
-use webgpu_fmidx::alphabet::*;
-use webgpu_fmidx::bwt::cpu::build_bwt;
-use webgpu_fmidx::bwt::gpu::BwtPipelines;
-use webgpu_fmidx::gpu::prefix_sum::PrefixSumPipelines;
-use webgpu_fmidx::gpu::radix_sort::RadixSortPipelines;
-use webgpu_fmidx::gpu::GpuContext;
-use webgpu_fmidx::occ::cpu::{build_occ_table, naive_rank};
-use webgpu_fmidx::occ::gpu::OccPipelines;
-use webgpu_fmidx::occ::OccEncoding;
-use webgpu_fmidx::suffix_array::cpu::build_suffix_array;
-use webgpu_fmidx::suffix_array::gpu::SaPipelines;
+use haystackfm::alphabet::*;
+use haystackfm::bwt::cpu::build_bwt;
+use haystackfm::bwt::gpu::BwtPipelines;
+use haystackfm::gpu::prefix_sum::PrefixSumPipelines;
+use haystackfm::gpu::radix_sort::RadixSortPipelines;
+use haystackfm::gpu::GpuContext;
+use haystackfm::occ::cpu::{build_occ_table, naive_rank};
+use haystackfm::occ::gpu::OccPipelines;
+use haystackfm::occ::OccEncoding;
+use haystackfm::suffix_array::cpu::build_suffix_array;
+use haystackfm::suffix_array::gpu::SaPipelines;
 
 fn get_gpu_context() -> Option<GpuContext> {
     pollster::block_on(GpuContext::new()).ok()
@@ -136,8 +136,8 @@ fn gpu_radix_sort_small() {
     let result = radix_sort.sort(&ctx, &prefix_sum, &keys_a, &vals_a, &keys_b, &vals_b, n);
 
     let (sorted_keys_buf, sorted_vals_buf) = match result {
-        webgpu_fmidx::gpu::radix_sort::SortResult::InA => (&keys_a, &vals_a),
-        webgpu_fmidx::gpu::radix_sort::SortResult::InB => (&keys_b, &vals_b),
+        haystackfm::gpu::radix_sort::SortResult::InA => (&keys_a, &vals_a),
+        haystackfm::gpu::radix_sort::SortResult::InB => (&keys_b, &vals_b),
     };
 
     let sorted_keys = pollster::block_on(ctx.download_buffer(sorted_keys_buf, n));
@@ -170,8 +170,8 @@ fn gpu_radix_sort_already_sorted() {
     let result = radix_sort.sort(&ctx, &prefix_sum, &keys_a, &vals_a, &keys_b, &vals_b, n);
 
     let sorted_keys_buf = match result {
-        webgpu_fmidx::gpu::radix_sort::SortResult::InA => &keys_a,
-        webgpu_fmidx::gpu::radix_sort::SortResult::InB => &keys_b,
+        haystackfm::gpu::radix_sort::SortResult::InA => &keys_a,
+        haystackfm::gpu::radix_sort::SortResult::InB => &keys_b,
     };
     let sorted_keys = pollster::block_on(ctx.download_buffer(sorted_keys_buf, n));
     assert_eq!(sorted_keys, keys);
@@ -198,8 +198,8 @@ fn gpu_radix_sort_large_values() {
     let result = radix_sort.sort(&ctx, &prefix_sum, &keys_a, &vals_a, &keys_b, &vals_b, n);
 
     let sorted_keys_buf = match result {
-        webgpu_fmidx::gpu::radix_sort::SortResult::InA => &keys_a,
-        webgpu_fmidx::gpu::radix_sort::SortResult::InB => &keys_b,
+        haystackfm::gpu::radix_sort::SortResult::InA => &keys_a,
+        haystackfm::gpu::radix_sort::SortResult::InB => &keys_b,
     };
     let sorted_keys = pollster::block_on(ctx.download_buffer(sorted_keys_buf, n));
 
@@ -473,7 +473,7 @@ fn gpu_occ_multi_block() {
 
 #[test]
 fn gpu_fm_index_count_matches_cpu() {
-    use webgpu_fmidx::{DnaSequence, FmIndex, FmIndexConfig};
+    use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
 
     let Some(_) = get_gpu_context() else {
         return;
@@ -503,7 +503,7 @@ fn gpu_fm_index_count_matches_cpu() {
 
 #[test]
 fn gpu_fm_index_locate_matches_cpu() {
-    use webgpu_fmidx::{DnaSequence, FmIndex, FmIndexConfig};
+    use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
 
     let Some(_) = get_gpu_context() else {
         return;

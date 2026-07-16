@@ -52,7 +52,7 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
-                    label: Some("webgpu-fmidx"),
+                    label: Some("haystackfm"),
                     required_features: wgpu::Features::empty(),
                     required_limits,
                     memory_hints: wgpu::MemoryHints::Performance,

@@ -1,11 +1,11 @@
 mod common;
 
-use webgpu_fmidx::alphabet::*;
-use webgpu_fmidx::bwt::cpu::{build_bwt, inverse_bwt};
-use webgpu_fmidx::c_array::CArray;
-use webgpu_fmidx::occ::cpu::{build_occ_table, naive_rank};
-use webgpu_fmidx::occ::OccEncoding;
-use webgpu_fmidx::suffix_array::cpu::{build_suffix_array, build_suffix_array_naive};
+use haystackfm::alphabet::*;
+use haystackfm::bwt::cpu::{build_bwt, inverse_bwt};
+use haystackfm::c_array::CArray;
+use haystackfm::occ::cpu::{build_occ_table, naive_rank};
+use haystackfm::occ::OccEncoding;
+use haystackfm::suffix_array::cpu::{build_suffix_array, build_suffix_array_naive};
 
 use common::encode;
 

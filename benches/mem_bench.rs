@@ -4,8 +4,8 @@ mod bench_utils;
 use bench_utils::{gpu_available, measure_ms};
 use criterion::{BenchmarkId, Criterion};
 use pollster::FutureExt as _;
-use webgpu_fmidx::alphabet::DnaSequence;
-use webgpu_fmidx::{BidirFmIndex, FmIndexConfig};
+use haystackfm::alphabet::DnaSequence;
+use haystackfm::{BidirFmIndex, FmIndexConfig};
 
 fn random_dna(len: usize, seed: u64) -> String {
     use rand::Rng;

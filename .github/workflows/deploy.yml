@@ -42,7 +42,7 @@ jobs:
             --features wasm \
             --release
           wasm-bindgen \
-            target/wasm32-unknown-unknown/release/webgpu_fmidx.wasm \
+            target/wasm32-unknown-unknown/release/haystackfm.wasm \
             --target web \
             --out-dir web/pkg
 

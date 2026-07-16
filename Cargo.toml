@@ -1,10 +1,17 @@
 [package]
-name = "webgpu-fmidx"
+name = "haystackfm"
 version = "0.6.0"
 edition = "2021"
+rust-version = "1.76"
 description = "GPU-accelerated FM-index construction for DNA sequences via WebGPU"
-license = "MIT"
-repository = "https://github.com/sriram98v/webgpu-fmidx"
+license = "Apache-2.0"
+repository = "https://github.com/sriram98v/haystackfm"
+documentation = "https://docs.rs/haystackfm"
+readme = "README.md"
+authors = ["sriram98v <sriram.98v@gmail.com>"]
+keywords = ["fm-index", "bioinformatics", "webgpu", "dna", "suffix-array"]
+categories = ["algorithms", "science", "data-structures", "wasm"]
+exclude = ["/web", "/graphify-out", "/.pi", "/.claude"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]

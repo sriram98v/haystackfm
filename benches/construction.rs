@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use webgpu_fmidx::alphabet::DnaSequence;
-use webgpu_fmidx::fm_index::{FmIndex, FmIndexConfig};
+use haystackfm::alphabet::DnaSequence;
+use haystackfm::fm_index::{FmIndex, FmIndexConfig};
 
 fn random_dna(len: usize) -> String {
     use rand::Rng;
@@ -12,7 +12,7 @@ fn random_dna(len: usize) -> String {
 fn gpu_available() -> bool {
     #[cfg(feature = "gpu")]
     {
-        use webgpu_fmidx::gpu::GpuContext;
+        use haystackfm::gpu::GpuContext;
         pollster::block_on(GpuContext::new()).is_ok()
     }
     #[cfg(not(feature = "gpu"))]

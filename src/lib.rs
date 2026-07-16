@@ -1,4 +1,4 @@
-//! # webgpu-fmidx
+//! # haystackfm
 //!
 //! A GPU-accelerated FM-index library for DNA sequence alignment.
 //!
@@ -16,7 +16,7 @@
 //! ## Quick Start
 //!
 //! ```rust,ignore
-//! use webgpu_fmidx::{DnaSequence, FmIndex, FmIndexConfig};
+//! use haystackfm::{DnaSequence, FmIndex, FmIndexConfig};
 //!
 //! let seq = DnaSequence::from_str("ACGTACGT").unwrap();
 //! let config = FmIndexConfig { sa_sample_rate: 4, use_gpu: false };
@@ -32,7 +32,7 @@
 //! Super-Maximal Exact Match (SMEM) finding via the Lam et al. 2009 algorithm:
 //!
 //! ```rust,ignore
-//! use webgpu_fmidx::{DnaSequence, BidirFmIndex, FmIndexConfig};
+//! use haystackfm::{DnaSequence, BidirFmIndex, FmIndexConfig};
 //!
 //! let seq = DnaSequence::from_str("ACGTACGT").unwrap();
 //! let config = FmIndexConfig { sa_sample_rate: 4, use_gpu: false };

@@ -1,6 +1,6 @@
 //! Shared benchmark utilities used by the cpu_vs_gpu benchmark suite.
 
-use webgpu_fmidx::alphabet::DnaSequence;
+use haystackfm::alphabet::DnaSequence;
 
 /// Input sizes for the per-stage and full-pipeline benchmarks.
 pub const BENCH_SIZES: &[usize] = &[1_000, 10_000, 100_000, 500_000];
@@ -22,7 +22,7 @@ pub fn random_dna_seq(len: usize) -> DnaSequence {
 pub fn gpu_available() -> bool {
     #[cfg(feature = "gpu")]
     {
-        use webgpu_fmidx::gpu::GpuContext;
+        use haystackfm::gpu::GpuContext;
         pollster::block_on(GpuContext::new()).is_ok()
     }
     #[cfg(not(feature = "gpu"))]

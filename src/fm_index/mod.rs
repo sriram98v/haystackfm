@@ -89,7 +89,7 @@ impl FmIndex {
     ///
     /// # Example
     /// ```rust,ignore
-    /// use webgpu_fmidx::{FmIndex, FmIndexConfig, ExactDna};
+    /// use haystackfm::{FmIndex, FmIndexConfig, ExactDna};
     /// let index = FmIndex::build_cpu_with::<ExactDna>(&seqs, &config)?;
     /// ```
     pub fn build_cpu_with<A: Alphabet>(

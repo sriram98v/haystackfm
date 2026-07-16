@@ -7,9 +7,9 @@
 
 mod common;
 
-use webgpu_fmidx::alphabet::{encode_char, DnaSequence};
-use webgpu_fmidx::fm_index::{FmIndex, FmIndexConfig};
-use webgpu_fmidx::gpu::GpuContext;
+use haystackfm::alphabet::{encode_char, DnaSequence};
+use haystackfm::fm_index::{FmIndex, FmIndexConfig};
+use haystackfm::gpu::GpuContext;
 
 fn get_gpu_context() -> Option<GpuContext> {
     pollster::block_on(GpuContext::new()).ok()

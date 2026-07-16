@@ -5,8 +5,8 @@
 mod tests {
     use pollster::FutureExt as _;
     use std::collections::HashSet;
-    use webgpu_fmidx::alphabet::DnaSequence;
-    use webgpu_fmidx::{BidirFmIndex, FmIndexConfig, MemHit};
+    use haystackfm::alphabet::DnaSequence;
+    use haystackfm::{BidirFmIndex, FmIndexConfig, MemHit};
 
     fn cpu_config() -> FmIndexConfig {
         FmIndexConfig {

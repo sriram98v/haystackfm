@@ -20,6 +20,6 @@ export default defineConfig({
   },
   optimizeDeps: {
     // Don't bundle the WASM package — it is loaded dynamically
-    exclude: ["webgpu-fmidx"],
+    exclude: ["haystackfm"],
   },
 });

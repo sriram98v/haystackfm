@@ -2,12 +2,12 @@
 ///
 /// All tests run on the CPU path and verify results against brute-force
 /// string search so there are no hidden dependencies on the GPU.
-use webgpu_fmidx::{BidirFmIndex, DnaSequence, FmIndex, FmIndexConfig};
+use haystackfm::{BidirFmIndex, DnaSequence, FmIndex, FmIndexConfig};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn encode(s: &str) -> Vec<u8> {
-    use webgpu_fmidx::alphabet::encode_char;
+    use haystackfm::alphabet::encode_char;
     s.chars().map(|c| encode_char(c).unwrap()).collect()
 }
 
@@ -154,7 +154,7 @@ fn extend_left_size_invariant() {
     // There's nothing to the left of the very first ACGT in this text,
     // but we can test the invariant holds when it succeeds.
     // In "ACGTACGTACGT", at positions 4 and 8, the preceding char is T.
-    use webgpu_fmidx::alphabet::T;
+    use haystackfm::alphabet::T;
     if let Some(next) = idx.extend_left(iv, T) {
         assert_eq!(
             next.fwd_hi - next.fwd_lo,

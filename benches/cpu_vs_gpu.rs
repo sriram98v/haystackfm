@@ -20,17 +20,17 @@ mod bench_utils;
 
 use bench_utils::{gpu_available, measure_ms, random_dna_seq, BENCH_SIZES};
 use criterion::{BenchmarkId, Criterion};
-use webgpu_fmidx::alphabet::concatenate_sequences;
-use webgpu_fmidx::bwt::cpu::build_bwt as cpu_build_bwt;
-use webgpu_fmidx::fm_index::{FmIndex, FmIndexConfig};
-use webgpu_fmidx::occ::cpu::build_occ_table as cpu_build_occ;
-use webgpu_fmidx::occ::OccEncoding;
-use webgpu_fmidx::suffix_array::cpu::build_suffix_array as cpu_build_sa;
+use haystackfm::alphabet::concatenate_sequences;
+use haystackfm::bwt::cpu::build_bwt as cpu_build_bwt;
+use haystackfm::fm_index::{FmIndex, FmIndexConfig};
+use haystackfm::occ::cpu::build_occ_table as cpu_build_occ;
+use haystackfm::occ::OccEncoding;
+use haystackfm::suffix_array::cpu::build_suffix_array as cpu_build_sa;
 
 #[cfg(feature = "gpu")]
 use {
-    webgpu_fmidx::bwt::gpu::BwtPipelines, webgpu_fmidx::gpu::GpuContext,
-    webgpu_fmidx::occ::gpu::OccPipelines, webgpu_fmidx::suffix_array::gpu::SaPipelines,
+    haystackfm::bwt::gpu::BwtPipelines, haystackfm::gpu::GpuContext,
+    haystackfm::occ::gpu::OccPipelines, haystackfm::suffix_array::gpu::SaPipelines,
 };
 
 // ── Speedup summary ───────────────────────────────────────────────────────────

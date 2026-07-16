@@ -12,11 +12,11 @@
 
 #![cfg(feature = "gpu")]
 
-use webgpu_fmidx::alphabet::{concatenate_sequences, DnaSequence, ALPHABET_SIZE};
-use webgpu_fmidx::bwt::{cpu::build_bwt as cpu_bwt, gpu::BwtPipelines};
-use webgpu_fmidx::gpu::GpuContext;
-use webgpu_fmidx::occ::{cpu::build_occ_table as cpu_occ, gpu::OccPipelines, OccEncoding};
-use webgpu_fmidx::suffix_array::{cpu::build_suffix_array as cpu_sa, gpu::SaPipelines};
+use haystackfm::alphabet::{concatenate_sequences, DnaSequence, ALPHABET_SIZE};
+use haystackfm::bwt::{cpu::build_bwt as cpu_bwt, gpu::BwtPipelines};
+use haystackfm::gpu::GpuContext;
+use haystackfm::occ::{cpu::build_occ_table as cpu_occ, gpu::OccPipelines, OccEncoding};
+use haystackfm::suffix_array::{cpu::build_suffix_array as cpu_sa, gpu::SaPipelines};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -95,8 +95,8 @@ fn gpu_bwt_matches_cpu_1k() {
 
 /// Compare rank(c, i) for every character and every position.
 fn assert_occ_rank_equal(
-    cpu: &webgpu_fmidx::occ::OccTable,
-    gpu: &webgpu_fmidx::occ::OccTable,
+    cpu: &haystackfm::occ::OccTable,
+    gpu: &haystackfm::occ::OccTable,
     n: u32,
     label: &str,
 ) {

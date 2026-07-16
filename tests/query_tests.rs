@@ -30,7 +30,7 @@ fn locate_positions_are_valid() {
         let idx = make_index(text);
         let encoded_text: Vec<u8> = text
             .chars()
-            .map(|c| webgpu_fmidx::alphabet::encode_char(c).unwrap())
+            .map(|c| haystackfm::alphabet::encode_char(c).unwrap())
             .collect();
 
         for pattern in &patterns {
@@ -116,16 +116,16 @@ fn locate_empty_result() {
 #[test]
 fn multi_sequence_queries() {
     let seqs = vec![
-        webgpu_fmidx::DnaSequence::from_str("ACGTACGT").unwrap(),
-        webgpu_fmidx::DnaSequence::from_str("TGCATGCA").unwrap(),
-        webgpu_fmidx::DnaSequence::from_str("AAACCC").unwrap(),
+        haystackfm::DnaSequence::from_str("ACGTACGT").unwrap(),
+        haystackfm::DnaSequence::from_str("TGCATGCA").unwrap(),
+        haystackfm::DnaSequence::from_str("AAACCC").unwrap(),
     ];
-    let config = webgpu_fmidx::FmIndexConfig {
+    let config = haystackfm::FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: false,
         ..Default::default()
     };
-    let idx = webgpu_fmidx::FmIndex::build_cpu(&seqs, &config).unwrap();
+    let idx = haystackfm::FmIndex::build_cpu(&seqs, &config).unwrap();
 
     // "ACGT" appears twice (in first sequence at pos 0 and 4)
     assert_eq!(idx.count(&encode_pattern("ACGT")), 2);

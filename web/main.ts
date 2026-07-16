@@ -1,6 +1,6 @@
 // Import the wasm-pack generated module.
 // Run `npm run build-wasm` first to generate ./pkg/
-import init, { FmIndexBuilder, FmIndexHandle } from "./pkg/webgpu_fmidx.js";
+import init, { FmIndexBuilder, FmIndexHandle } from "./pkg/haystackfm.js";
 
 // ── Initialise WASM ──────────────────────────────────────────────────────────
 

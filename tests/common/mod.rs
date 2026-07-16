@@ -1,4 +1,4 @@
-use webgpu_fmidx::alphabet::{encode_char, DnaSequence, SENTINEL};
+use haystackfm::alphabet::{encode_char, DnaSequence, SENTINEL};
 
 /// Helper: encode a DNA string with sentinel appended.
 pub fn encode(s: &str) -> Vec<u8> {
@@ -15,14 +15,14 @@ pub fn encode_pattern(s: &str) -> Vec<u8> {
 }
 
 /// Helper: create a single-sequence FM-index with full SA.
-pub fn make_index(s: &str) -> webgpu_fmidx::FmIndex {
+pub fn make_index(s: &str) -> haystackfm::FmIndex {
     let seq = DnaSequence::from_str(s).unwrap();
-    let config = webgpu_fmidx::FmIndexConfig {
+    let config = haystackfm::FmIndexConfig {
         sa_sample_rate: 1,
         use_gpu: false,
         ..Default::default()
     };
-    webgpu_fmidx::FmIndex::build_cpu(&[seq], &config).unwrap()
+    haystackfm::FmIndex::build_cpu(&[seq], &config).unwrap()
 }
 
 /// Helper: count overlapping occurrences via naive string matching.

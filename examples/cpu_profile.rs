@@ -8,9 +8,9 @@
 use std::str::FromStr;
 use std::time::Instant;
 
-use webgpu_fmidx::alphabet::DnaSequence;
-use webgpu_fmidx::fm_index::bidir_index::BidirFmIndex;
-use webgpu_fmidx::fm_index::{FmIndex, FmIndexConfig};
+use haystackfm::alphabet::DnaSequence;
+use haystackfm::fm_index::bidir_index::BidirFmIndex;
+use haystackfm::fm_index::{FmIndex, FmIndexConfig};
 
 // Tiny deterministic xorshift RNG so runs are reproducible without extra deps.
 struct Rng(u64);
