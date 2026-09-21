@@ -12,6 +12,10 @@
 /site
 graphify-out/
 
+# Out-of-repo benchmark scratch (symlink into ~/Datasets); pulls a C toolchain
+# and OpenMP, deliberately kept outside the crate
+/libsais-bench
+
 # Nix build outputs (flake.nix / flake.lock are tracked)
 /result
 /result-*

@@ -192,6 +192,149 @@ pub fn compatible_symbols(code: u8) -> &'static [u8] {
     }
 }
 
+// ── SymbolSet ────────────────────────────────────────────────────────────────
+
+/// A set of alphabet codes, stored as a 16-bit mask (bit `c` set ⇔ code `c` is a member).
+///
+/// Used to ask the occurrence table for the count of *any* symbol in a class with a single
+/// query (see `OccTable::rank_set`), instead of one rank per member. The bidirectional cursor
+/// builds on it for wildcard-aware extension: [`BidirInterval::count_wild_right`] is
+/// `count_right_in(SymbolSet::WILDCARDS)`.
+///
+/// [`BidirInterval::count_wild_right`]: crate::fm_index::bidir::BidirInterval::count_wild_right
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[repr(transparent)]
+pub struct SymbolSet(u16);
+
+impl SymbolSet {
+    /// The empty set.
+    pub const EMPTY: Self = Self(0);
+    /// Every code `0..ALPHABET_SIZE`, sentinel included.
+    pub const ALL: Self = Self(u16::MAX);
+    /// The four exact bases `{A, C, G, T}`.
+    pub const BASES: Self = Self((1 << A) | (1 << C) | (1 << G) | (1 << T));
+    /// Every ambiguity code, `N` and the ten degenerate IUPAC symbols: codes `5..=15`.
+    pub const WILDCARDS: Self = Self(u16::MAX << N);
+    /// Every code except the sentinel: `BASES ∪ WILDCARDS`.
+    pub const NON_SENTINEL: Self = Self(u16::MAX << A);
+
+    /// The set containing only `c`. Panics in debug builds if `c >= ALPHABET_SIZE`.
+    #[inline]
+    pub const fn single(c: u8) -> Self {
+        debug_assert!((c as usize) < ALPHABET_SIZE);
+        Self(1 << c)
+    }
+
+    /// Every code strictly smaller than `c`: `below(0)` is empty, `below(16)` is `ALL`.
+    #[inline]
+    pub const fn below(c: u8) -> Self {
+        if c as usize >= ALPHABET_SIZE {
+            Self::ALL
+        } else {
+            Self((1u32 << c).wrapping_sub(1) as u16)
+        }
+    }
+
+    /// Build a set from a slice of codes (codes `>= ALPHABET_SIZE` are ignored).
+    pub fn from_codes(codes: &[u8]) -> Self {
+        codes
+            .iter()
+            .filter(|&&c| (c as usize) < ALPHABET_SIZE)
+            .fold(Self::EMPTY, |acc, &c| acc.union(Self::single(c)))
+    }
+
+    /// True if `c` is a member.
+    #[inline]
+    pub const fn contains(self, c: u8) -> bool {
+        (c as usize) < ALPHABET_SIZE && (self.0 >> c) & 1 == 1
+    }
+
+    /// Set union.
+    #[inline]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Set intersection.
+    #[inline]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// Members of `self` that are not in `other`.
+    #[inline]
+    pub const fn difference(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    /// Complement within `ALL` (the sentinel is a code like any other).
+    #[inline]
+    pub const fn complement(self) -> Self {
+        Self(!self.0)
+    }
+
+    /// Number of members.
+    #[inline]
+    pub const fn len(self) -> u32 {
+        self.0.count_ones()
+    }
+
+    /// True if the set has no members.
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The raw 16-bit mask.
+    #[inline]
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    /// Iterate the member codes in ascending order.
+    pub fn iter(self) -> impl Iterator<Item = u8> {
+        let mut bits = self.0;
+        std::iter::from_fn(move || {
+            if bits == 0 {
+                None
+            } else {
+                let c = bits.trailing_zeros() as u8;
+                bits &= bits - 1;
+                Some(c)
+            }
+        })
+    }
+}
+
+impl std::ops::BitOr for SymbolSet {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        self.union(rhs)
+    }
+}
+
+impl std::ops::BitAnd for SymbolSet {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        self.intersection(rhs)
+    }
+}
+
+impl std::ops::Not for SymbolSet {
+    type Output = Self;
+    fn not(self) -> Self {
+        self.complement()
+    }
+}
+
+impl FromIterator<u8> for SymbolSet {
+    fn from_iter<I: IntoIterator<Item = u8>>(iter: I) -> Self {
+        iter.into_iter()
+            .filter(|&c| (c as usize) < ALPHABET_SIZE)
+            .fold(Self::EMPTY, |acc, c| acc.union(Self::single(c)))
+    }
+}
+
 // ── Alphabet trait and built-in implementations ──────────────────────────────
 
 /// Runtime bundle of function pointers that define alphabet matching semantics.
@@ -214,6 +357,15 @@ pub struct AlphabetFns {
 impl std::fmt::Debug for AlphabetFns {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "AlphabetFns {{ tag: {} }}", self.tag)
+    }
+}
+
+impl AlphabetFns {
+    /// The reference codes that query code `q` matches under this alphabet, as a
+    /// [`SymbolSet`]. Built from `compatible_fn`, so it agrees with backward search and
+    /// MEM extension for the index it came from (e.g. empty for `N` under [`ExactDna`]).
+    pub fn compatible_set(&self, q: u8) -> SymbolSet {
+        SymbolSet::from_codes((self.compatible_fn)(q))
     }
 }
 
@@ -536,6 +688,109 @@ mod tests {
         let (text, cum) = concatenate_sequences(&[s1, s2]).unwrap();
         assert_eq!(text, vec![A, C, G, SENTINEL, T, T, SENTINEL]);
         assert_eq!(cum, vec![4, 7]);
+    }
+
+    // ── SymbolSet ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn symbol_set_below_equals_from_codes_range() {
+        for c in 0..=16u8 {
+            let codes: Vec<u8> = (0..c.min(16)).collect();
+            assert_eq!(
+                SymbolSet::below(c),
+                SymbolSet::from_codes(&codes),
+                "below({c})"
+            );
+            assert_eq!(SymbolSet::below(c).len(), c.min(16) as u32);
+        }
+        assert_eq!(SymbolSet::below(0), SymbolSet::EMPTY);
+        assert_eq!(SymbolSet::below(16), SymbolSet::ALL);
+    }
+
+    #[test]
+    fn symbol_set_complement_partitions_all() {
+        let mut sets = vec![
+            SymbolSet::EMPTY,
+            SymbolSet::ALL,
+            SymbolSet::BASES,
+            SymbolSet::WILDCARDS,
+        ];
+        for c in 0..16u8 {
+            sets.push(SymbolSet::single(c));
+            sets.push(SymbolSet::below(c));
+        }
+        for s in sets {
+            let comp = s.complement();
+            assert_eq!(s.union(comp), SymbolSet::ALL);
+            assert!(s.intersection(comp).is_empty());
+            assert_eq!(s.len() + comp.len(), 16);
+            assert_eq!(!s, comp);
+            assert_eq!(s | comp, SymbolSet::ALL);
+            assert_eq!(s & comp, SymbolSet::EMPTY);
+            assert_eq!(s.difference(comp), s);
+        }
+    }
+
+    #[test]
+    fn symbol_set_named_constants() {
+        assert_eq!(SymbolSet::ALL.len(), 16);
+        assert_eq!(
+            SymbolSet::WILDCARDS,
+            SymbolSet::from_codes(&[N, R, Y, S, W, K, M, B, D, H, V])
+        );
+        assert_eq!(
+            SymbolSet::WILDCARDS,
+            SymbolSet::from_codes(&(5..16).collect::<Vec<u8>>())
+        );
+        assert_eq!(SymbolSet::BASES, SymbolSet::from_codes(&[A, C, G, T]));
+        assert_eq!(
+            SymbolSet::NON_SENTINEL,
+            SymbolSet::BASES.union(SymbolSet::WILDCARDS)
+        );
+        assert_eq!(
+            SymbolSet::NON_SENTINEL,
+            SymbolSet::single(SENTINEL).complement()
+        );
+        assert!(!SymbolSet::WILDCARDS.contains(SENTINEL));
+        assert!(!SymbolSet::WILDCARDS.contains(T));
+        assert!(SymbolSet::WILDCARDS.contains(N));
+        assert!(SymbolSet::WILDCARDS.contains(V));
+        assert!(!SymbolSet::ALL.contains(16));
+    }
+
+    #[test]
+    fn symbol_set_iter_ascending_matches_contains() {
+        let s = SymbolSet::from_codes(&[V, A, N, SENTINEL, K]);
+        let got: Vec<u8> = s.iter().collect();
+        assert_eq!(got, vec![SENTINEL, A, N, K, V]);
+        for c in 0..16u8 {
+            assert_eq!(s.contains(c), got.contains(&c));
+        }
+        assert_eq!(SymbolSet::EMPTY.iter().count(), 0);
+        assert_eq!(SymbolSet::ALL.iter().count(), 16);
+        let collected: SymbolSet = got.iter().copied().collect();
+        assert_eq!(collected, s);
+        // Out-of-range codes are ignored rather than wrapping.
+        assert_eq!(SymbolSet::from_codes(&[A, 16, 255]), SymbolSet::single(A));
+    }
+
+    #[test]
+    fn compatible_set_matches_compatible_fn_for_iupac_and_exact() {
+        for fns in [IupacDna::fns(), ExactDna::fns()] {
+            for q in 0..16u8 {
+                let expect = SymbolSet::from_codes((fns.compatible_fn)(q));
+                assert_eq!(fns.compatible_set(q), expect, "tag {} code {q}", fns.tag);
+            }
+        }
+        assert_eq!(IupacDna::fns().compatible_set(N), SymbolSet::NON_SENTINEL);
+        assert!(ExactDna::fns().compatible_set(N).is_empty());
+        assert_eq!(ExactDna::fns().compatible_set(A), SymbolSet::single(A));
+        assert_eq!(
+            IupacDna::fns()
+                .compatible_set(A)
+                .intersection(SymbolSet::WILDCARDS),
+            SymbolSet::from_codes(&[N, R, W, M, D, H, V])
+        );
     }
 
     // Verifies that the WGSL COMPAT / COMPAT_LEN constants in

@@ -8,6 +8,41 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+### Added
+- `SymbolSet`: a 16-bit set of alphabet codes with `EMPTY`, `ALL`, `BASES`, `WILDCARDS`
+  (codes 5..=15), `NON_SENTINEL`, `single`, `below`, `from_codes`, set algebra and
+  iteration. `AlphabetFns::compatible_set(q)` returns the codes `q` matches under that
+  alphabet as a `SymbolSet`.
+- `OccTable::rank_set`, `rank_set_pair` and `rank_all`: class ranks over the occurrence
+  table. Every block record already holds all lanes, so counting "any symbol in this set"
+  costs one block touch regardless of the set's size, and `rank_all` returns every symbol's
+  rank at once.
+- Wildcard-aware bidirectional cursor operations, on both `BidirInterval` (taking the
+  relevant `&FmIndex` half) and `BidirFmIndex`:
+  - `count_wild_right` / `count_wild_left`: occurrences followed / preceded in the reference
+    by an ambiguity code (`N` or a degenerate IUPAC symbol). Two occ-block touches, no text
+    access, independent of how many wildcard codes exist — a cursor walk can ask at every
+    step and fan out only when the answer is non-zero.
+  - `count_right_in` / `count_left_in`: the same for an arbitrary `SymbolSet`, e.g.
+    `compatible_set(base).intersection(SymbolSet::WILDCARDS)`.
+  - `children_right` / `children_left`: every child interval for all 16 codes from two
+    `rank_all` calls, bit-identical to the per-code `extend_*` results; slot 0 is the
+    sentinel child (occurrences at a reference end / start) and child sizes sum to the
+    parent's size.
+  - `extend_right_compatible` / `extend_left_compatible`: the compatible-symbol fan-out
+    `find_smems` / `find_mems` use internally, now public, driven by the index's own
+    alphabet; `BidirFmIndex::compatible_set` exposes that alphabet's match set.
+
+### Changed
+- `BidirInterval::extend_right` / `extend_left` compute the paired-interval offset with a
+  single class rank per border instead of one scalar rank per smaller symbol. Results are
+  unchanged; extending by a high IUPAC code no longer costs up to 30 extra rank calls.
+
+### Fixed
+- `benches/query.rs` compiles again (its `FmIndexConfig` literals predated the
+  `lookup_depth` / `build_threads` / `occ_encoding` fields) and gains a `wild_counts` group
+  comparing `count_wild_right` against the 11-code `extend_right` fan-out.
+
 ## [0.4.0] - 2026-07-28
 
 Breaking behavior change. The public API is unchanged — `cargo semver-checks` reports no

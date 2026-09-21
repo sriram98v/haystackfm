@@ -1,5 +1,7 @@
 use haystackfm::alphabet::encode_char;
-use haystackfm::{DnaSequence, FmIndex, FmIndexConfig, SeqId};
+use haystackfm::{
+    BidirFmIndex, BidirInterval, DnaSequence, FmIndex, FmIndexConfig, OccEncoding, SeqId,
+};
 /// Property-based correctness tests for the FM-index.
 ///
 /// Inspired by genedex (https://github.com/feldroop/genedex). For every randomly
@@ -67,6 +69,62 @@ fn naive_hits_multi(texts: &[String], pattern: &str) -> HashSet<(SeqId, u32)> {
                 .map(move |p| (id, p))
         })
         .collect()
+}
+
+/// IUPAC reference text: mostly ACGT with a sprinkling of ambiguity codes, wrapped in
+/// optional wildcard runs (0..=7) at both ends so sequence boundaries get covered.
+fn iupac_string(max_len: usize) -> impl Strategy<Value = String> {
+    const WILD: [char; 11] = ['N', 'R', 'Y', 'S', 'W', 'K', 'M', 'B', 'D', 'H', 'V'];
+    let body_char = prop_oneof![
+        9 => (0usize..4).prop_map(|i| ['A', 'C', 'G', 'T'][i]),
+        1 => (0usize..WILD.len()).prop_map(|i| WILD[i]),
+    ];
+    let wild_run = prop::collection::vec((0usize..WILD.len()).prop_map(|i| WILD[i]), 0..=7);
+    (
+        wild_run.clone(),
+        prop::collection::vec(body_char, 1..=max_len),
+        wild_run,
+    )
+        .prop_map(|(head, body, tail)| head.into_iter().chain(body).chain(tail).collect::<String>())
+}
+
+fn build_bidir(texts: &[String], sa_sample_rate: usize, onehot: bool) -> BidirFmIndex {
+    let seqs: Vec<DnaSequence> = texts
+        .iter()
+        .map(|s| DnaSequence::from_str(s).unwrap())
+        .collect();
+    BidirFmIndex::build_cpu(
+        &seqs,
+        &FmIndexConfig {
+            sa_sample_rate: sa_sample_rate as u32,
+            use_gpu: false,
+            occ_encoding: if onehot {
+                OccEncoding::OneHot
+            } else {
+                OccEncoding::Bitplane
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+/// Brute-force `(count_wild_left, count_wild_right)`: locate every occurrence and inspect
+/// the neighbouring reference symbol (code >= 5 is an ambiguity code; a sequence boundary
+/// is never wild).
+fn neighbour_wild_counts(idx: &BidirFmIndex, iv: &BidirInterval, len: usize) -> (u32, u32) {
+    let (mut left, mut right) = (0, 0);
+    for (id, pos) in idx.locate_interval(iv) {
+        let seq = idx.sequence(id).unwrap();
+        let pos = pos as usize;
+        if pos > 0 && seq[pos - 1] >= 5 {
+            left += 1;
+        }
+        if seq.get(pos + len).is_some_and(|&c| c >= 5) {
+            right += 1;
+        }
+    }
+    (left, right)
 }
 
 // ── Property tests ────────────────────────────────────────────────────────────
@@ -207,6 +265,61 @@ proptest! {
             positions.contains(&(start as u32)),
             "substring '{pattern}' at offset {start} not in locate results | text='{text}'"
         );
+    }
+    /// Wildcard-aware cursor counts must agree with a neighbour scan of every located
+    /// occurrence, at every step of a right walk, on multi-sequence IUPAC references.
+    #[test]
+    fn bidir_count_wild_matches_neighbour_scan(
+        texts in prop::collection::vec(iupac_string(150), 1..=4),
+        pattern in dna_string(6),
+        sa_sample_rate in 1usize..=32,
+        onehot in any::<bool>(),
+    ) {
+        let idx = build_bidir(&texts, sa_sample_rate, onehot);
+        let pat = encode_pat(&pattern);
+        let mut iv = idx.full_interval();
+        for (k, &c) in pat.iter().enumerate() {
+            let Some(next) = idx.extend_right(iv, c) else { break };
+            iv = next;
+            let (left, right) = neighbour_wild_counts(&idx, &iv, k + 1);
+            prop_assert_eq!(
+                idx.count_wild_right(&iv), right,
+                "count_wild_right | pattern='{}' step={} texts={:?}", pattern, k, texts
+            );
+            prop_assert_eq!(
+                idx.count_wild_left(&iv), left,
+                "count_wild_left | pattern='{}' step={} texts={:?}", pattern, k, texts
+            );
+        }
+    }
+
+    /// Every child from `children_*` must equal the corresponding single extension, and the
+    /// children (sentinel slot included) must partition the parent interval.
+    #[test]
+    fn bidir_children_match_extend_and_sum_to_size(
+        texts in prop::collection::vec(iupac_string(120), 1..=3),
+        pattern in dna_string(5),
+        onehot in any::<bool>(),
+    ) {
+        let idx = build_bidir(&texts, 1, onehot);
+        let pat = encode_pat(&pattern);
+        let mut iv = idx.full_interval();
+        for &c in &pat {
+            let Some(next) = idx.extend_right(iv, c) else { break };
+            iv = next;
+        }
+        let right = idx.children_right(&iv);
+        let left = idx.children_left(&iv);
+        let mut sum_right = 0u32;
+        let mut sum_left = 0u32;
+        for code in 0..16u8 {
+            prop_assert_eq!(right[code as usize], idx.extend_right(iv, code), "right child {}", code);
+            prop_assert_eq!(left[code as usize], idx.extend_left(iv, code), "left child {}", code);
+            sum_right += right[code as usize].map_or(0, |x| x.size());
+            sum_left += left[code as usize].map_or(0, |x| x.size());
+        }
+        prop_assert_eq!(sum_right, iv.size());
+        prop_assert_eq!(sum_left, iv.size());
     }
 }
 

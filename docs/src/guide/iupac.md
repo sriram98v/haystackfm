@@ -20,6 +20,34 @@ Queries and references may contain any of the 16 IUPAC nucleotide symbols. Two s
 For example, a query `N` matches any base; a query `R` matches `A` or `G` (and any ambiguity
 code whose base set includes one of them).
 
+## Wildcards in the reference
+
+A reference database often carries ambiguity codes of its own (short runs of `R`, `Y`, `M`,
+`W`, …). `find_smems` / `find_mems` already let a read base match them. If you drive the
+bidirectional cursor yourself, ask at each step whether any occurrence continues into a
+wildcard before paying for the per-code fan-out:
+
+```rust,ignore
+use haystackfm::{alphabet, SymbolSet};
+
+let mut iv = bidir.full_interval();
+for &base in read {
+    // Cheap: two occurrence-table touches, independent of how many wildcard codes exist.
+    let wild_here = bidir.count_right_in(&iv, bidir.compatible_set(base) & SymbolSet::WILDCARDS);
+    if wild_here == 0 {
+        iv = match bidir.extend_right(iv, base) { Some(next) => next, None => break };
+    } else {
+        // Some occurrences continue into an ambiguity code: fork over every compatible code.
+        let children: Vec<_> = bidir.extend_right_compatible(iv, base).collect();
+        // … keep the children you care about
+    }
+}
+```
+
+`count_wild_right` / `count_wild_left` are the same query with `SymbolSet::WILDCARDS`, and
+`children_right` / `children_left` return every child interval for all 16 codes at roughly
+the cost of a single extension. A sequence boundary (sentinel) never counts as wild.
+
 ## CPU/GPU parity
 
 Both paths use the same compatibility lookup — `compatible_symbols` on the CPU and the

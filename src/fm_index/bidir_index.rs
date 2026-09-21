@@ -1,4 +1,4 @@
-use crate::alphabet::{self, Alphabet, DnaSequence, IupacDna};
+use crate::alphabet::{self, Alphabet, DnaSequence, IupacDna, SymbolSet, ALPHABET_SIZE};
 use crate::error::FmIndexError;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::seq_id::SeqId;
@@ -24,7 +24,7 @@ use crate::fm_index::{FmIndex, FmIndexConfig};
 /// let iv = bidir.extend_right(iv, alphabet::G)?;  // match "CG"
 /// let iv = bidir.extend_left(iv, alphabet::A)?;   // match "ACG"
 /// println!("occurrences: {}", iv.size());
-/// let positions = bidir.locate(iv);
+/// let positions = bidir.locate_interval(&iv);
 /// ```
 #[derive(Debug, Clone)]
 pub struct BidirFmIndex {
@@ -148,6 +148,80 @@ impl BidirFmIndex {
     /// Returns `None` when cP has no occurrences in the text.
     pub fn extend_left(&self, iv: BidirInterval, c: u8) -> Option<BidirInterval> {
         iv.extend_left(c, &self.fwd)
+    }
+
+    // ── Wildcard-aware cursor operations ──────────────────────────────────────
+
+    /// Number of occurrences of `iv`'s pattern followed in the reference by an ambiguity
+    /// code (`N` or a degenerate IUPAC symbol, codes 5..=15).
+    ///
+    /// Two occ-block touches regardless of how many wildcard codes exist, and no text
+    /// access, so a cursor walk can ask at every step and fan out over wildcard codes
+    /// (e.g. via [`children_right`](Self::children_right)) only when this is non-zero.
+    /// Sentinel neighbours — occurrences at the end of a reference — are never wild.
+    pub fn count_wild_right(&self, iv: &BidirInterval) -> u32 {
+        iv.count_wild_right(&self.rev)
+    }
+
+    /// Number of occurrences of `iv`'s pattern preceded in the reference by an ambiguity
+    /// code (codes 5..=15). See [`count_wild_right`](Self::count_wild_right).
+    pub fn count_wild_left(&self, iv: &BidirInterval) -> u32 {
+        iv.count_wild_left(&self.fwd)
+    }
+
+    /// Number of occurrences of `iv`'s pattern followed in the reference by a symbol in
+    /// `set`; equals `Σ_{x ∈ set} extend_right(iv, x).size()` at the cost of a single
+    /// extension. For "which wildcards could this read base still match", pass
+    /// `self.compatible_set(base).intersection(SymbolSet::WILDCARDS)`.
+    pub fn count_right_in(&self, iv: &BidirInterval, set: SymbolSet) -> u32 {
+        iv.count_right_in(set, &self.rev)
+    }
+
+    /// Number of occurrences of `iv`'s pattern preceded in the reference by a symbol in
+    /// `set`. See [`count_right_in`](Self::count_right_in).
+    pub fn count_left_in(&self, iv: &BidirInterval, set: SymbolSet) -> u32 {
+        iv.count_left_in(set, &self.fwd)
+    }
+
+    /// Every right child of `iv` at once: `children_right(iv)[c] == extend_right(iv, c)`
+    /// for all 16 codes, for roughly the cost of one extension. Slot 0 is the sentinel
+    /// child (occurrences at the end of a reference); do not extend it further.
+    pub fn children_right(&self, iv: &BidirInterval) -> [Option<BidirInterval>; ALPHABET_SIZE] {
+        iv.children_right(&self.rev)
+    }
+
+    /// Every left child of `iv` at once: `children_left(iv)[c] == extend_left(iv, c)`
+    /// for all 16 codes. Slot 0 is the sentinel child (occurrences at the start of a
+    /// reference). See [`children_right`](Self::children_right).
+    pub fn children_left(&self, iv: &BidirInterval) -> [Option<BidirInterval>; ALPHABET_SIZE] {
+        iv.children_left(&self.fwd)
+    }
+
+    /// Extend `iv` right by every reference code that query code `q` matches under this
+    /// index's alphabet, yielding the non-empty children. This is the fan-out
+    /// `find_smems` / `find_mems` perform per query symbol.
+    pub fn extend_right_compatible(
+        &self,
+        iv: BidirInterval,
+        q: u8,
+    ) -> impl Iterator<Item = BidirInterval> + '_ {
+        iv.extend_right_compatible(q, &self.rev)
+    }
+
+    /// Extend `iv` left by every reference code that query code `q` matches under this
+    /// index's alphabet. See [`extend_right_compatible`](Self::extend_right_compatible).
+    pub fn extend_left_compatible(
+        &self,
+        iv: BidirInterval,
+        q: u8,
+    ) -> impl Iterator<Item = BidirInterval> + '_ {
+        iv.extend_left_compatible(q, &self.fwd)
+    }
+
+    /// The reference codes that query code `q` matches under this index's alphabet
+    /// (empty for `N` on an [`ExactDna`](crate::alphabet::ExactDna) index).
+    pub fn compatible_set(&self, q: u8) -> SymbolSet {
+        self.fwd.alphabet_fns.compatible_set(q)
     }
 
     // ── Query helpers ─────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@ pub mod cpu;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
-use crate::alphabet::ALPHABET_SIZE;
+use crate::alphabet::{SymbolSet, ALPHABET_SIZE};
 
 /// Granularity of bitplanes (must be 64 — matches u64 popcount).
 pub const BLOCK_SIZE: u32 = 64;
@@ -408,6 +408,182 @@ impl OccTable {
         for (slot, &(c, i)) in out.iter_mut().zip(queries) {
             *slot = self.rank(c, i);
         }
+    }
+
+    // ── Class ranks ───────────────────────────────────────────────────────────
+    //
+    // Every block record already holds the sb_count, delta and Level-3 words for *all*
+    // lanes in one contiguous slice, so ranking several lanes at the same position costs
+    // the same single block miss as ranking one — only the popcounts multiply. That makes
+    // "how many positions before `i` carry a symbol from this class" an O(1)-miss query
+    // instead of one full `rank` per class member, which is what the bidirectional cursor
+    // needs to ask "is any occurrence followed by a wildcard" without trying all 11 codes.
+
+    /// Lane bitmask (bit `lane` set) of the members of `set` that have a lane in this table.
+    #[inline]
+    fn set_lanes(&self, set: SymbolSet) -> u16 {
+        let mut lanes = 0u16;
+        for lane in 0..self.num_lanes as usize {
+            if set.contains(self.lane_to_symbol[lane]) {
+                lanes |= 1 << lane;
+            }
+        }
+        lanes
+    }
+
+    /// Bitmask of every lane in this table.
+    #[inline]
+    fn all_lanes(&self) -> u16 {
+        if self.num_lanes as usize >= ALPHABET_SIZE {
+            u16::MAX
+        } else {
+            (1u16 << self.num_lanes) - 1
+        }
+    }
+
+    /// Popcount window for `rank(_, i)` within the block holding position `i - 1`:
+    /// bits `[0, offset]` set.
+    #[inline]
+    fn rank_window(offset: u32) -> u64 {
+        if offset == 63 {
+            u64::MAX
+        } else {
+            (1u64 << (offset + 1)) - 1
+        }
+    }
+
+    /// Load the block's Level-3 words once (`num_planes` planes under Bitplane, `num_lanes`
+    /// bitvectors under OneHot) so multi-lane queries don't re-read them per lane.
+    #[inline]
+    fn load_words(&self, base: usize) -> [u64; ALPHABET_SIZE] {
+        let width = match self.encoding {
+            OccEncoding::Bitplane => self.num_planes as usize,
+            OccEncoding::OneHot => self.num_lanes as usize,
+        };
+        let mut words = [0u64; ALPHABET_SIZE];
+        for (w, slot) in words.iter_mut().enumerate().take(width) {
+            *slot = self.word_at(base, w);
+        }
+        words
+    }
+
+    /// One-hot bitvector for `lane` from pre-loaded Level-3 `words` (see `lane_mask`).
+    #[inline]
+    fn lane_mask_from_words(&self, words: &[u64; ALPHABET_SIZE], lane: usize) -> u64 {
+        if self.encoding == OccEncoding::OneHot {
+            return words[lane];
+        }
+        let num_planes = self.num_planes as usize;
+        if num_planes == 0 {
+            return u64::MAX;
+        }
+        let mut mask = u64::MAX;
+        for (p, &plane_val) in words.iter().enumerate().take(num_planes) {
+            mask &= if (lane >> p) & 1 == 1 {
+                plane_val
+            } else {
+                !plane_val
+            };
+        }
+        mask
+    }
+
+    /// Sum of `rank_at_lane(lane, i)` over every lane in the `lanes` bitmask, with `i > 0`,
+    /// touching the block record once.
+    #[inline]
+    fn rank_lanes(&self, lanes: u16, i: u32) -> u32 {
+        let pos = i - 1;
+        let block = (pos / BLOCK_SIZE) as usize;
+        let offset = pos % BLOCK_SIZE;
+        let base = self.block_base(block);
+        let window = Self::rank_window(offset);
+        let words = self.load_words(base);
+
+        let mut sum = 0u32;
+        let mut bits = lanes;
+        while bits != 0 {
+            let lane = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            sum += self.sb_count_at(base, lane)
+                + self.delta_at(base, lane)
+                + (self.lane_mask_from_words(&words, lane) & window).count_ones();
+        }
+        sum
+    }
+
+    /// Class rank: number of positions in `bwt[0..i)` whose symbol is a member of `set`.
+    ///
+    /// Equals `Σ_{c ∈ set} rank(c, i)` but costs one block-record touch regardless of how
+    /// many members the set has: all lanes live in the same record, and the query ranks
+    /// whichever of `set` / its complement has fewer lanes (using `Σ_lanes rank = i`).
+    /// Members absent from this BWT contribute nothing.
+    pub fn rank_set(&self, set: SymbolSet, i: u32) -> u32 {
+        debug_assert!(
+            i <= self.text_len,
+            "rank_set index {i} > text_len {}",
+            self.text_len
+        );
+        if i == 0 {
+            return 0;
+        }
+        let lanes = self.set_lanes(set);
+        if lanes == 0 {
+            return 0;
+        }
+        let complement = self.all_lanes() & !lanes;
+        if complement == 0 {
+            return i;
+        }
+        if complement.count_ones() < lanes.count_ones() {
+            i - self.rank_lanes(complement, i)
+        } else {
+            self.rank_lanes(lanes, i)
+        }
+    }
+
+    /// Fused class rank of both borders of one SA interval: `(rank_set(set, lo),
+    /// rank_set(set, hi))`. Prefetches both block records first, like [`rank_pair`].
+    ///
+    /// [`rank_pair`]: Self::rank_pair
+    #[inline]
+    pub fn rank_set_pair(&self, set: SymbolSet, lo: u32, hi: u32) -> (u32, u32) {
+        if lo != 0 {
+            self.prefetch_block(lo - 1);
+        }
+        if hi != 0 {
+            self.prefetch_block(hi - 1);
+        }
+        (self.rank_set(set, lo), self.rank_set(set, hi))
+    }
+
+    /// Rank of every symbol at once: `out[c] = rank(c, i)` for all 16 codes (0 for symbols
+    /// absent from this BWT). One block-record touch plus `num_lanes` popcounts — the
+    /// primitive behind `BidirInterval::children_*`, which needs every child interval of a
+    /// cursor from just the two borders.
+    pub fn rank_all(&self, i: u32) -> [u32; ALPHABET_SIZE] {
+        debug_assert!(
+            i <= self.text_len,
+            "rank_all index {i} > text_len {}",
+            self.text_len
+        );
+        let mut out = [0u32; ALPHABET_SIZE];
+        if i == 0 {
+            return out;
+        }
+        let pos = i - 1;
+        let block = (pos / BLOCK_SIZE) as usize;
+        let offset = pos % BLOCK_SIZE;
+        let base = self.block_base(block);
+        let window = Self::rank_window(offset);
+        let words = self.load_words(base);
+
+        for lane in 0..self.num_lanes as usize {
+            let symbol = self.lane_to_symbol[lane] as usize;
+            out[symbol] = self.sb_count_at(base, lane)
+                + self.delta_at(base, lane)
+                + (self.lane_mask_from_words(&words, lane) & window).count_ones();
+        }
+        out
     }
 
     /// Symbol at BWT position `pos`, recovered from the occ bitplanes.

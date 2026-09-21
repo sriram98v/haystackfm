@@ -179,6 +179,16 @@ bidir.find_mems(query, min_len, locate)         // Vec<Mem> — all MEMs (MUMmer
 // Resolve reported ids to headers (both O(1))
 bidir.seq_headers() / seq_header(id) / seq_id(header)
 
+// Cursor walk — drive the bidirectional search yourself
+let iv = bidir.full_interval();                 // BidirInterval for the empty pattern
+bidir.extend_right(iv, code) / extend_left(iv, code)   // Option<BidirInterval>
+bidir.children_right(&iv) / children_left(&iv)  // [Option<BidirInterval>; 16], all codes at once
+bidir.extend_right_compatible(iv, q)            // iterator: fan-out over codes `q` matches
+bidir.count_wild_right(&iv) / count_wild_left(&iv)     // occurrences next to a reference
+                                                //   ambiguity code — O(1), no per-code fan-out
+bidir.count_right_in(&iv, SymbolSet::WILDCARDS) // same for any SymbolSet
+bidir.count_interval(&iv) / locate_interval(&iv)
+
 // GPU MEM finding (feature = "gpu"); `queries: &[DnaSequence]`,
 // `ref_boundaries` from `bidir.seq_boundaries()`, GPU context from the cache
 bidir.find_smems_gpu(queries, min_len, ref_boundaries, max_hits_per_mem).await?  // Vec<Vec<MemHit>>
