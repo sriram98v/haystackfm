@@ -354,4 +354,158 @@ mod tests {
             }
         }
     }
+
+    // ── rank_set / rank_all ───────────────────────────────────────────────────
+
+    /// Naive class rank: count of positions in bwt[0..i) whose symbol is in `set`.
+    fn naive_rank_set(bwt: &Bwt, set: SymbolSet, i: u32) -> u32 {
+        (0..i as usize)
+            .filter(|&j| set.contains(bwt.get(j)))
+            .count() as u32
+    }
+
+    fn build_bwt_for(s: &str) -> Bwt {
+        let text = encode(s);
+        let sa = build_suffix_array(&text);
+        build_bwt(&text, &sa)
+    }
+
+    /// Named sets plus every singleton, every prefix, and a fixed batch of pseudo-random
+    /// masks (xorshift, no extra deps).
+    fn test_sets() -> Vec<SymbolSet> {
+        let mut sets = vec![
+            SymbolSet::EMPTY,
+            SymbolSet::ALL,
+            SymbolSet::WILDCARDS,
+            SymbolSet::BASES,
+            SymbolSet::NON_SENTINEL,
+        ];
+        for c in 0..=16u8 {
+            if c < 16 {
+                sets.push(SymbolSet::single(c));
+            }
+            sets.push(SymbolSet::below(c));
+        }
+        let mut x: u32 = 0x9E37_79B9;
+        for _ in 0..32 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            sets.push(SymbolSet::from_codes(
+                &(0..16u8).filter(|c| (x >> c) & 1 == 1).collect::<Vec<_>>(),
+            ));
+        }
+        sets
+    }
+
+    #[test]
+    fn rank_set_matches_naive_on_iupac_text() {
+        // All 16 symbols present (16 lanes, 4 planes), 600 chars: 10 blocks, 2 superblocks.
+        let bwt = build_bwt_for(&"ACGTNRYSWKMBDHV".repeat(40));
+        let n = bwt.len() as u32;
+        for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+            let occ = build_occ_table(&bwt, enc);
+            assert_eq!(occ.num_lanes(), 16);
+            for set in test_sets() {
+                for i in 0..=n {
+                    let expected = naive_rank_set(&bwt, set, i);
+                    assert_eq!(
+                        occ.rank_set(set, i),
+                        expected,
+                        "rank_set({set:?}, {i}) mismatch ({enc:?})"
+                    );
+                    assert_eq!(
+                        occ.rank_set(set, i) + occ.rank_set(set.complement(), i),
+                        i,
+                        "set + complement != i for {set:?} at {i} ({enc:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rank_set_on_compact_acgt_table_ignores_absent_symbols() {
+        let bwt = build_bwt_for(&"ACGTTGCAACGT".repeat(30));
+        let n = bwt.len() as u32;
+        for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+            let occ = build_occ_table(&bwt, enc);
+            assert_eq!(occ.num_lanes(), 5);
+            for i in 0..=n {
+                assert_eq!(occ.rank_set(SymbolSet::WILDCARDS, i), 0);
+                assert_eq!(occ.rank_set(SymbolSet::ALL, i), i);
+                assert_eq!(occ.rank_set(SymbolSet::below(N), i), i);
+                assert_eq!(
+                    occ.rank_set(SymbolSet::NON_SENTINEL, i),
+                    i - occ.rank(SENTINEL, i)
+                );
+                for set in test_sets() {
+                    assert_eq!(occ.rank_set(set, i), naive_rank_set(&bwt, set, i));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rank_set_two_lane_table() {
+        // Only {$, A}: one plane under Bitplane.
+        let bwt = build_bwt_for(&"A".repeat(130));
+        let n = bwt.len() as u32;
+        for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+            let occ = build_occ_table(&bwt, enc);
+            assert_eq!(occ.num_lanes(), 2);
+            for i in 0..=n {
+                for set in test_sets() {
+                    assert_eq!(occ.rank_set(set, i), naive_rank_set(&bwt, set, i));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rank_all_matches_scalar_rank_and_sums_to_i() {
+        for text in ["ACGTNRYSWKMBDHV".repeat(40), "ACGTTGCAACGT".repeat(30)] {
+            let bwt = build_bwt_for(&text);
+            let n = bwt.len() as u32;
+            for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+                let occ = build_occ_table(&bwt, enc);
+                for i in 0..=n {
+                    let all = occ.rank_all(i);
+                    for c in 0..ALPHABET_SIZE as u8 {
+                        assert_eq!(
+                            all[c as usize],
+                            occ.rank(c, i),
+                            "rank_all[{c}] at {i} ({enc:?})"
+                        );
+                    }
+                    assert_eq!(all.iter().sum::<u32>(), i, "rank_all sum at {i} ({enc:?})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rank_set_pair_matches_rank_set() {
+        let bwt = build_bwt_for(&"ACGTNRYSWKMBDHV".repeat(20));
+        let n = bwt.len() as u32;
+        for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+            let occ = build_occ_table(&bwt, enc);
+            for set in [
+                SymbolSet::WILDCARDS,
+                SymbolSet::below(T),
+                SymbolSet::single(V),
+                SymbolSet::EMPTY,
+            ] {
+                for lo in (0..=n).step_by(7) {
+                    for hi in (lo..=n).step_by(11) {
+                        assert_eq!(
+                            occ.rank_set_pair(set, lo, hi),
+                            (occ.rank_set(set, lo), occ.rank_set(set, hi)),
+                            "rank_set_pair({set:?}, {lo}, {hi}) mismatch ({enc:?})"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

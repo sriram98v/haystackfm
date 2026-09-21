@@ -341,3 +341,418 @@ fn bidir_serialization_preserves_smems() {
 
     assert_eq!(orig_smems, rest_smems);
 }
+
+// ── Wildcard-aware cursor: count_wild_*, count_*_in, children_*, compatible fan-out ──
+//
+// Oracle: locate every occurrence of the cursor's pattern, look up the neighbouring symbol
+// in the reference text, and count the ones that are ambiguity codes (>= 5). A sentinel
+// neighbour (occurrence at a reference boundary) is never wild.
+
+mod wild {
+    use haystackfm::alphabet::{self, decode_char, ExactDna, SymbolSet, ALPHABET_SIZE};
+    use haystackfm::{BidirFmIndex, BidirInterval, DnaSequence, FmIndexConfig, OccEncoding};
+    use rand::rngs::SmallRng;
+    use rand::{Rng, SeedableRng};
+
+    const WILD_CODES: [u8; 11] = [
+        alphabet::N,
+        alphabet::R,
+        alphabet::Y,
+        alphabet::S,
+        alphabet::W,
+        alphabet::K,
+        alphabet::M,
+        alphabet::B,
+        alphabet::D,
+        alphabet::H,
+        alphabet::V,
+    ];
+    const BASES: [u8; 4] = [alphabet::A, alphabet::C, alphabet::G, alphabet::T];
+
+    fn config(sa_sample_rate: u32, occ_encoding: OccEncoding) -> FmIndexConfig {
+        FmIndexConfig {
+            sa_sample_rate,
+            use_gpu: false,
+            occ_encoding,
+            ..Default::default()
+        }
+    }
+
+    fn build(seqs: &[Vec<u8>], sa_sample_rate: u32, occ_encoding: OccEncoding) -> BidirFmIndex {
+        let dna: Vec<DnaSequence> = seqs
+            .iter()
+            .cloned()
+            .map(DnaSequence::from_encoded)
+            .collect();
+        BidirFmIndex::build_cpu(&dna, &config(sa_sample_rate, occ_encoding)).unwrap()
+    }
+
+    fn build_str(seqs: &[&str]) -> BidirFmIndex {
+        let dna: Vec<DnaSequence> = seqs
+            .iter()
+            .map(|s| DnaSequence::from_str(s).unwrap())
+            .collect();
+        BidirFmIndex::build_cpu(&dna, &config(1, OccEncoding::Bitplane)).unwrap()
+    }
+
+    fn is_wild(code: u8) -> bool {
+        code >= alphabet::N
+    }
+
+    /// Brute-force `(count_wild_left, count_wild_right)` for a cursor matching a pattern of
+    /// length `len`.
+    fn oracle_wild(idx: &BidirFmIndex, iv: &BidirInterval, len: usize) -> (u32, u32) {
+        let mut left = 0;
+        let mut right = 0;
+        for (id, pos) in idx.locate_interval(iv) {
+            let seq = idx
+                .sequence(id)
+                .expect("sequence retained on forward index");
+            let pos = pos as usize;
+            if pos.checked_sub(1).map(|p| is_wild(seq[p])).unwrap_or(false) {
+                left += 1;
+            }
+            if seq.get(pos + len).copied().map(is_wild).unwrap_or(false) {
+                right += 1;
+            }
+        }
+        (left, right)
+    }
+
+    /// Random sequence: ACGT body with `runs` injected wildcard runs of length 1..=7, one
+    /// optionally forced at the start and one at the end.
+    fn place_run(rng: &mut SmallRng, seq: &mut [u8], start: usize) {
+        let run_len = rng.random_range(1..=7);
+        for k in 0..run_len {
+            if start + k < seq.len() {
+                seq[start + k] = WILD_CODES[rng.random_range(0..WILD_CODES.len())];
+            }
+        }
+    }
+
+    fn random_seq(
+        rng: &mut SmallRng,
+        len: usize,
+        runs: usize,
+        at_start: bool,
+        at_end: bool,
+    ) -> Vec<u8> {
+        let mut seq: Vec<u8> = (0..len).map(|_| BASES[rng.random_range(0..4)]).collect();
+        for _ in 0..runs {
+            let start = rng.random_range(0..len);
+            place_run(rng, &mut seq, start);
+        }
+        if at_start {
+            place_run(rng, &mut seq, 0);
+        }
+        if at_end {
+            let run_len = rng.random_range(1..=7).min(len);
+            place_run(rng, &mut seq, len - run_len);
+        }
+        seq
+    }
+
+    fn show(seq: &[u8]) -> String {
+        seq.iter().map(|&c| decode_char(c).unwrap()).collect()
+    }
+
+    #[test]
+    fn count_wild_matches_brute_force_on_random_iupac_multi_seq() {
+        let mut rng = SmallRng::seed_from_u64(0x0005_7ACC_F00D_u64);
+        for (rate, enc) in [
+            (1, OccEncoding::Bitplane),
+            (32, OccEncoding::Bitplane),
+            (1, OccEncoding::OneHot),
+            (32, OccEncoding::OneHot),
+        ] {
+            for iter in 0..40 {
+                let nseq = rng.random_range(1..=4);
+                let seqs: Vec<Vec<u8>> = (0..nseq)
+                    .map(|k| {
+                        let len = rng.random_range(5..=120);
+                        let runs = rng.random_range(0..=5);
+                        random_seq(&mut rng, len, runs, k % 2 == 0, k % 3 == 0)
+                    })
+                    .collect();
+                let idx = build(&seqs, rate, enc);
+                let ctx = || seqs.iter().map(|s| show(s)).collect::<Vec<_>>().join(" | ");
+
+                for _ in 0..4 {
+                    // Sample a substring of one reference (may contain wildcard codes; we
+                    // extend by the exact reference code so the walk never dies early).
+                    let s = &seqs[rng.random_range(0..seqs.len())];
+                    let plen = rng.random_range(1..=8.min(s.len()));
+                    let start = rng.random_range(0..=s.len() - plen);
+                    let pat = &s[start..start + plen];
+
+                    // Right walk.
+                    let mut iv = idx.full_interval();
+                    for (k, &c) in pat.iter().enumerate() {
+                        iv = idx.extend_right(iv, c).expect("substring must be present");
+                        let (l, r) = oracle_wild(&idx, &iv, k + 1);
+                        assert_eq!(
+                            idx.count_wild_right(&iv),
+                            r,
+                            "right walk step {k} rate={rate} {enc:?} iter={iter} pat={} refs={}",
+                            show(&pat[..=k]),
+                            ctx()
+                        );
+                        assert_eq!(
+                            idx.count_wild_left(&iv),
+                            l,
+                            "right walk (left count) step {k} rate={rate} {enc:?} iter={iter} pat={} refs={}",
+                            show(&pat[..=k]),
+                            ctx()
+                        );
+                    }
+                    // Left walk.
+                    let mut iv = idx.full_interval();
+                    for (k, &c) in pat.iter().rev().enumerate() {
+                        iv = idx.extend_left(iv, c).expect("substring must be present");
+                        let (l, r) = oracle_wild(&idx, &iv, k + 1);
+                        assert_eq!(
+                            idx.count_wild_left(&iv),
+                            l,
+                            "left walk step {k} rate={rate} {enc:?} iter={iter} refs={}",
+                            ctx()
+                        );
+                        assert_eq!(idx.count_wild_right(&iv), r, "left walk (right count) step {k} rate={rate} {enc:?} iter={iter} refs={}", ctx());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn count_wild_at_sequence_boundaries() {
+        let idx = build_str(&["RRACGT", "ACGTYY", "ACGT"]);
+        let walk = |p: &str| -> BidirInterval {
+            let mut iv = idx.full_interval();
+            for ch in p.chars() {
+                iv = idx
+                    .extend_right(iv, alphabet::encode_char(ch).unwrap())
+                    .unwrap();
+            }
+            iv
+        };
+        // ACGT: preceded by RR (wild), start, start; followed by end, YY (wild), end.
+        let acgt = walk("ACGT");
+        assert_eq!(acgt.size(), 3);
+        assert_eq!(idx.count_wild_left(&acgt), 1);
+        assert_eq!(idx.count_wild_right(&acgt), 1);
+        assert_eq!(
+            idx.count_right_in(&acgt, SymbolSet::single(alphabet::SENTINEL)),
+            2
+        );
+        assert_eq!(
+            idx.count_left_in(&acgt, SymbolSet::single(alphabet::SENTINEL)),
+            2
+        );
+        // RR sits at a sequence start, followed by A.
+        let rr = walk("RR");
+        assert_eq!(idx.count_wild_left(&rr), 0);
+        assert_eq!(idx.count_wild_right(&rr), 0);
+        // YY sits at a sequence end, preceded by T.
+        let yy = walk("YY");
+        assert_eq!(idx.count_wild_left(&yy), 0);
+        assert_eq!(idx.count_wild_right(&yy), 0);
+        // R alone: first R is at start (not wild left), second R is preceded by R (wild).
+        let r = walk("R");
+        assert_eq!(r.size(), 2);
+        assert_eq!(idx.count_wild_left(&r), 1);
+        assert_eq!(idx.count_wild_right(&r), 1);
+    }
+
+    #[test]
+    fn count_in_partitions_interval_size() {
+        let mut rng = SmallRng::seed_from_u64(42);
+        let seqs: Vec<Vec<u8>> = (0..3)
+            .map(|_| random_seq(&mut rng, 80, 4, true, true))
+            .collect();
+        let idx = build(&seqs, 1, OccEncoding::Bitplane);
+        let sentinel = SymbolSet::single(alphabet::SENTINEL);
+        let mut iv = idx.full_interval();
+        for &c in &[alphabet::A, alphabet::C] {
+            let Some(next) = idx.extend_right(iv, c) else {
+                break;
+            };
+            iv = next;
+            for set in [
+                SymbolSet::WILDCARDS,
+                SymbolSet::BASES,
+                SymbolSet::below(alphabet::G),
+            ] {
+                assert_eq!(
+                    idx.count_right_in(&iv, set) + idx.count_right_in(&iv, set.complement()),
+                    iv.size()
+                );
+                assert_eq!(
+                    idx.count_left_in(&iv, set) + idx.count_left_in(&iv, set.complement()),
+                    iv.size()
+                );
+            }
+            assert_eq!(
+                idx.count_wild_right(&iv)
+                    + idx.count_right_in(&iv, SymbolSet::BASES)
+                    + idx.count_right_in(&iv, sentinel),
+                iv.size()
+            );
+            assert_eq!(idx.count_right_in(&iv, SymbolSet::ALL), iv.size());
+        }
+    }
+
+    #[test]
+    fn children_agree_with_extend_on_random_iupac_indexes() {
+        let mut rng = SmallRng::seed_from_u64(0x000C_411D);
+        for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+            for _ in 0..20 {
+                let nseq = rng.random_range(1..=3);
+                let seqs: Vec<Vec<u8>> = (0..nseq)
+                    .map(|_| {
+                        let len = rng.random_range(5..=100);
+                        random_seq(&mut rng, len, 3, true, true)
+                    })
+                    .collect();
+                let idx = build(&seqs, 1, enc);
+                let mut iv = idx.full_interval();
+                loop {
+                    let right = idx.children_right(&iv);
+                    let left = idx.children_left(&iv);
+                    let mut sum_r = 0;
+                    let mut sum_l = 0;
+                    for c in 0..ALPHABET_SIZE as u8 {
+                        assert_eq!(
+                            right[c as usize],
+                            idx.extend_right(iv, c),
+                            "right child {c}"
+                        );
+                        assert_eq!(left[c as usize], idx.extend_left(iv, c), "left child {c}");
+                        sum_r += right[c as usize].map_or(0, |x| x.size());
+                        sum_l += left[c as usize].map_or(0, |x| x.size());
+                    }
+                    assert_eq!(sum_r, iv.size());
+                    assert_eq!(sum_l, iv.size());
+                    // Sentinel children are occurrences at reference ends/starts.
+                    assert_eq!(
+                        right[0].map_or(0, |x| x.size()),
+                        idx.count_right_in(&iv, SymbolSet::single(alphabet::SENTINEL))
+                    );
+                    assert_eq!(
+                        left[0].map_or(0, |x| x.size()),
+                        idx.count_left_in(&iv, SymbolSet::single(alphabet::SENTINEL))
+                    );
+                    // Descend into a random non-sentinel right child, if any.
+                    let options: Vec<BidirInterval> =
+                        right[1..].iter().flatten().copied().collect();
+                    if options.is_empty() || iv.size() == 1 {
+                        break;
+                    }
+                    iv = options[rng.random_range(0..options.len())];
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compatible_fanout_matches_count_in_compatible_set() {
+        let mut rng = SmallRng::seed_from_u64(7);
+        let seqs: Vec<Vec<u8>> = (0..2)
+            .map(|_| random_seq(&mut rng, 90, 5, true, true))
+            .collect();
+        let idx = build(&seqs, 1, OccEncoding::Bitplane);
+        let mut iv = idx.full_interval();
+        for step in 0..3 {
+            for q in 1..ALPHABET_SIZE as u8 {
+                let set = idx.compatible_set(q);
+                let fan_r: u32 = idx.extend_right_compatible(iv, q).map(|c| c.size()).sum();
+                assert_eq!(
+                    fan_r,
+                    idx.count_right_in(&iv, set),
+                    "right q={q} step={step}"
+                );
+                let fan_l: u32 = idx.extend_left_compatible(iv, q).map(|c| c.size()).sum();
+                assert_eq!(fan_l, idx.count_left_in(&iv, set), "left q={q} step={step}");
+                // The wildcard-only slice of the fan-out is the intended premise query.
+                let wild_only: u32 = idx
+                    .extend_right_compatible(iv, q)
+                    .zip((idx.compatible_set(q)).iter())
+                    .filter(|(_, code)| *code >= alphabet::N)
+                    .map(|(c, _)| c.size())
+                    .sum();
+                assert_eq!(
+                    wild_only,
+                    idx.count_right_in(&iv, set.intersection(SymbolSet::WILDCARDS)),
+                    "wild-only q={q} step={step}"
+                );
+            }
+            let Some(next) = idx.extend_right(iv, alphabet::A) else {
+                break;
+            };
+            iv = next;
+        }
+    }
+
+    #[test]
+    fn exact_dna_fanout_is_exact_but_wild_counts_still_see_reference_wildcards() {
+        let dna = vec![
+            DnaSequence::from_str("ACGTNNACGTRYACGT").unwrap(),
+            DnaSequence::from_str("WACGTM").unwrap(),
+        ];
+        let idx = BidirFmIndex::build_cpu_with::<ExactDna>(&dna, &config(1, OccEncoding::Bitplane))
+            .unwrap();
+        assert!(idx.compatible_set(alphabet::N).is_empty());
+        assert_eq!(
+            idx.compatible_set(alphabet::A),
+            SymbolSet::single(alphabet::A)
+        );
+        let mut iv = idx.full_interval();
+        for &c in &[alphabet::A, alphabet::C, alphabet::G, alphabet::T] {
+            iv = idx.extend_right(iv, c).unwrap();
+        }
+        assert_eq!(iv.size(), 4);
+        // N under ExactDna matches nothing …
+        assert_eq!(idx.extend_right_compatible(iv, alphabet::N).count(), 0);
+        assert_eq!(idx.count_right_in(&iv, idx.compatible_set(alphabet::N)), 0);
+        // … but the reference wildcards are still there to be counted.
+        // ACGT followed by: N, R, end, M → 3 wild; preceded by: start, N, Y, W → 3 wild.
+        assert_eq!(idx.count_wild_right(&iv), 3);
+        assert_eq!(idx.count_wild_left(&iv), 3);
+        let (l, r) = oracle_wild(&idx, &iv, 4);
+        assert_eq!((l, r), (3, 3));
+    }
+
+    #[test]
+    fn wild_counts_survive_serialization() {
+        let mut rng = SmallRng::seed_from_u64(99);
+        let seqs: Vec<Vec<u8>> = (0..2)
+            .map(|_| random_seq(&mut rng, 60, 4, true, true))
+            .collect();
+        let original = build(&seqs, 4, OccEncoding::Bitplane);
+        let restored = BidirFmIndex::from_bytes(&original.to_bytes().unwrap()).unwrap();
+        let mut iv_o = original.full_interval();
+        let mut iv_r = restored.full_interval();
+        for &c in &[alphabet::A, alphabet::C, alphabet::G] {
+            let (Some(o), Some(r)) = (
+                original.extend_right(iv_o, c),
+                restored.extend_right(iv_r, c),
+            ) else {
+                break;
+            };
+            iv_o = o;
+            iv_r = r;
+            assert_eq!(iv_o, iv_r);
+            assert_eq!(
+                original.count_wild_right(&iv_o),
+                restored.count_wild_right(&iv_r)
+            );
+            assert_eq!(
+                original.count_wild_left(&iv_o),
+                restored.count_wild_left(&iv_r)
+            );
+            assert_eq!(
+                original.children_right(&iv_o),
+                restored.children_right(&iv_r)
+            );
+        }
+    }
+}

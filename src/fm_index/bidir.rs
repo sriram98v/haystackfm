@@ -1,4 +1,4 @@
-use crate::alphabet::ALPHABET_SIZE;
+use crate::alphabet::{SymbolSet, ALPHABET_SIZE};
 use crate::fm_index::FmIndex;
 
 /// A paired SA interval for bidirectional FM-index search.
@@ -128,24 +128,164 @@ impl BidirInterval {
             rev_hi: self.rev_lo + offset + new_size,
         })
     }
+
+    // ── Class counts ──────────────────────────────────────────────────────────
+
+    /// Number of occurrences of the matched pattern P that are followed in the text by a
+    /// symbol in `set` (P → P·x with x ∈ set).
+    ///
+    /// Asked of the **reverse** index: the symbol after P in T is the symbol before P^R
+    /// in T^R, i.e. `BWT_rev[rev_lo..rev_hi)`. Costs two occ-block touches regardless of
+    /// how many members `set` has, and never reads the text, so it works on the reverse
+    /// half even though it carries no text.
+    ///
+    /// Equals `Σ_{x ∈ set} extend_right(x).size()`, without materialising the children.
+    pub fn count_right_in(&self, set: SymbolSet, rev: &FmIndex) -> u32 {
+        if self.is_empty() {
+            return 0;
+        }
+        let (r_lo, r_hi) = rev.occ.rank_set_pair(set, self.rev_lo, self.rev_hi);
+        r_hi - r_lo
+    }
+
+    /// Number of occurrences of the matched pattern P that are preceded in the text by a
+    /// symbol in `set` (P → x·P with x ∈ set).
+    ///
+    /// Asked of the **forward** index (`BWT_fwd[fwd_lo..fwd_hi)`). Same cost model as
+    /// [`count_right_in`](Self::count_right_in).
+    pub fn count_left_in(&self, set: SymbolSet, fwd: &FmIndex) -> u32 {
+        if self.is_empty() {
+            return 0;
+        }
+        let (r_lo, r_hi) = fwd.occ.rank_set_pair(set, self.fwd_lo, self.fwd_hi);
+        r_hi - r_lo
+    }
+
+    /// Number of occurrences followed by an ambiguity code (`N` or any degenerate IUPAC
+    /// symbol, codes 5..=15) in the reference. A sentinel neighbour (occurrence at the end
+    /// of a reference) is never wild.
+    ///
+    /// O(1) rank work independent of how many wildcard codes exist: a cursor walk can ask
+    /// this at every step and only fan out over wildcard codes when it is non-zero.
+    pub fn count_wild_right(&self, rev: &FmIndex) -> u32 {
+        self.count_right_in(SymbolSet::WILDCARDS, rev)
+    }
+
+    /// Number of occurrences preceded by an ambiguity code (codes 5..=15) in the reference.
+    /// See [`count_wild_right`](Self::count_wild_right).
+    pub fn count_wild_left(&self, fwd: &FmIndex) -> u32 {
+        self.count_left_in(SymbolSet::WILDCARDS, fwd)
+    }
+
+    // ── All children at once ──────────────────────────────────────────────────
+
+    /// The child interval for every code at once: `children_right(rev)[c] ==
+    /// extend_right(c, rev)` for all `c` in `0..ALPHABET_SIZE`.
+    ///
+    /// Two `OccTable::rank_all` calls (one per border) give every code's rank and the
+    /// prefix sums the paired interval needs, so this costs about the same as a single
+    /// `extend_right` rather than sixteen. Slot 0 is the sentinel child — occurrences of P
+    /// sitting at the very end of a reference; it is a valid interval but extending it
+    /// further would cross a sequence boundary. Child sizes sum to `self.size()`.
+    pub fn children_right(&self, rev: &FmIndex) -> [Option<Self>; ALPHABET_SIZE] {
+        let mut out = [None; ALPHABET_SIZE];
+        if self.is_empty() {
+            return out;
+        }
+        let lo = rev.occ.rank_all(self.rev_lo);
+        let hi = rev.occ.rank_all(self.rev_hi);
+        let mut offset = 0u32;
+        for c in 0..ALPHABET_SIZE {
+            let n = hi[c] - lo[c];
+            if n > 0 {
+                let c_val = rev.c_array.get(c as u8);
+                out[c] = Some(Self {
+                    fwd_lo: self.fwd_lo + offset,
+                    fwd_hi: self.fwd_lo + offset + n,
+                    rev_lo: c_val + lo[c],
+                    rev_hi: c_val + hi[c],
+                });
+            }
+            offset += n;
+        }
+        out
+    }
+
+    /// The child interval for every code at once: `children_left(fwd)[c] ==
+    /// extend_left(c, fwd)` for all `c`. Slot 0 is the sentinel child — occurrences of P
+    /// at the very start of a reference. See [`children_right`](Self::children_right).
+    pub fn children_left(&self, fwd: &FmIndex) -> [Option<Self>; ALPHABET_SIZE] {
+        let mut out = [None; ALPHABET_SIZE];
+        if self.is_empty() {
+            return out;
+        }
+        let lo = fwd.occ.rank_all(self.fwd_lo);
+        let hi = fwd.occ.rank_all(self.fwd_hi);
+        let mut offset = 0u32;
+        for c in 0..ALPHABET_SIZE {
+            let n = hi[c] - lo[c];
+            if n > 0 {
+                let c_val = fwd.c_array.get(c as u8);
+                out[c] = Some(Self {
+                    fwd_lo: c_val + lo[c],
+                    fwd_hi: c_val + hi[c],
+                    rev_lo: self.rev_lo + offset,
+                    rev_hi: self.rev_lo + offset + n,
+                });
+            }
+            offset += n;
+        }
+        out
+    }
+
+    // ── Compatible-symbol fan-out ─────────────────────────────────────────────
+
+    /// Extend right by every reference code the query code `q` matches under the index's
+    /// alphabet (`AlphabetFns::compatible_fn`), yielding one non-empty child per code in
+    /// that order. This is the fan-out `find_smems` / `find_mems` use internally.
+    ///
+    /// Costs one `extend_right` per compatible code; to first ask cheaply whether any such
+    /// child exists, use [`count_right_in`](Self::count_right_in) with the same set
+    /// (`rev.alphabet_fns.compatible_set(q)`).
+    pub fn extend_right_compatible<'a>(
+        &self,
+        q: u8,
+        rev: &'a FmIndex,
+    ) -> impl Iterator<Item = Self> + 'a {
+        let iv = *self;
+        (rev.alphabet_fns.compatible_fn)(q)
+            .iter()
+            .filter_map(move |&c| iv.extend_right(c, rev))
+    }
+
+    /// Extend left by every reference code the query code `q` matches under the index's
+    /// alphabet. See [`extend_right_compatible`](Self::extend_right_compatible).
+    pub fn extend_left_compatible<'a>(
+        &self,
+        q: u8,
+        fwd: &'a FmIndex,
+    ) -> impl Iterator<Item = Self> + 'a {
+        let iv = *self;
+        (fwd.alphabet_fns.compatible_fn)(q)
+            .iter()
+            .filter_map(move |&c| iv.extend_left(c, fwd))
+    }
 }
 
 /// Count the number of characters b < c that appear in BWT[lo..hi) of `index`.
 ///
-/// This is Σ_{b=0}^{c-1} (Occ(b, hi) − Occ(b, lo)).
+/// This is Σ_{b=0}^{c-1} (Occ(b, hi) − Occ(b, lo)), asked as one class rank per border
+/// (`OccTable::rank_set_pair`) rather than `2c` scalar ranks: the alphabet has 16 codes, so
+/// extending by a high IUPAC code used to cost up to 30 extra rank calls per step.
 fn count_smaller_than(c: u8, lo: u32, hi: u32, index: &FmIndex) -> u32 {
-    let c_idx = c as usize;
-    // Only iterate over alphabet characters that are actually < c.
-    // ALPHABET_SIZE is 6 ($ A C G T N), so c_idx is at most 5.
-    (0..c_idx.min(ALPHABET_SIZE))
-        .map(|b| index.occ.rank(b as u8, hi) - index.occ.rank(b as u8, lo))
-        .sum()
+    let (r_lo, r_hi) = index.occ.rank_set_pair(SymbolSet::below(c), lo, hi);
+    r_hi - r_lo
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alphabet::{encode_char, DnaSequence};
+    use crate::alphabet::{encode_char, DnaSequence, SymbolSet, A, C, G, N, SENTINEL, T};
     use crate::fm_index::{FmIndex, FmIndexConfig};
 
     fn make_fwd_rev(s: &str) -> (FmIndex, FmIndex) {
@@ -255,6 +395,138 @@ mod tests {
                 iv = next;
             } else {
                 break;
+            }
+        }
+    }
+
+    // ── Class counts and children ─────────────────────────────────────────────
+
+    const IUPAC_TEXT: &str = "ACGTNRACGTYYACGTMWSACGTBDHVACGTKN";
+
+    #[test]
+    fn children_right_equal_extend_right_for_every_code() {
+        let (fwd, rev) = make_fwd_rev(IUPAC_TEXT);
+        let full = BidirInterval::full(fwd.text_len);
+        let a = full.extend_right(A, &rev).unwrap();
+        let n = full.extend_right(N, &rev).unwrap();
+        let acgt = [A, C, G, T]
+            .iter()
+            .fold(full, |iv, &c| iv.extend_right(c, &rev).unwrap());
+        for iv in [full, a, n, acgt] {
+            let children = iv.children_right(&rev);
+            for c in 0..ALPHABET_SIZE as u8 {
+                assert_eq!(
+                    children[c as usize],
+                    iv.extend_right(c, &rev),
+                    "children_right[{c}] != extend_right({c}) from {iv:?}"
+                );
+            }
+            let total: u32 = children.iter().flatten().map(|c| c.size()).sum();
+            assert_eq!(total, iv.size(), "children sizes must sum to parent size");
+        }
+    }
+
+    #[test]
+    fn children_left_equal_extend_left_for_every_code() {
+        let (fwd, _rev) = make_fwd_rev(IUPAC_TEXT);
+        let full = BidirInterval::full(fwd.text_len);
+        let t = full.extend_left(T, &fwd).unwrap();
+        let n = full.extend_left(N, &fwd).unwrap();
+        let acgt = [T, G, C, A]
+            .iter()
+            .fold(full, |iv, &c| iv.extend_left(c, &fwd).unwrap());
+        for iv in [full, t, n, acgt] {
+            let children = iv.children_left(&fwd);
+            for c in 0..ALPHABET_SIZE as u8 {
+                assert_eq!(
+                    children[c as usize],
+                    iv.extend_left(c, &fwd),
+                    "children_left[{c}] != extend_left({c}) from {iv:?}"
+                );
+            }
+            let total: u32 = children.iter().flatten().map(|c| c.size()).sum();
+            assert_eq!(total, iv.size(), "children sizes must sum to parent size");
+        }
+    }
+
+    #[test]
+    fn count_in_all_is_size_and_empty_is_zero() {
+        let (fwd, rev) = make_fwd_rev(IUPAC_TEXT);
+        let full = BidirInterval::full(fwd.text_len);
+        let acgt = [A, C, G, T]
+            .iter()
+            .fold(full, |iv, &c| iv.extend_right(c, &rev).unwrap());
+        for iv in [full, acgt] {
+            assert_eq!(iv.count_right_in(SymbolSet::ALL, &rev), iv.size());
+            assert_eq!(iv.count_left_in(SymbolSet::ALL, &fwd), iv.size());
+            assert_eq!(iv.count_right_in(SymbolSet::EMPTY, &rev), 0);
+            assert_eq!(iv.count_left_in(SymbolSet::EMPTY, &fwd), 0);
+            // Partition: wildcards + bases + sentinel == everything.
+            let sentinel = SymbolSet::single(SENTINEL);
+            assert_eq!(
+                iv.count_wild_right(&rev)
+                    + iv.count_right_in(SymbolSet::BASES, &rev)
+                    + iv.count_right_in(sentinel, &rev),
+                iv.size()
+            );
+            assert_eq!(
+                iv.count_wild_left(&fwd)
+                    + iv.count_left_in(SymbolSet::BASES, &fwd)
+                    + iv.count_left_in(sentinel, &fwd),
+                iv.size()
+            );
+        }
+        // "ACGT" occurs 5 times; followed by N, Y, M, B, K → all five wild on the right.
+        assert_eq!(acgt.size(), 5);
+        assert_eq!(acgt.count_wild_right(&rev), 5);
+        // Preceded by: sequence start, R, Y, S, V → four wild on the left.
+        assert_eq!(acgt.count_wild_left(&fwd), 4);
+    }
+
+    #[test]
+    fn count_wild_is_zero_on_pure_acgt() {
+        let (fwd, rev) = make_fwd_rev("ACGTACGTTTGCA");
+        let mut iv = BidirInterval::full(fwd.text_len);
+        assert_eq!(iv.count_wild_right(&rev), 0);
+        assert_eq!(iv.count_wild_left(&fwd), 0);
+        for &c in &[A, C, G] {
+            iv = iv.extend_right(c, &rev).unwrap();
+            assert_eq!(iv.count_wild_right(&rev), 0);
+            assert_eq!(iv.count_wild_left(&fwd), 0);
+        }
+    }
+
+    #[test]
+    fn empty_interval_counts_zero_and_has_no_children() {
+        let (fwd, rev) = make_fwd_rev(IUPAC_TEXT);
+        let empty = BidirInterval {
+            fwd_lo: 3,
+            fwd_hi: 3,
+            rev_lo: 3,
+            rev_hi: 3,
+        };
+        assert_eq!(empty.count_wild_right(&rev), 0);
+        assert_eq!(empty.count_wild_left(&fwd), 0);
+        assert_eq!(empty.count_right_in(SymbolSet::ALL, &rev), 0);
+        assert!(empty.children_right(&rev).iter().all(Option::is_none));
+        assert!(empty.children_left(&fwd).iter().all(Option::is_none));
+        assert_eq!(empty.extend_right_compatible(N, &rev).count(), 0);
+    }
+
+    #[test]
+    fn compatible_fanout_matches_count_in_compatible_set() {
+        let (fwd, rev) = make_fwd_rev(IUPAC_TEXT);
+        let full = BidirInterval::full(fwd.text_len);
+        let acg = [A, C, G]
+            .iter()
+            .fold(full, |iv, &c| iv.extend_right(c, &rev).unwrap());
+        for iv in [full, acg] {
+            for q in 1..ALPHABET_SIZE as u8 {
+                let set = rev.alphabet_fns.compatible_set(q);
+                let fan: u32 = iv.extend_right_compatible(q, &rev).map(|c| c.size()).sum();
+                assert_eq!(fan, iv.count_right_in(set, &rev), "right q={q}");
+                let fan: u32 = iv.extend_left_compatible(q, &fwd).map(|c| c.size()).sum();
+                assert_eq!(fan, iv.count_left_in(set, &fwd), "left q={q}");
             }
         }
     }
