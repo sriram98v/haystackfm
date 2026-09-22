@@ -1,6 +1,7 @@
 use haystackfm::alphabet::encode_char;
 use haystackfm::{
-    BidirFmIndex, BidirInterval, DnaSequence, FmIndex, FmIndexConfig, OccEncoding, SeqId,
+    BidirFmIndex, BidirInterval, DnaSequence, FmIndex, FmIndexConfig, FwdInterval, OccEncoding,
+    SeqId,
 };
 /// Property-based correctness tests for the FM-index.
 ///
@@ -351,6 +352,64 @@ proptest! {
                 );
             }
         }
+    }
+
+    /// The parent chain of a forward interval (via the LCP array) equals the oracle that
+    /// backward-searches every shorter prefix and takes the first strictly larger interval.
+    #[test]
+    fn bidir_parent_chain_matches_backward_search(
+        texts in prop::collection::vec(iupac_string(150), 1..=4),
+        pattern in dna_string(10),
+        sa_sample_rate in 1usize..=32,
+        onehot in any::<bool>(),
+    ) {
+        let idx = build_bidir(&texts, sa_sample_rate, onehot);
+        let pat = encode_pat(&pattern);
+        let fwd_of = |p: &[u8]| -> Option<FwdInterval> {
+            p.iter().rev().try_fold(FwdInterval::full(idx.text_len()), |iv, &c| {
+                idx.extend_left_fwd(&iv, c)
+            })
+        };
+        let mut iv = idx.full_interval();
+        for &c in &pat {
+            let Some(next) = idx.extend_right(iv, c) else { break };
+            iv = next;
+        }
+        let d = iv.len as usize;
+        let mut cur = iv.fwd();
+        prop_assert_eq!(Some(cur), fwd_of(&pat[..d]));
+        loop {
+            let want = (0..cur.len as usize)
+                .rev()
+                .map(|k| fwd_of(&pat[..k]).unwrap())
+                .find(|p| p.size() > cur.size());
+            let got = idx.parent_fwd(&cur);
+            prop_assert!(got.is_ok(), "parent errored: {:?} | pattern='{}' texts={:?}", got.err(), pattern, texts);
+            let got = got.unwrap();
+            prop_assert_eq!(got, want, "parent at depth {} | pattern='{}' texts={:?}", cur.len, pattern, texts);
+            match got {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+    }
+
+    /// A k-mer seed from the lookup tables equals the cursor reached by walking the k-mer.
+    #[test]
+    fn bidir_lookup_interval_matches_walk(
+        texts in prop::collection::vec(iupac_string(120), 1..=3),
+        kmer in prop::collection::vec((0usize..4).prop_map(|i| ['A', 'C', 'G', 'T'][i]), 4)
+            .prop_map(|chars| chars.into_iter().collect::<String>()),
+    ) {
+        let seqs: Vec<DnaSequence> = texts.iter().map(|s| DnaSequence::from_str(s).unwrap()).collect();
+        let idx = BidirFmIndex::build_cpu(
+            &seqs,
+            &FmIndexConfig { sa_sample_rate: 2, use_gpu: false, lookup_depth: 4, ..Default::default() },
+        )
+        .unwrap();
+        let pat = encode_pat(&kmer);
+        let want = pat.iter().try_fold(idx.full_interval(), |iv, &c| idx.extend_right(iv, c));
+        prop_assert_eq!(idx.lookup_interval(&pat), want, "kmer='{}' texts={:?}", kmer, texts);
     }
 }
 

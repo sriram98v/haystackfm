@@ -38,6 +38,23 @@ impl FmIndex {
             .collect()
     }
 
+    /// Locate the suffix-array rows `lo..hi`: `(sequence id, offset)` per row, in row
+    /// order. The forward-only counterpart of
+    /// [`BidirFmIndex::locate_interval`](crate::BidirFmIndex::locate_interval); time is
+    /// O((hi − lo) × sample_rate).
+    pub fn locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
+        let rows: Vec<u32> = (lo..hi).collect();
+        let mut text_positions = Vec::with_capacity(rows.len());
+        self.resolve_sa_batch(&rows, &mut text_positions);
+        text_positions
+            .into_iter()
+            .map(|text_pos| {
+                self.map_position(text_pos)
+                    .expect("resolved SA position must be within text bounds")
+            })
+            .collect()
+    }
+
     /// Locate all occurrences of a pattern, returning raw text positions.
     ///
     /// Cheaper than [`Self::locate`] when sequence header strings are not needed — avoids
@@ -279,6 +296,9 @@ impl FmIndex {
     /// Resolve a BWT position to a text position using the sampled SA.
     ///
     /// Walk backwards through the BWT via LF-mapping until hitting a sampled position.
+    /// The scalar reference for [`resolve_sa_batch`](Self::resolve_sa_batch), which every
+    /// production locate path now uses; kept as the oracle in its tests.
+    #[cfg(test)]
     pub(crate) fn resolve_sa(&self, mut i: u32) -> u32 {
         let mut steps = 0u32;
         loop {

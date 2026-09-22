@@ -26,6 +26,15 @@ Before 1.0, a breaking change bumps the **minor** version.
 - Serialized indexes now start with a 4-byte format marker (`"HFM\x01"`). Legacy blobs
   without it still load, with `has_lcp() == false`.
 - `FmIndexError::LcpNotBuilt`, `PatternTooLong`, `InvalidContraction`.
+- `FwdInterval` (`BidirInterval::fwd()`): a forward-only row range with `extend_left`
+  (an LF step, valid on any sub-range of an interval), `parent` (the nearest suffix-tree
+  ancestor `P[..d']`, `d' = max(LCP[lo], LCP[hi])`, widened over the LCP array) and
+  `locate`. `BidirFmIndex::extend_left_fwd` / `parent_fwd` / `locate_fwd` and
+  `fwd()` / `rev()` accessors; `FmIndex::locate_rows(lo, hi)`. Together with
+  `contract_left` these support sliding-window MEM sweeps whose ancestor MEMs are read off
+  a `parent` walk instead of re-extended.
+- `BidirFmIndex::lookup_interval(kmer)` / `lookup_depth()`: seed a cursor for a
+  `lookup_depth`-mer from the k-mer tables of both halves, skipping that many extensions.
 - `SymbolSet`: a 16-bit set of alphabet codes with `EMPTY`, `ALL`, `BASES`, `WILDCARDS`
   (codes 5..=15), `NON_SENTINEL`, `single`, `below`, `from_codes`, set algebra and
   iteration. `AlphabetFns::compatible_set(q)` returns the codes `q` matches under that
@@ -53,6 +62,9 @@ Before 1.0, a breaking change bumps the **minor** version.
 ### Changed
 - **Breaking.** `BidirInterval` gains a `len: u32` field (the matched pattern length,
   maintained by every extension and contraction); struct literals must supply it.
+- `BidirFmIndex::build_cpu*` now builds the reverse half with the configured
+  `lookup_depth` (previously always 0) so `lookup_interval` can seed both halves; lookup
+  memory doubles when the table is enabled.
 - **Breaking.** `FmIndexConfig` gains `build_lcp: bool` (default `true`); exhaustive
   struct literals must supply it. CPU-built indexes grow by ~2.7 bytes per base on the
   forward half unless it is set to `false`. GPU construction never builds the LCP.
