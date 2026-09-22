@@ -1,4 +1,5 @@
 pub mod cpu;
+pub mod select;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -75,6 +76,10 @@ pub struct OccTable {
     #[serde(default)]
     encoding: OccEncoding,
     pub text_len: u32,
+    /// Select hints (see [`select`](Self::select)): derived from `superblock_checkpoints`,
+    /// so skipped on disk and rebuilt by `from_parts` / `build_select_hints`.
+    #[serde(skip)]
+    select_hints: Vec<u32>,
 }
 
 /// Sentinel lane value meaning "symbol never appears in this BWT".
@@ -169,7 +174,7 @@ impl OccTable {
                     .copy_from_slice(&word.to_ne_bytes());
             }
         }
-        Self {
+        let mut table = Self {
             num_lanes,
             num_planes,
             symbol_to_lane,
@@ -179,7 +184,10 @@ impl OccTable {
             block_stride,
             encoding,
             text_len,
-        }
+            select_hints: Vec::new(),
+        };
+        table.build_select_hints();
+        table
     }
 
     // Unaligned pointer reads instead of `slice[..].try_into().unwrap()`: the safe form

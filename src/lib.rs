@@ -46,6 +46,7 @@ pub mod bwt;
 pub mod c_array;
 pub mod error;
 pub mod fm_index;
+pub mod lcp;
 pub mod occ;
 mod prefetch;
 pub mod suffix_array;

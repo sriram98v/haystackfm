@@ -126,6 +126,7 @@ mod tests {
             lookup_depth: depth,
             build_threads: 1,
             occ_encoding: Default::default(),
+            build_lcp: true,
         };
         FmIndex::build_cpu(&[seq], &config).unwrap()
     }
@@ -138,6 +139,7 @@ mod tests {
             lookup_depth: depth,
             build_threads: 1,
             occ_encoding: Default::default(),
+            build_lcp: true,
         };
         FmIndex::build_cpu_with::<ExactDna>(&[seq], &config).unwrap()
     }
@@ -158,6 +160,7 @@ mod tests {
                 lookup_depth: 0,
                 build_threads: 1,
                 occ_encoding: Default::default(),
+                build_lcp: true,
             };
             FmIndex::build_cpu(&[seq], &cfg).unwrap()
         };
@@ -185,6 +188,7 @@ mod tests {
                 lookup_depth: 0,
                 build_threads: 1,
                 occ_encoding: Default::default(),
+                build_lcp: true,
             };
             FmIndex::build_cpu(&[seq], &cfg).unwrap()
         };
@@ -258,6 +262,7 @@ mod tests {
                     lookup_depth: 0,
                     build_threads: 1,
                     occ_encoding: Default::default(),
+                    build_lcp: true,
                 },
             )
             .unwrap()
@@ -288,6 +293,7 @@ mod tests {
                     lookup_depth: 0,
                     build_threads: 1,
                     occ_encoding: Default::default(),
+                    build_lcp: true,
                 },
             )
             .unwrap()

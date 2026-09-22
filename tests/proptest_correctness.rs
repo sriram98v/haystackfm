@@ -321,6 +321,37 @@ proptest! {
         prop_assert_eq!(sum_right, iv.size());
         prop_assert_eq!(sum_left, iv.size());
     }
+
+    /// `contract_left` is the exact inverse of `extend_left` for every code (sentinel and
+    /// wildcards included) at every step of a right walk, on multi-sequence IUPAC
+    /// references, at every sampling rate and both occ encodings.
+    #[test]
+    fn bidir_contract_left_inverts_extend_left(
+        texts in prop::collection::vec(iupac_string(150), 1..=4),
+        pattern in dna_string(8),
+        sa_sample_rate in 1usize..=32,
+        onehot in any::<bool>(),
+    ) {
+        let idx = build_bidir(&texts, sa_sample_rate, onehot);
+        prop_assert!(idx.has_lcp());
+        let pat = encode_pat(&pattern);
+        let mut iv = idx.full_interval();
+        for (k, &c) in pat.iter().enumerate() {
+            let Some(next) = idx.extend_right(iv, c) else { break };
+            iv = next;
+            prop_assert_eq!(iv.len as usize, k + 1);
+            for code in 0..16u8 {
+                let Some(ext) = idx.extend_left(iv, code) else { continue };
+                let back = idx.contract_left(&ext, code);
+                prop_assert!(back.is_ok(), "contract_left({}) errored: {:?} | pattern='{}' step={} texts={:?}",
+                    code, back.err(), pattern, k, texts);
+                prop_assert_eq!(
+                    back.unwrap(), iv,
+                    "contract_left({}) | pattern='{}' step={} texts={:?}", code, pattern, k, texts
+                );
+            }
+        }
+    }
 }
 
 // ── Deterministic edge-case tests ─────────────────────────────────────────────

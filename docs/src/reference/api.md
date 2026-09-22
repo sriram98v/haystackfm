@@ -13,7 +13,8 @@ comments, including:
   base accessors `sequence`, `sequence_by_header`.
 - `BidirFmIndex` — `build_cpu`, `build_cpu_with`, `find_mems`, `find_smems`, the GPU
   variants, and the same id/header and base accessors. The cursor API: `full_interval`,
-  `extend_right` / `extend_left`, `children_right` / `children_left`,
+  `extend_right` / `extend_left`, `contract_left` (with `has_lcp`),
+  `children_right` / `children_left`,
   `extend_right_compatible` / `extend_left_compatible`, the class counts
   `count_wild_right` / `count_wild_left` and `count_right_in` / `count_left_in`,
   `compatible_set`, `count_interval`, `locate_interval`.

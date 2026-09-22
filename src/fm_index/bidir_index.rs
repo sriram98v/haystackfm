@@ -74,6 +74,9 @@ impl BidirFmIndex {
                 lookup_depth: 0,
                 build_threads: config.build_threads,
                 occ_encoding: config.occ_encoding,
+                // Only `contract_left` exists today and it needs the forward LCP; the
+                // reverse half's LCP would serve a future `contract_right`.
+                build_lcp: false,
             },
         )?;
         // The reverse index's text is just the reversal of the forward one and is never
@@ -148,6 +151,20 @@ impl BidirFmIndex {
     /// Returns `None` when cP has no occurrences in the text.
     pub fn extend_left(&self, iv: BidirInterval, c: u8) -> Option<BidirInterval> {
         iv.extend_left(c, &self.fwd)
+    }
+
+    /// Contract the pattern on the left (cP → P): the inverse of
+    /// [`extend_left`](Self::extend_left). `iv` must be the interval of `cP` and `c` the
+    /// symbol it was extended by. Requires the forward half's LCP array
+    /// (`FmIndexConfig::build_lcp`, CPU construction); see
+    /// [`BidirInterval::contract_left`] for cost and errors.
+    pub fn contract_left(&self, iv: &BidirInterval, c: u8) -> Result<BidirInterval, FmIndexError> {
+        iv.contract_left(c, &self.fwd)
+    }
+
+    /// True when cursor contraction is available (the forward half carries an LCP array).
+    pub fn has_lcp(&self) -> bool {
+        self.fwd.has_lcp()
     }
 
     // ── Wildcard-aware cursor operations ──────────────────────────────────────

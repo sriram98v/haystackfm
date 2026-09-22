@@ -9,6 +9,23 @@ Before 1.0, a breaking change bumps the **minor** version.
 ## [Unreleased]
 
 ### Added
+- `BidirInterval::contract_left` / `BidirFmIndex::contract_left`: the inverse of
+  `extend_left` (cP → P) without re-walking. One `OccTable::select` on the forward half
+  gives ψ of the interval's first row, the forward LCP array widens that sub-range to the
+  full interval of P (O(1) when every occurrence of P is preceded by c, O(log n) otherwise
+  via block minima + a sparse table), and the existing class rank recovers the reverse
+  interval. Works across sentinel-preceded occurrences and IUPAC reference codes.
+  `has_lcp()` reports whether contraction is available.
+- `LcpArray` (`src/lcp.rs`): Kasai LCP over the SA rows stored capped at `u16::MAX`, with
+  `psv_below` / `nsv_below`. Built during CPU construction while the full suffix array is
+  resident; `FmIndexConfig::build_lcp` (default `true`) controls it. Forward half only;
+  the reverse half of a `BidirFmIndex` never builds one.
+- `OccTable::select(c, r)`: position of the r-th occurrence of `c` in the BWT, from the
+  existing superblock/block/lane-mask layout plus a small hint array (rebuilt on load,
+  not serialized).
+- Serialized indexes now start with a 4-byte format marker (`"HFM\x01"`). Legacy blobs
+  without it still load, with `has_lcp() == false`.
+- `FmIndexError::LcpNotBuilt`, `PatternTooLong`, `InvalidContraction`.
 - `SymbolSet`: a 16-bit set of alphabet codes with `EMPTY`, `ALL`, `BASES`, `WILDCARDS`
   (codes 5..=15), `NON_SENTINEL`, `single`, `below`, `from_codes`, set algebra and
   iteration. `AlphabetFns::compatible_set(q)` returns the codes `q` matches under that
@@ -34,6 +51,11 @@ Before 1.0, a breaking change bumps the **minor** version.
     alphabet; `BidirFmIndex::compatible_set` exposes that alphabet's match set.
 
 ### Changed
+- **Breaking.** `BidirInterval` gains a `len: u32` field (the matched pattern length,
+  maintained by every extension and contraction); struct literals must supply it.
+- **Breaking.** `FmIndexConfig` gains `build_lcp: bool` (default `true`); exhaustive
+  struct literals must supply it. CPU-built indexes grow by ~2.7 bytes per base on the
+  forward half unless it is set to `false`. GPU construction never builds the LCP.
 - `BidirInterval::extend_right` / `extend_left` compute the paired-interval offset with a
   single class rank per border instead of one scalar rank per smaller symbol. Results are
   unchanged; extending by a high IUPAC code no longer costs up to 30 extra rank calls.

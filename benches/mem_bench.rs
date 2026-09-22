@@ -20,6 +20,7 @@ fn build_bidir(corpus: &str) -> BidirFmIndex {
     let config = FmIndexConfig {
         sa_sample_rate: 32,
         use_gpu: false,
+        ..Default::default()
     };
     BidirFmIndex::build_cpu(&[seq], &config).unwrap()
 }
