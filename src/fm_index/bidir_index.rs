@@ -1,6 +1,7 @@
 use crate::alphabet::{self, Alphabet, DnaSequence, IupacDna, SymbolSet, ALPHABET_SIZE};
 use crate::error::FmIndexError;
 use crate::fm_index::bidir::BidirInterval;
+use crate::fm_index::fwd_interval::FwdInterval;
 use crate::fm_index::seq_id::SeqId;
 use crate::fm_index::{FmIndex, FmIndexConfig};
 
@@ -71,7 +72,9 @@ impl BidirFmIndex {
             &FmIndexConfig {
                 sa_sample_rate: config.sa_sample_rate,
                 use_gpu: false,
-                lookup_depth: 0,
+                // Same depth as the forward half so `lookup_interval` can seed both halves
+                // of a cursor from a k-mer.
+                lookup_depth: config.lookup_depth,
                 build_threads: config.build_threads,
                 occ_encoding: config.occ_encoding,
                 // Only `contract_left` exists today and it needs the forward LCP; the
@@ -167,6 +170,72 @@ impl BidirFmIndex {
         self.fwd.has_lcp()
     }
 
+    // ── Forward-only intervals ────────────────────────────────────────────────
+
+    /// The forward half (index of T). `BidirInterval::fwd_*` / [`FwdInterval`] rows refer
+    /// to its suffix array.
+    pub fn fwd(&self) -> &FmIndex {
+        &self.fwd
+    }
+
+    /// The reverse half (index of T^R). Its text is not retained.
+    pub fn rev(&self) -> &FmIndex {
+        &self.rev
+    }
+
+    /// Nearest proper ancestor of a forward interval: see [`FwdInterval::parent`].
+    pub fn parent_fwd(&self, iv: &FwdInterval) -> Result<Option<FwdInterval>, FmIndexError> {
+        iv.parent(&self.fwd)
+    }
+
+    /// LF step on a forward row range (any sub-range of an interval): see
+    /// [`FwdInterval::extend_left`].
+    pub fn extend_left_fwd(&self, iv: &FwdInterval, c: u8) -> Option<FwdInterval> {
+        iv.extend_left(c, &self.fwd)
+    }
+
+    /// Locate every row of a forward interval: see [`FwdInterval::locate`].
+    pub fn locate_fwd(&self, iv: &FwdInterval) -> Vec<(SeqId, u32)> {
+        iv.locate(&self.fwd)
+    }
+
+    // ── k-mer seeding ─────────────────────────────────────────────────────────
+
+    /// Depth of the k-mer lookup tables (`FmIndexConfig::lookup_depth`), or 0 when the
+    /// index was built without them (including every GPU-built index).
+    pub fn lookup_depth(&self) -> u32 {
+        match (&self.fwd.lookup, &self.rev.lookup) {
+            (Some(f), Some(r)) if f.depth == r.depth => f.depth,
+            _ => 0,
+        }
+    }
+
+    /// The cursor of `kmer` straight from the lookup tables, skipping `lookup_depth()`
+    /// extensions: the forward table gives the forward interval, the reverse table (queried
+    /// with the reversed k-mer) the reverse one. `None` when no tables were built, when
+    /// `kmer.len() != lookup_depth()`, when it contains a non-core symbol (ambiguity codes
+    /// are not tabulated), or when it does not occur.
+    pub fn lookup_interval(&self, kmer: &[u8]) -> Option<BidirInterval> {
+        let depth = self.lookup_depth();
+        if depth == 0 || kmer.len() != depth as usize {
+            return None;
+        }
+        let (fwd_lo, fwd_hi) = self.fwd.lookup.as_ref()?.get(kmer)?;
+        if fwd_lo >= fwd_hi {
+            return None;
+        }
+        let reversed: Vec<u8> = kmer.iter().rev().copied().collect();
+        let (rev_lo, rev_hi) = self.rev.lookup.as_ref()?.get(&reversed)?;
+        debug_assert_eq!(fwd_hi - fwd_lo, rev_hi - rev_lo);
+        Some(BidirInterval {
+            fwd_lo,
+            fwd_hi,
+            rev_lo,
+            rev_hi,
+            len: depth,
+        })
+    }
+
     // ── Wildcard-aware cursor operations ──────────────────────────────────────
 
     /// Number of occurrences of `iv`'s pattern followed in the reference by an ambiguity
@@ -254,14 +323,7 @@ impl BidirFmIndex {
     /// FASTA header with [`seq_header`](Self::seq_header).
     /// Uses the forward SA samples; time is O(occ × sample_rate).
     pub fn locate_interval(&self, iv: &BidirInterval) -> Vec<(SeqId, u32)> {
-        (iv.fwd_lo..iv.fwd_hi)
-            .map(|i| {
-                let text_pos = self.fwd.resolve_sa(i);
-                self.fwd
-                    .map_position(text_pos)
-                    .expect("resolved SA position must be within text bounds")
-            })
-            .collect()
+        self.fwd.locate_rows(iv.fwd_lo, iv.fwd_hi)
     }
 
     /// Total length of the indexed text (including sentinels).

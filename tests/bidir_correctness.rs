@@ -979,4 +979,284 @@ mod wild {
             ));
         }
     }
+
+    /// Forward-only interval operations (`FwdInterval`) and k-mer seeding.
+    mod fwd {
+        use super::*;
+        use haystackfm::{FmIndexError, FwdInterval};
+
+        fn encode(s: &str) -> Vec<u8> {
+            s.chars()
+                .map(|ch| alphabet::encode_char(ch).unwrap())
+                .collect()
+        }
+
+        fn right_walk(idx: &BidirFmIndex, pat: &[u8]) -> Option<BidirInterval> {
+            pat.iter()
+                .try_fold(idx.full_interval(), |iv, &c| idx.extend_right(iv, c))
+        }
+
+        /// Interval of `pat` on the forward half by backward search.
+        fn fwd_interval(idx: &BidirFmIndex, pat: &[u8]) -> Option<FwdInterval> {
+            pat.iter()
+                .rev()
+                .try_fold(FwdInterval::full(idx.text_len()), |iv, &c| {
+                    idx.extend_left_fwd(&iv, c)
+                })
+        }
+
+        fn oracle_parent(idx: &BidirFmIndex, pat: &[u8], iv: FwdInterval) -> Option<FwdInterval> {
+            (0..iv.len as usize)
+                .rev()
+                .map(|d| fwd_interval(idx, &pat[..d]).unwrap())
+                .find(|p| p.size() > iv.size())
+        }
+
+        fn check_parent_chain(idx: &BidirFmIndex, pat: &[u8], ctx: &str) {
+            let mut iv = right_walk(idx, pat).unwrap().fwd();
+            assert_eq!(iv, fwd_interval(idx, pat).unwrap(), "{ctx}");
+            loop {
+                let want = oracle_parent(idx, pat, iv);
+                let got = idx.parent_fwd(&iv).unwrap();
+                assert_eq!(got, want, "{ctx}: parent at depth {}", iv.len);
+                match got {
+                    Some(p) => iv = p,
+                    None => break,
+                }
+            }
+        }
+
+        #[test]
+        fn fwd_extend_left_matches_bidir_forward_half() {
+            let mut rng = SmallRng::seed_from_u64(11);
+            for _ in 0..20 {
+                let seqs: Vec<Vec<u8>> = (0..rng.random_range(1..=3))
+                    .map(|_| {
+                        let len = rng.random_range(8..=100);
+                        random_seq(&mut rng, len, 2, false, true)
+                    })
+                    .collect();
+                let idx = build(&seqs, 1, OccEncoding::Bitplane);
+                for seq in &seqs {
+                    let plen = rng.random_range(1..=8.min(seq.len()));
+                    let start = rng.random_range(0..=seq.len() - plen);
+                    let pat = &seq[start..start + plen];
+                    let iv = right_walk(&idx, pat).unwrap();
+                    for c in 0..ALPHABET_SIZE as u8 {
+                        let bi = idx.extend_left(iv, c).map(|x| x.fwd());
+                        let fw = idx.extend_left_fwd(&iv.fwd(), c);
+                        assert_eq!(bi, fw, "pat={} c={c}", show(pat));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn parent_chain_matches_oracle_on_random_iupac_multi_seq() {
+            let mut rng = SmallRng::seed_from_u64(0xA11CE);
+            for &rate in &[1u32, 32] {
+                for &enc in &[OccEncoding::Bitplane, OccEncoding::OneHot] {
+                    for iter in 0..25 {
+                        let seqs: Vec<Vec<u8>> = (0..rng.random_range(1..=4))
+                            .map(|_| {
+                                let len = rng.random_range(5..=120);
+                                let runs = rng.random_range(0..=3);
+                                random_seq(&mut rng, len, runs, iter % 3 == 0, iter % 4 == 0)
+                            })
+                            .collect();
+                        let idx = build(&seqs, rate, enc);
+                        for seq in &seqs {
+                            for _ in 0..5 {
+                                let plen = rng.random_range(1..=14.min(seq.len()));
+                                let start = rng.random_range(0..=seq.len() - plen);
+                                let pat = &seq[start..start + plen];
+                                let ctx = format!("rate={rate} enc={enc:?} pat={}", show(pat));
+                                check_parent_chain(&idx, pat, &ctx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn parent_chain_on_repeats_and_identical_sequences() {
+            let idx = build_str(&["ACGTACGT", "ACGTACGT", "ACGTACGT", "TACGTACG"]);
+            let text = encode("ACGTACGT");
+            for start in 0..text.len() {
+                for end in start + 1..=text.len() {
+                    check_parent_chain(&idx, &text[start..end], "identical");
+                }
+            }
+            let long_a = "A".repeat(200);
+            let idx = build_str(&[&long_a, &long_a, "AAAAT"]);
+            check_parent_chain(&idx, &vec![alphabet::A; 200], "A200");
+            check_parent_chain(&idx, &encode("AAAAT"), "AAAAT");
+            let tandem = "ACGT".repeat(100);
+            let idx = build_str(&[&tandem]);
+            for start in 0..4 {
+                check_parent_chain(&idx, &encode(&tandem[start..]), "tandem");
+            }
+        }
+
+        #[test]
+        fn parent_pieces_are_rows_diverging_at_parent_depth() {
+            // Rows of the parent outside the child share exactly `parent.len` symbols with
+            // the child's string and differ at the next one.
+            let idx = build_str(&["ACGTACGTTTGACCAGGTACGTACGAAATTTCCCGGGACGTAC", "GTACGAAT"]);
+            let seq0 = idx.sequence(haystackfm::SeqId::new(0)).unwrap().to_vec();
+            for start in 0..seq0.len() {
+                for end in start + 1..=seq0.len().min(start + 10) {
+                    let pat = &seq0[start..end];
+                    let child = right_walk(&idx, pat).unwrap().fwd();
+                    let Some(parent) = idx.parent_fwd(&child).unwrap() else {
+                        continue;
+                    };
+                    let d = parent.len as usize;
+                    for piece in [
+                        FwdInterval {
+                            lo: parent.lo,
+                            hi: child.lo,
+                            len: parent.len,
+                        },
+                        FwdInterval {
+                            lo: child.hi,
+                            hi: parent.hi,
+                            len: parent.len,
+                        },
+                    ] {
+                        for (id, off) in idx.locate_fwd(&piece) {
+                            let s = idx.sequence(id).unwrap();
+                            let off = off as usize;
+                            assert_eq!(&s[off..off + d], &pat[..d]);
+                            assert_ne!(
+                                s.get(off + d),
+                                pat.get(d),
+                                "piece row must diverge at depth {d}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn locate_rows_matches_locate_interval_and_pattern_locate() {
+            // ACGT-only references: `FmIndex::locate` is IUPAC-aware and would otherwise
+            // also report reference wildcards the exact cursor walk excludes.
+            let seqs = vec![encode("ACGTAGACGTCCACGT"), encode("TTACGTACGTAA")];
+            let idx = build(&seqs, 4, OccEncoding::Bitplane);
+            for pat in ["ACGT", "A", "TA", "CGT"] {
+                let pat = encode(pat);
+                let iv = right_walk(&idx, &pat).unwrap();
+                let mut a = idx.locate_interval(&iv);
+                let mut b = idx.locate_fwd(&iv.fwd());
+                let mut c = idx.fwd().locate_rows(iv.fwd_lo, iv.fwd_hi);
+                let mut d = idx.fwd().locate(&pat);
+                for v in [&mut a, &mut b, &mut c, &mut d] {
+                    v.sort();
+                }
+                assert_eq!(a, b);
+                assert_eq!(a, c);
+                assert_eq!(a, d);
+            }
+        }
+
+        fn build_lookup(seqs: &[&str], depth: u32) -> BidirFmIndex {
+            let dna: Vec<DnaSequence> = seqs
+                .iter()
+                .map(|s| DnaSequence::from_str(s).unwrap())
+                .collect();
+            BidirFmIndex::build_cpu(
+                &dna,
+                &FmIndexConfig {
+                    sa_sample_rate: 2,
+                    use_gpu: false,
+                    lookup_depth: depth,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        }
+
+        fn all_kmers(k: usize) -> Vec<Vec<u8>> {
+            let mut out = vec![Vec::new()];
+            for _ in 0..k {
+                out = out
+                    .iter()
+                    .flat_map(|p| {
+                        BASES.iter().map(move |&b| {
+                            let mut q = p.clone();
+                            q.push(b);
+                            q
+                        })
+                    })
+                    .collect();
+            }
+            out
+        }
+
+        #[test]
+        fn lookup_interval_matches_extend_right_walk() {
+            let refs = [
+                "ACGTACGTTTGACCAGGTACGTACGAAATTTCCCGGGACGTAC",
+                "GTACGAATNNACGT",
+                "RYACGT",
+            ];
+            for depth in [3u32, 4] {
+                let idx = build_lookup(&refs, depth);
+                assert_eq!(idx.lookup_depth(), depth);
+                let mut hits = 0;
+                for kmer in all_kmers(depth as usize) {
+                    let want = right_walk(&idx, &kmer);
+                    let got = idx.lookup_interval(&kmer);
+                    assert_eq!(got, want, "kmer={}", show(&kmer));
+                    hits += got.is_some() as u32;
+                }
+                assert!(hits > 0);
+                // Seeded cursors extend and contract like walked ones.
+                let seed = idx
+                    .lookup_interval(&encode(&"ACGT"[..depth as usize]))
+                    .unwrap();
+                let ext = idx.extend_left(seed, alphabet::T).unwrap();
+                assert_eq!(idx.contract_left(&ext, alphabet::T).unwrap(), seed);
+                // Wrong length / non-core symbol.
+                assert_eq!(idx.lookup_interval(&encode("AC")), None);
+                assert_eq!(
+                    idx.lookup_interval(&vec![alphabet::N; depth as usize]),
+                    None
+                );
+                // Survives serialization.
+                let back = BidirFmIndex::from_bytes(&idx.to_bytes().unwrap()).unwrap();
+                assert_eq!(back.lookup_depth(), depth);
+                assert_eq!(
+                    back.lookup_interval(&encode(&"ACGT"[..depth as usize])),
+                    Some(seed)
+                );
+            }
+            let no_lookup = build_str(&refs);
+            assert_eq!(no_lookup.lookup_depth(), 0);
+            assert_eq!(no_lookup.lookup_interval(&encode("ACG")), None);
+        }
+
+        #[test]
+        fn parent_reports_missing_lcp() {
+            let dna = vec![DnaSequence::from_str("ACGTACGT").unwrap()];
+            let idx = BidirFmIndex::build_cpu(
+                &dna,
+                &FmIndexConfig {
+                    sa_sample_rate: 1,
+                    use_gpu: false,
+                    build_lcp: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let iv = right_walk(&idx, &encode("ACG")).unwrap().fwd();
+            assert!(matches!(
+                idx.parent_fwd(&iv),
+                Err(FmIndexError::LcpNotBuilt)
+            ));
+        }
+    }
 }

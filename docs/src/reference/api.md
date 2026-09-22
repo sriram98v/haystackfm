@@ -13,13 +13,16 @@ comments, including:
   base accessors `sequence`, `sequence_by_header`.
 - `BidirFmIndex` — `build_cpu`, `build_cpu_with`, `find_mems`, `find_smems`, the GPU
   variants, and the same id/header and base accessors. The cursor API: `full_interval`,
-  `extend_right` / `extend_left`, `contract_left` (with `has_lcp`),
-  `children_right` / `children_left`,
+  `extend_right` / `extend_left`, `contract_left` (with `has_lcp`), `lookup_interval`
+  (with `lookup_depth`), `children_right` / `children_left`,
   `extend_right_compatible` / `extend_left_compatible`, the class counts
   `count_wild_right` / `count_wild_left` and `count_right_in` / `count_left_in`,
   `compatible_set`, `count_interval`, `locate_interval`.
 - `BidirInterval` — the paired SA interval a cursor walks; the same operations taking the
-  forward or reverse `FmIndex` half explicitly.
+  forward or reverse `FmIndex` half explicitly. `fwd()` gives its forward half.
+- `FwdInterval` — a forward-only row range: `extend_left` (an LF step on any sub-range),
+  `parent` (nearest suffix-tree ancestor via the LCP array), `locate`; also reachable as
+  `BidirFmIndex::extend_left_fwd` / `parent_fwd` / `locate_fwd`, and `FmIndex::locate_rows`.
 - `SeqId` — a reference's stable 0-based id, reported by every query in place of its FASTA
   header. See [Sequence ids vs. headers](../guide/concepts.md#sequence-ids-vs-headers).
 - `Mem` / `MemHit` — result types for MEM/SMEM finding.
