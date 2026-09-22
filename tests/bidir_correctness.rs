@@ -755,4 +755,228 @@ mod wild {
             );
         }
     }
+
+    /// Cursor contraction (`contract_left`) tests, including wildcard (IUPAC) reference
+    /// symbols and sentinel-adjacent occurrences.
+    mod contract {
+        use super::*;
+        use haystackfm::FmIndexError;
+
+        /// `ivs[k]` = interval of `pat[k..]`, built right-to-left with `extend_left`.
+        fn left_walk(idx: &BidirFmIndex, pat: &[u8]) -> Vec<BidirInterval> {
+            let mut ivs = vec![idx.full_interval()];
+            for &c in pat.iter().rev() {
+                let next = idx.extend_left(*ivs.last().unwrap(), c).unwrap();
+                ivs.push(next);
+            }
+            ivs.reverse();
+            ivs
+        }
+
+        /// Interval of `pat` built left-to-right with `extend_right` (independent route).
+        fn right_walk(idx: &BidirFmIndex, pat: &[u8]) -> BidirInterval {
+            pat.iter().fold(idx.full_interval(), |iv, &c| {
+                idx.extend_right(iv, c).unwrap()
+            })
+        }
+
+        fn assert_round_trip(idx: &BidirFmIndex, iv: BidirInterval, c: u8, ctx: &str) {
+            let ext = idx.extend_left(iv, c).unwrap();
+            let back = idx
+                .contract_left(&ext, c)
+                .unwrap_or_else(|e| panic!("{ctx}: contract_left({c}) failed: {e}"));
+            assert_eq!(back, iv, "{ctx}: contract_left({c}) != original");
+        }
+
+        #[test]
+        fn contract_left_inverts_extend_left_on_random_iupac_multi_seq() {
+            let mut rng = SmallRng::seed_from_u64(0x5EED_C0DE);
+            let mut saw_wild = false;
+            let mut saw_sentinel = false;
+            for &rate in &[1u32, 32] {
+                for &enc in &[OccEncoding::Bitplane, OccEncoding::OneHot] {
+                    for iter in 0..30 {
+                        let nseq = rng.random_range(1..=4);
+                        let seqs: Vec<Vec<u8>> = (0..nseq)
+                            .map(|_| {
+                                let len = rng.random_range(5..=120);
+                                let runs = rng.random_range(0..=3);
+                                random_seq(&mut rng, len, runs, iter % 3 == 0, iter % 4 == 0)
+                            })
+                            .collect();
+                        let idx = build(&seqs, rate, enc);
+                        assert!(idx.has_lcp());
+                        for seq in &seqs {
+                            for _ in 0..6 {
+                                let plen = rng.random_range(1..=12.min(seq.len()));
+                                let start = rng.random_range(0..=seq.len() - plen);
+                                let pat = &seq[start..start + plen];
+                                let ctx = format!("rate={rate} enc={enc:?} pat={}", show(pat));
+                                let iv = right_walk(&idx, pat);
+                                assert_eq!(iv.len as usize, plen);
+                                for c in 0..ALPHABET_SIZE as u8 {
+                                    if idx.extend_left(iv, c).is_none() {
+                                        continue;
+                                    }
+                                    saw_wild |= is_wild(c);
+                                    saw_sentinel |= c == 0;
+                                    assert_round_trip(&idx, iv, c, &ctx);
+                                }
+                                // Whole chain: contract every prefix symbol back down.
+                                let ivs = left_walk(&idx, pat);
+                                for k in 0..plen {
+                                    let got = idx.contract_left(&ivs[k], pat[k]).unwrap();
+                                    assert_eq!(got, ivs[k + 1], "{ctx} k={k}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(saw_wild, "no wildcard contraction exercised");
+            assert!(saw_sentinel, "no sentinel contraction exercised");
+        }
+
+        #[test]
+        fn contract_left_across_reference_wildcards_and_inside_wild_patterns() {
+            // Ambiguity codes inside the reference: the removed symbol `c` is a wildcard,
+            // and P itself contains wildcards.
+            let idx = build_str(&["ACGRYTACGN", "ACGTACGRYT", "NNACGTRR", "RYTACG"]);
+            for pat in ["YTACG", "RYTACG", "TACG", "ACG", "NACGT", "RR", "N", "GRYT"] {
+                let pat = pat
+                    .chars()
+                    .map(|ch| alphabet::encode_char(ch).unwrap())
+                    .collect::<Vec<_>>();
+                let ivs = left_walk(&idx, &pat);
+                for k in 0..pat.len() {
+                    let got = idx.contract_left(&ivs[k], pat[k]).unwrap();
+                    assert_eq!(got, ivs[k + 1], "pat={} k={k}", show(&pat));
+                }
+                let iv = ivs[0];
+                for c in 0..ALPHABET_SIZE as u8 {
+                    if idx.extend_left(iv, c).is_some() {
+                        assert_round_trip(&idx, iv, c, &show(&pat));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn contract_left_undoes_every_child_of_compatible_fanout() {
+            // Query wildcard `q` fans out into one concrete child per compatible reference
+            // code; contracting any child by its code lands back on the parent.
+            let mut rng = SmallRng::seed_from_u64(77);
+            for iter in 0..20 {
+                let seqs: Vec<Vec<u8>> = (0..rng.random_range(1..=3))
+                    .map(|_| {
+                        let len = rng.random_range(10..=80);
+                        random_seq(&mut rng, len, 3, iter % 2 == 0, false)
+                    })
+                    .collect();
+                let idx = build(&seqs, 1, OccEncoding::Bitplane);
+                for seq in &seqs {
+                    let plen = rng.random_range(1..=6.min(seq.len()));
+                    let start = rng.random_range(0..=seq.len() - plen);
+                    let iv = right_walk(&idx, &seq[start..start + plen]);
+                    for &q in WILD_CODES.iter().chain(BASES.iter()) {
+                        let codes: Vec<u8> = idx.compatible_set(q).iter().collect();
+                        let via_codes: Vec<BidirInterval> = codes
+                            .iter()
+                            .filter_map(|&c| idx.extend_left(iv, c))
+                            .collect();
+                        let fanout: Vec<BidirInterval> =
+                            idx.extend_left_compatible(iv, q).collect();
+                        assert_eq!(fanout, via_codes, "q={q}");
+                        for &c in &codes {
+                            if idx.extend_left(iv, c).is_some() {
+                                assert_round_trip(&idx, iv, c, &format!("q={q}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn contract_left_on_repeated_and_identical_sequences() {
+            // Identical copies: every occurrence of P has copies preceded by different
+            // symbols (sentinel vs base), so [r, r + size) is a strict sub-range and the
+            // LCP expansion must widen it.
+            let idx = build_str(&["ACGTACGT", "ACGTACGT", "ACGTACGT", "TACGTACG"]);
+            let text: Vec<u8> = "ACGTACGT"
+                .chars()
+                .map(|c| alphabet::encode_char(c).unwrap())
+                .collect();
+            for start in 0..text.len() {
+                for end in start + 1..=text.len() {
+                    let pat = &text[start..end];
+                    let ivs = left_walk(&idx, pat);
+                    for k in 0..pat.len() {
+                        assert_eq!(idx.contract_left(&ivs[k], pat[k]).unwrap(), ivs[k + 1]);
+                    }
+                }
+            }
+            let long_a = "A".repeat(200);
+            let idx = build_str(&[&long_a, &long_a, "AAAAT"]);
+            let pat = vec![alphabet::A; 200];
+            let ivs = left_walk(&idx, &pat);
+            for k in 0..pat.len() {
+                assert_eq!(
+                    idx.contract_left(&ivs[k], pat[k]).unwrap(),
+                    ivs[k + 1],
+                    "k={k}"
+                );
+            }
+        }
+
+        #[test]
+        fn contract_left_survives_serialization_and_reports_missing_lcp() {
+            let seqs = vec![
+                "ACGTRYACGTNNACGT"
+                    .chars()
+                    .map(|c| alphabet::encode_char(c).unwrap())
+                    .collect::<Vec<_>>(),
+                "TTACGTACGTAA"
+                    .chars()
+                    .map(|c| alphabet::encode_char(c).unwrap())
+                    .collect::<Vec<_>>(),
+            ];
+            let idx = build(&seqs, 4, OccEncoding::Bitplane);
+            let bytes = idx.to_bytes().unwrap();
+            let back = BidirFmIndex::from_bytes(&bytes).unwrap();
+            assert!(back.has_lcp());
+            let pat = &seqs[0][3..9];
+            let ivs = left_walk(&idx, pat);
+            for k in 0..pat.len() {
+                let a = idx.contract_left(&ivs[k], pat[k]).unwrap();
+                let b = back.contract_left(&ivs[k], pat[k]).unwrap();
+                assert_eq!(a, b);
+                assert_eq!(a, ivs[k + 1]);
+            }
+
+            let dna: Vec<DnaSequence> = seqs
+                .iter()
+                .cloned()
+                .map(DnaSequence::from_encoded)
+                .collect();
+            let no_lcp = BidirFmIndex::build_cpu(
+                &dna,
+                &FmIndexConfig {
+                    sa_sample_rate: 1,
+                    use_gpu: false,
+                    build_lcp: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(!no_lcp.has_lcp());
+            let iv = no_lcp
+                .extend_left(no_lcp.full_interval(), alphabet::A)
+                .unwrap();
+            assert!(matches!(
+                no_lcp.contract_left(&iv, alphabet::A),
+                Err(FmIndexError::LcpNotBuilt)
+            ));
+        }
+    }
 }

@@ -182,6 +182,8 @@ bidir.seq_headers() / seq_header(id) / seq_id(header)
 // Cursor walk — drive the bidirectional search yourself
 let iv = bidir.full_interval();                 // BidirInterval for the empty pattern
 bidir.extend_right(iv, code) / extend_left(iv, code)   // Option<BidirInterval>
+bidir.contract_left(&iv, code)                  // Result<BidirInterval>: cP → P, the inverse
+                                                //   of extend_left (needs `build_lcp`, CPU)
 bidir.children_right(&iv) / children_left(&iv)  // [Option<BidirInterval>; 16], all codes at once
 bidir.extend_right_compatible(iv, q)            // iterator: fan-out over codes `q` matches
 bidir.count_wild_right(&iv) / count_wild_left(&iv)     // occurrences next to a reference

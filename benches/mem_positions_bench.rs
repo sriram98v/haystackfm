@@ -42,6 +42,7 @@ fn build_index(num_refs: usize) -> (BidirFmIndex, Vec<u32>) {
     let config = FmIndexConfig {
         sa_sample_rate: 4,
         use_gpu: false,
+        ..Default::default()
     };
     let seqs: Vec<DnaSequence> = (0..num_refs)
         .map(|i| DnaSequence::from_str(&random_dna(REF_LEN, i as u64 + 1)).unwrap())

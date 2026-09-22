@@ -14,6 +14,10 @@ let restored = FmIndex::from_bytes(&bytes)?; // FmIndex
 serialization tag, so a reloaded index keeps the matching semantics it was built with (see
 [Custom Alphabets](./alphabets.md)).
 
+Bytes start with a 4-byte format marker (`"HFM"` + version). Blobs written before the
+marker existed still load, but they carry no LCP array, so `has_lcp()` is `false` and
+`contract_left` returns `FmIndexError::LcpNotBuilt`; rebuild and re-serialize to get it.
+
 ## Sequence ids are stable
 
 The headers are stored in build order, so a

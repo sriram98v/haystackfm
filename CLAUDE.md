@@ -62,7 +62,8 @@ GPU-accelerated FM-index for DNA sequences. Compiles to native (Vulkan/Metal/DX1
 ### Key modules
 | Path | Role |
 |------|------|
-| `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic |
+| `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic, cursor (`bidir.rs`: extend/contract) |
+| `src/lcp.rs` | Capped u16 LCP array (Kasai at CPU build) + block minima / sparse table for psv/nsv; backs `contract_left` |
 | `src/gpu/` | WebGPU pipeline setup, buffer management, `GpuContext` (process-wide OnceLock cache) |
 | `src/suffix_array/`, `src/bwt/`, `src/occ/` | CPU and GPU implementations of each index component |
 | `src/wasm/` | `wasm-bindgen` JS/TS bindings |

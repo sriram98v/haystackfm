@@ -12,6 +12,7 @@ use crate::c_array::CArray;
 use crate::error::FmIndexError;
 use crate::fm_index::lookup::LookupTable;
 use crate::fm_index::seq_id::{HeaderIndex, SeqId};
+use crate::lcp::LcpArray;
 use crate::occ::cpu::build_occ_table;
 use crate::occ::{OccEncoding, OccTable};
 use crate::suffix_array::cpu::build_suffix_array;
@@ -41,6 +42,11 @@ pub struct FmIndexConfig {
     /// AND/XOR reconstruction on every `rank`/`lf_step` call at the cost of more resident
     /// memory. See [`crate::occ::OccEncoding`].
     pub occ_encoding: OccEncoding,
+    /// Build the LCP array (CPU construction only) that
+    /// [`BidirInterval::contract_left`](crate::fm_index::BidirInterval::contract_left)
+    /// needs. Costs ~2.7 bytes per base of resident and serialized size on top of the
+    /// index. Default: `true`. GPU construction never builds it.
+    pub build_lcp: bool,
 }
 
 impl Default for FmIndexConfig {
@@ -51,6 +57,7 @@ impl Default for FmIndexConfig {
             lookup_depth: 0,
             build_threads: 1,
             occ_encoding: OccEncoding::Bitplane,
+            build_lcp: true,
         }
     }
 }
@@ -84,6 +91,9 @@ pub struct FmIndex {
     pub(crate) lookup: Option<LookupTable>,
     /// Alphabet matching semantics (compatible symbols + core symbols for lookup BFS).
     pub(crate) alphabet_fns: AlphabetFns,
+    /// Capped LCP array over the SA rows, present when built with
+    /// `FmIndexConfig::build_lcp` (CPU only). Backs cursor contraction.
+    pub(crate) lcp: Option<LcpArray>,
 }
 
 impl FmIndex {
@@ -164,6 +174,11 @@ impl FmIndex {
         // Build BWT from SA. The text is retained (not dropped) to back `sequence()`.
         let bwt = build_bwt(&text, &sa);
 
+        // LCP via Kasai while the full SA is still resident (transient 4n-byte ISA).
+        let lcp = config
+            .build_lcp
+            .then(|| LcpArray::build_kasai(&text, &sa.data));
+
         // Sample SA then free it before building Occ (saves ~4n bytes of peak memory)
         // Every sequence start must be sampled so `resolve_sa`'s LF-walk never crosses a
         // sentinel (all sentinels share one byte value → ambiguous LF). `seq_boundaries[k]` is
@@ -210,6 +225,7 @@ impl FmIndex {
             header_index,
             lookup,
             alphabet_fns,
+            lcp,
         })
     }
 
@@ -285,6 +301,12 @@ impl FmIndex {
     /// reversal of the forward half's and is never served to callers.
     pub(crate) fn forget_text(&mut self) {
         self.text = Vec::new();
+    }
+
+    /// True when this index carries an LCP array (built with `FmIndexConfig::build_lcp` on
+    /// the CPU), which cursor contraction requires.
+    pub fn has_lcp(&self) -> bool {
+        self.lcp.is_some()
     }
 
     /// Build an FM-index from a set of DNA sequences using GPU acceleration.
@@ -368,6 +390,8 @@ impl FmIndex {
             lookup: None,
             // GPU construction is IUPAC-only (shaders hard-code the 16-symbol COMPAT table).
             alphabet_fns: IupacDna::fns(),
+            // LCP construction is CPU-only; GPU-built indexes cannot contract cursors.
+            lcp: None,
         })
     }
 

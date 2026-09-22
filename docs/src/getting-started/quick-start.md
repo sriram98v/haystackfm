@@ -62,6 +62,7 @@ without leaving the page. It's the quickest way to see haystackfm run.
 | `use_gpu` | Whether construction offloads to the GPU. |
 | `lookup_depth` | Depth-*k* prefix lookup table that seeds `backward_search` (0 disables). |
 | `occ_encoding` | Occ-table encoding (`Bitplane` / `OneHot`). |
+| `build_lcp` | Build the LCP array that `BidirFmIndex::contract_left` needs (CPU only, ~2.7 B/base; default `true`). |
 
 ```rust
 let config = FmIndexConfig {

@@ -27,6 +27,20 @@ pub enum FmIndexError {
     #[error("serialization failed: {0}")]
     SerializeError(String),
 
+    /// A cursor contraction was requested on an index built without an LCP array
+    /// (`FmIndexConfig::build_lcp = false`, a GPU-built index, or a legacy serialized one).
+    #[error("index has no LCP array; build with FmIndexConfig::build_lcp = true on the CPU")]
+    LcpNotBuilt,
+
+    /// The pattern is too long for the capped LCP array to decide a contraction.
+    #[error("pattern length {0} exceeds the LCP cap (65535)")]
+    PatternTooLong(u32),
+
+    /// The interval / symbol pair passed to a contraction is not a valid `cP` interval
+    /// (empty interval, zero length, or `c` is not the symbol the interval was extended by).
+    #[error("invalid cursor contraction: interval is not the interval of c·P")]
+    InvalidContraction,
+
     /// A GPU operation failed (only available with the `gpu` feature).
     #[cfg(feature = "gpu")]
     #[error("GPU error: {0}")]

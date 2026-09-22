@@ -29,6 +29,7 @@ fn bench_build_cpu(c: &mut Criterion) {
         let config = FmIndexConfig {
             sa_sample_rate: 32,
             use_gpu: false,
+            ..Default::default()
         };
         group.bench_with_input(BenchmarkId::from_parameter(size), &seq, |b, s| {
             b.iter(|| FmIndex::build_cpu(&[s.clone()], &config).unwrap())
@@ -54,6 +55,7 @@ fn bench_build_gpu(c: &mut Criterion) {
             let config = FmIndexConfig {
                 sa_sample_rate: 32,
                 use_gpu: true,
+                ..Default::default()
             };
             group.bench_with_input(BenchmarkId::from_parameter(size), &seq, |b, s| {
                 b.iter(|| pollster::block_on(FmIndex::build(&[s.clone()], &config)).unwrap())
@@ -76,6 +78,7 @@ fn bench_cpu_vs_gpu(c: &mut Criterion) {
     let cpu_config = FmIndexConfig {
         sa_sample_rate: 32,
         use_gpu: false,
+        ..Default::default()
     };
     group.bench_with_input("cpu", &seq, |b, s| {
         b.iter(|| FmIndex::build_cpu(&[s.clone()], &cpu_config).unwrap())
@@ -87,6 +90,7 @@ fn bench_cpu_vs_gpu(c: &mut Criterion) {
             let gpu_config = FmIndexConfig {
                 sa_sample_rate: 32,
                 use_gpu: true,
+                ..Default::default()
             };
             group.bench_with_input("gpu", &seq, |b, s| {
                 b.iter(|| pollster::block_on(FmIndex::build(&[s.clone()], &gpu_config)).unwrap())
