@@ -36,9 +36,12 @@ pub enum FmIndexError {
     #[error("pattern length {0} exceeds the LCP cap (65535)")]
     PatternTooLong(u32),
 
-    /// The interval / symbol pair passed to a contraction is not a valid `cP` interval
-    /// (empty interval, zero length, or `c` is not the symbol the interval was extended by).
-    #[error("invalid cursor contraction: interval is not the interval of c·P")]
+    /// The interval passed to a contraction or parent step is not what the operation
+    /// requires: empty, zero length, not the maximal interval of its string, or (for
+    /// `contract_left`) `c` is not the symbol the interval was extended by.
+    #[error(
+        "invalid cursor contraction: interval is not the maximal interval of the expected string"
+    )]
     InvalidContraction,
 
     /// A GPU operation failed (only available with the `gpu` feature).

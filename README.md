@@ -184,6 +184,14 @@ let iv = bidir.full_interval();                 // BidirInterval for the empty p
 bidir.extend_right(iv, code) / extend_left(iv, code)   // Option<BidirInterval>
 bidir.contract_left(&iv, code)                  // Result<BidirInterval>: cP → P, the inverse
                                                 //   of extend_left (needs `build_lcp`, CPU)
+bidir.lookup_interval(kmer)                     // Option<BidirInterval>: seed a cursor from the
+                                                //   k-mer tables (`lookup_depth`), no extensions
+// Forward-only intervals (no reverse half): ancestor walks and sub-ranges
+let j = iv.fwd();                               // FwdInterval { lo, hi, len }
+bidir.parent_fwd(&j)                            // Result<Option<FwdInterval>>: nearest ancestor
+                                                //   P[..d'] via the LCP array
+bidir.extend_left_fwd(&j, code)                 // Option<FwdInterval>: LF step on any row range
+bidir.locate_fwd(&j)                            // Vec<(SeqId, u32)>
 bidir.children_right(&iv) / children_left(&iv)  // [Option<BidirInterval>; 16], all codes at once
 bidir.extend_right_compatible(iv, q)            // iterator: fan-out over codes `q` matches
 bidir.count_wild_right(&iv) / count_wild_left(&iv)     // occurrences next to a reference

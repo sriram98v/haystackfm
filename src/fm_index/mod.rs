@@ -1,5 +1,6 @@
 pub mod bidir;
 pub mod bidir_index;
+pub mod fwd_interval;
 pub mod lookup;
 pub mod query;
 pub mod seq_id;
