@@ -77,9 +77,9 @@ impl BidirFmIndex {
                 lookup_depth: config.lookup_depth,
                 build_threads: config.build_threads,
                 occ_encoding: config.occ_encoding,
-                // Only `contract_left` exists today and it needs the forward LCP; the
-                // reverse half's LCP would serve a future `contract_right`.
-                build_lcp: false,
+                // `contract_right` needs the reverse half's LCP (as `contract_left` needs
+                // the forward one).
+                build_lcp: config.build_lcp,
             },
         )?;
         // The reverse index's text is just the reversal of the forward one and is never
@@ -165,9 +165,21 @@ impl BidirFmIndex {
         iv.contract_left(c, &self.fwd)
     }
 
-    /// True when cursor contraction is available (the forward half carries an LCP array).
+    /// Contract the pattern on the right (Pc → P): the inverse of
+    /// [`extend_right`](Self::extend_right). `iv` must be the interval of `Pc` and `c` the
+    /// symbol it was extended by. Requires the reverse half's LCP array
+    /// (`FmIndexConfig::build_lcp`, CPU construction); see
+    /// [`BidirInterval::contract_right`] for cost and errors.
+    pub fn contract_right(&self, iv: &BidirInterval, c: u8) -> Result<BidirInterval, FmIndexError> {
+        iv.contract_right(c, &self.rev)
+    }
+
+    /// True when cursor contraction is available in both directions (both halves carry an
+    /// LCP array). Blobs written before the reverse half carried one report `false` here
+    /// although `contract_left` still works on them; ask [`fwd`](Self::fwd)`().has_lcp()`
+    /// or [`rev`](Self::rev)`().has_lcp()` for one direction.
     pub fn has_lcp(&self) -> bool {
-        self.fwd.has_lcp()
+        self.fwd.has_lcp() && self.rev.has_lcp()
     }
 
     // ── Forward-only intervals ────────────────────────────────────────────────
@@ -774,6 +786,44 @@ mod tests {
             .map(|(s, h)| DnaSequence::from_str_with_header(s, h).unwrap())
             .collect();
         BidirFmIndex::build_cpu(&sequences, &config).unwrap()
+    }
+
+    #[test]
+    fn default_config_builds_no_lcp() {
+        // The LCP arrays are opt-in: a default config carries none, every contraction
+        // reports it, and the (versioned) blob round-trips that state.
+        assert!(!FmIndexConfig::default().build_lcp);
+        let idx = BidirFmIndex::build_cpu(
+            &[DnaSequence::from_str("ACGTACGTTTGACCA").unwrap()],
+            &FmIndexConfig {
+                use_gpu: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!idx.has_lcp());
+        assert!(!idx.fwd().has_lcp());
+        assert!(!idx.rev().has_lcp());
+        let iv = idx
+            .extend_right(idx.full_interval(), encode("A")[0])
+            .unwrap();
+        assert!(matches!(
+            idx.contract_left(&iv, encode("A")[0]),
+            Err(FmIndexError::LcpNotBuilt)
+        ));
+        assert!(matches!(
+            idx.contract_right(&iv, encode("A")[0]),
+            Err(FmIndexError::LcpNotBuilt)
+        ));
+        assert!(matches!(
+            idx.parent_fwd(&iv.fwd()),
+            Err(FmIndexError::LcpNotBuilt)
+        ));
+        let bytes = idx.to_bytes().unwrap();
+        assert_eq!(&bytes[4..8], &crate::fm_index::serialize::FORMAT_MAGIC);
+        let back = BidirFmIndex::from_bytes(&bytes).unwrap();
+        assert!(!back.has_lcp());
+        assert_eq!(back.count_interval(&iv), idx.count_interval(&iv));
     }
 
     #[test]

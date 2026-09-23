@@ -16,7 +16,10 @@ serialization tag, so a reloaded index keeps the matching semantics it was built
 
 Bytes start with a 4-byte format marker (`"HFM"` + version). Blobs written before the
 marker existed still load, but they carry no LCP array, so `has_lcp()` is `false` and
-`contract_left` returns `FmIndexError::LcpNotBuilt`; rebuild and re-serialize to get it.
+`contract_left` / `contract_right` return `FmIndexError::LcpNotBuilt`; rebuild and
+re-serialize to get it. Bidirectional blobs written when only the forward half carried an
+LCP array load the same way: `contract_left` works, `contract_right` does not, and
+`has_lcp()` (which requires both halves) is `false`.
 
 ## Sequence ids are stable
 

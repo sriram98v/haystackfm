@@ -43,10 +43,14 @@ pub struct FmIndexConfig {
     /// AND/XOR reconstruction on every `rank`/`lf_step` call at the cost of more resident
     /// memory. See [`crate::occ::OccEncoding`].
     pub occ_encoding: OccEncoding,
-    /// Build the LCP array (CPU construction only) that
-    /// [`BidirInterval::contract_left`](crate::fm_index::BidirInterval::contract_left)
-    /// needs. Costs ~2.7 bytes per base of resident and serialized size on top of the
-    /// index. Default: `true`. GPU construction never builds it.
+    /// Build the LCP array (CPU construction only) that the cursor contraction and
+    /// ancestor operations need —
+    /// [`BidirInterval::contract_left`](crate::fm_index::BidirInterval::contract_left),
+    /// [`contract_right`](crate::fm_index::BidirInterval::contract_right) and
+    /// [`FwdInterval::parent`](crate::fm_index::FwdInterval::parent). Those return
+    /// [`FmIndexError::LcpNotBuilt`] without it. Opt-in: costs ~2.7 bytes per base of
+    /// resident and serialized size on top of the index, and a `BidirFmIndex` builds one
+    /// per half. Default: `false`. GPU construction never builds it.
     pub build_lcp: bool,
 }
 
@@ -58,7 +62,7 @@ impl Default for FmIndexConfig {
             lookup_depth: 0,
             build_threads: 1,
             occ_encoding: OccEncoding::Bitplane,
-            build_lcp: true,
+            build_lcp: false,
         }
     }
 }
