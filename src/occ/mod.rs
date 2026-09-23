@@ -80,6 +80,11 @@ pub struct OccTable {
     /// so skipped on disk and rebuilt by `from_parts` / `build_select_hints`.
     #[serde(skip)]
     select_hints: Vec<u32>,
+    /// `below_lanes[c]` = `set_lanes(SymbolSet::below(c))`, the lane mask the cursor's
+    /// extension step needs at every border (`rank_with_below`). Derived from
+    /// `lane_to_symbol`, so skipped on disk and rebuilt by `rebuild_derived`.
+    #[serde(skip)]
+    below_lanes: [u16; ALPHABET_SIZE],
 }
 
 /// Sentinel lane value meaning "symbol never appears in this BWT".
@@ -185,9 +190,19 @@ impl OccTable {
             encoding,
             text_len,
             select_hints: Vec::new(),
+            below_lanes: [0; ALPHABET_SIZE],
         };
-        table.build_select_hints();
+        table.rebuild_derived();
         table
+    }
+
+    /// Recompute every field that is derived from the serialized ones (`select_hints`,
+    /// `below_lanes`). Called by `from_parts` and after deserialization.
+    pub(crate) fn rebuild_derived(&mut self) {
+        for c in 0..ALPHABET_SIZE {
+            self.below_lanes[c] = self.set_lanes(SymbolSet::below(c as u8));
+        }
+        self.build_select_hints();
     }
 
     // Unaligned pointer reads instead of `slice[..].try_into().unwrap()`: the safe form
@@ -271,7 +286,12 @@ impl OccTable {
     #[inline]
     pub(crate) fn prefetch_block(&self, pos: u32) {
         let block = (pos / BLOCK_SIZE) as usize;
-        let base = self.block_base(block);
+        self.prefetch_base(self.block_base(block));
+    }
+
+    /// `prefetch_block` for an already-computed record byte offset.
+    #[inline(always)]
+    fn prefetch_base(&self, base: usize) {
         if base < self.block_data.len() {
             crate::prefetch::prefetch_read(unsafe { self.block_data.as_ptr().add(base) });
         }
@@ -496,6 +516,89 @@ impl OccTable {
         mask
     }
 
+    /// Address of the block record holding position `i - 1` (`i > 0`) and the popcount
+    /// window for a rank at `i`: `(base, window)`. Every rank of any lane at `i` starts
+    /// here; the fused primitives below do it once and then rank several lanes from the
+    /// same record.
+    #[inline(always)]
+    fn locate_record(&self, i: u32) -> (usize, u64) {
+        let pos = i - 1;
+        let block = (pos / BLOCK_SIZE) as usize;
+        let offset = pos % BLOCK_SIZE;
+        (self.block_base(block), Self::rank_window(offset))
+    }
+
+    /// Rank of one dense `lane` from a located record (`locate_record`) whose Level-3
+    /// words are already loaded (`load_words`).
+    #[inline(always)]
+    fn rank_lane_in(
+        &self,
+        base: usize,
+        words: &[u64; ALPHABET_SIZE],
+        window: u64,
+        lane: usize,
+    ) -> u32 {
+        self.sb_count_at(base, lane)
+            + self.delta_at(base, lane)
+            + (self.lane_mask_from_words(words, lane) & window).count_ones()
+    }
+
+    /// Rank of one dense `lane` from a located record, reading only that lane's planes
+    /// (`lane_mask`) — the scalar `rank_at_lane` arithmetic, for callers that already hold
+    /// `(base, window)`.
+    #[inline(always)]
+    fn rank_lane_at(&self, base: usize, window: u64, lane: usize) -> u32 {
+        self.sb_count_at(base, lane)
+            + self.delta_at(base, lane)
+            + (self.lane_mask(base, lane) & window).count_ones()
+    }
+
+    /// Sum of `rank_lane_in` over every lane in the `lanes` bitmask.
+    #[inline(always)]
+    fn rank_lanes_in(
+        &self,
+        base: usize,
+        words: &[u64; ALPHABET_SIZE],
+        window: u64,
+        lanes: u16,
+    ) -> u32 {
+        let mut sum = 0u32;
+        let mut bits = lanes;
+        while bits != 0 {
+            let lane = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            sum += self.rank_lane_in(base, words, window, lane);
+        }
+        sum
+    }
+
+    /// Class rank of the `lanes` bitmask at `i > 0` from a loaded record, ranking
+    /// whichever of `lanes` / its complement has fewer members (`Σ_lanes rank = i`). This is
+    /// the arithmetic behind [`rank_set`](Self::rank_set): `lanes == 0` gives 0 and a mask
+    /// covering every lane gives `i`.
+    #[inline(always)]
+    fn rank_class_in(
+        &self,
+        base: usize,
+        words: &[u64; ALPHABET_SIZE],
+        window: u64,
+        lanes: u16,
+        i: u32,
+    ) -> u32 {
+        if lanes == 0 {
+            return 0;
+        }
+        let complement = self.all_lanes() & !lanes;
+        if complement == 0 {
+            return i;
+        }
+        if complement.count_ones() < lanes.count_ones() {
+            i - self.rank_lanes_in(base, words, window, complement)
+        } else {
+            self.rank_lanes_in(base, words, window, lanes)
+        }
+    }
+
     /// Sum of `rank_at_lane(lane, i)` over every lane in the `lanes` bitmask, with `i > 0`,
     /// touching the block record once.
     #[inline]
@@ -517,6 +620,112 @@ impl OccTable {
                 + (self.lane_mask_from_words(&words, lane) & window).count_ones();
         }
         sum
+    }
+
+    /// `(rank(c, i), rank_set(SymbolSet::below(c), i))` from one block-record load.
+    ///
+    /// A bidirectional extension step needs both numbers at each border — the LF step uses
+    /// the first, the paired interval's offset the second — and they live in the same block
+    /// record, so asking separately ([`rank`](Self::rank) then [`rank_set`](Self::rank_set))
+    /// paid the block miss twice. See [`rank_with_below_pair`](Self::rank_with_below_pair)
+    /// for the two-border form the cursor actually uses; unlike it, this scalar form always
+    /// computes both numbers (an absent `c` ranks 0 but its `below` class may not).
+    pub fn rank_with_below(&self, c: u8, i: u32) -> (u32, u32) {
+        debug_assert!(
+            i <= self.text_len,
+            "rank_with_below index {i} > text_len {}",
+            self.text_len
+        );
+        if i == 0 {
+            return (0, 0);
+        }
+        let (base, window) = self.locate_record(i);
+        let words = self.load_words(base);
+        let lane = self.symbol_to_lane[c as usize];
+        // An absent symbol ranks 0 while its `below` set can still be non-empty.
+        let lane_rank = if lane == NO_LANE {
+            0
+        } else {
+            self.rank_lane_in(base, &words, window, lane as usize)
+        };
+        let class_rank = self.rank_class_in(base, &words, window, self.below_lanes[c as usize], i);
+        (lane_rank, class_rank)
+    }
+
+    /// The ranks an extension of the SA interval `[lo, hi)` by `c` needs, from one
+    /// block-record load per border: `Some((rank_with_below(c, lo), rank_with_below(c, hi)))`
+    /// when `c` occurs in `bwt[lo..hi)`, i.e. when the extended interval is non-empty.
+    ///
+    /// Returns `None` — and skips the class ranks, which only the surviving case uses —
+    /// when `c` has no lane in this table (it never occurs in the BWT; nothing is loaded)
+    /// or when `rank(c, lo) == rank(c, hi)`. Fan-out over IUPAC codes that are absent or
+    /// rare relies on the dead case costing no more than the two LF ranks.
+    ///
+    /// Resolves `c`'s lane and `below(c)`'s lane mask once and prefetches both block
+    /// records before computing either, like [`rank_pair`](Self::rank_pair).
+    #[inline]
+    pub fn rank_with_below_pair(
+        &self,
+        c: u8,
+        lo: u32,
+        hi: u32,
+    ) -> Option<((u32, u32), (u32, u32))> {
+        debug_assert!(
+            lo <= hi && hi <= self.text_len,
+            "rank_with_below_pair interval [{lo}, {hi}) outside text_len {}",
+            self.text_len
+        );
+        let lane = self.symbol_to_lane[c as usize];
+        if lane == NO_LANE {
+            return None;
+        }
+        let lane = lane as usize;
+        // Locate both records once, prefetch both, then rank: the two misses overlap
+        // (see `rank_pair`), and phase 2 reuses the same addresses.
+        let (base_lo, window_lo) = if lo == 0 {
+            (0, 0)
+        } else {
+            self.locate_record(lo)
+        };
+        let (base_hi, window_hi) = if hi == 0 {
+            (0, 0)
+        } else {
+            self.locate_record(hi)
+        };
+        if lo != 0 {
+            self.prefetch_base(base_lo);
+        }
+        if hi != 0 {
+            self.prefetch_base(base_hi);
+        }
+        // Phase 1: the LF ranks, reading only `c`'s planes. Most fan-out extensions die
+        // here, so this path stays as lean as the scalar rank.
+        let r_lo = if lo == 0 {
+            0
+        } else {
+            self.rank_lane_at(base_lo, window_lo, lane)
+        };
+        let r_hi = if hi == 0 {
+            0
+        } else {
+            self.rank_lane_at(base_hi, window_hi, lane)
+        };
+        if r_lo >= r_hi {
+            return None;
+        }
+        // Phase 2: the class ranks, from the same records (now cache-resident). `hi > lo`.
+        let lanes = self.below_lanes[c as usize];
+        let b_lo = if lo == 0 {
+            0
+        } else {
+            let words = self.load_words(base_lo);
+            self.rank_class_in(base_lo, &words, window_lo, lanes, lo)
+        };
+        let b_hi = {
+            let words = self.load_words(base_hi);
+            self.rank_class_in(base_hi, &words, window_hi, lanes, hi)
+        };
+        Some(((r_lo, b_lo), (r_hi, b_hi)))
     }
 
     /// Class rank: number of positions in `bwt[0..i)` whose symbol is a member of `set`.
@@ -592,6 +801,20 @@ impl OccTable {
                 + (self.lane_mask_from_words(&words, lane) & window).count_ones();
         }
         out
+    }
+
+    /// [`rank_all`](Self::rank_all) on both borders of one SA interval:
+    /// `(rank_all(lo), rank_all(hi))`, with both block records prefetched before either is
+    /// computed so the two misses overlap (see [`rank_pair`](Self::rank_pair)).
+    #[inline]
+    pub fn rank_all_pair(&self, lo: u32, hi: u32) -> ([u32; ALPHABET_SIZE], [u32; ALPHABET_SIZE]) {
+        if lo != 0 {
+            self.prefetch_block(lo - 1);
+        }
+        if hi != 0 {
+            self.prefetch_block(hi - 1);
+        }
+        (self.rank_all(lo), self.rank_all(hi))
     }
 
     /// Symbol at BWT position `pos`, recovered from the occ bitplanes.

@@ -100,16 +100,20 @@ impl BidirInterval {
     /// Returns `None` if Pc does not occur in the text.
     pub fn extend_right(&self, c: u8, rev: &FmIndex) -> Option<Self> {
         let c_val = rev.c_array.get(c);
-        let new_rev_lo = c_val + rev.occ.rank(c, self.rev_lo);
-        let new_rev_hi = c_val + rev.occ.rank(c, self.rev_hi);
+        // One block-record touch per border yields both the LF step (rank of `c`) and the
+        // count of characters b < c in the current reverse interval; that count is the
+        // offset locating the surviving block inside the forward interval. `None` means `c`
+        // never occurs in the text at all.
+        let ((r_lo, below_lo), (r_hi, below_hi)) =
+            rev.occ.rank_with_below_pair(c, self.rev_lo, self.rev_hi)?;
+        let new_rev_lo = c_val + r_lo;
+        let new_rev_hi = c_val + r_hi;
 
         if new_rev_lo >= new_rev_hi {
             return None;
         }
 
-        // Count characters b < c in the current reverse interval.
-        // This offset locates the surviving block inside the forward interval.
-        let offset: u32 = count_smaller_than(c, self.rev_lo, self.rev_hi, rev);
+        let offset = below_hi - below_lo;
         let new_size = new_rev_hi - new_rev_lo;
 
         Some(Self {
@@ -133,14 +137,16 @@ impl BidirInterval {
     /// Returns `None` if cP does not occur in the text.
     pub fn extend_left(&self, c: u8, fwd: &FmIndex) -> Option<Self> {
         let c_val = fwd.c_array.get(c);
-        let new_fwd_lo = c_val + fwd.occ.rank(c, self.fwd_lo);
-        let new_fwd_hi = c_val + fwd.occ.rank(c, self.fwd_hi);
+        let ((r_lo, below_lo), (r_hi, below_hi)) =
+            fwd.occ.rank_with_below_pair(c, self.fwd_lo, self.fwd_hi)?;
+        let new_fwd_lo = c_val + r_lo;
+        let new_fwd_hi = c_val + r_hi;
 
         if new_fwd_lo >= new_fwd_hi {
             return None;
         }
 
-        let offset: u32 = count_smaller_than(c, self.fwd_lo, self.fwd_hi, fwd);
+        let offset = below_hi - below_lo;
         let new_size = new_fwd_hi - new_fwd_lo;
 
         Some(Self {
@@ -304,8 +310,7 @@ impl BidirInterval {
         if self.is_empty() {
             return out;
         }
-        let lo = rev.occ.rank_all(self.rev_lo);
-        let hi = rev.occ.rank_all(self.rev_hi);
+        let (lo, hi) = rev.occ.rank_all_pair(self.rev_lo, self.rev_hi);
         let mut offset = 0u32;
         for c in 0..ALPHABET_SIZE {
             let n = hi[c] - lo[c];
@@ -332,8 +337,7 @@ impl BidirInterval {
         if self.is_empty() {
             return out;
         }
-        let lo = fwd.occ.rank_all(self.fwd_lo);
-        let hi = fwd.occ.rank_all(self.fwd_hi);
+        let (lo, hi) = fwd.occ.rank_all_pair(self.fwd_lo, self.fwd_hi);
         let mut offset = 0u32;
         for c in 0..ALPHABET_SIZE {
             let n = hi[c] - lo[c];
@@ -972,5 +976,125 @@ mod tests {
             iv.contract_right(1, &no_lcp),
             Err(FmIndexError::LcpNotBuilt)
         ));
+    }
+
+    // ── Fused-rank extension: bit-identical to the unfused reference ─────────
+
+    /// `extend_right` as written before `OccTable::rank_with_below_pair` existed: two scalar
+    /// ranks plus one class-rank pair. Kept verbatim as the oracle for the fused version.
+    fn extend_right_reference(iv: &BidirInterval, c: u8, rev: &FmIndex) -> Option<BidirInterval> {
+        let c_val = rev.c_array.get(c);
+        let new_rev_lo = c_val + rev.occ.rank(c, iv.rev_lo);
+        let new_rev_hi = c_val + rev.occ.rank(c, iv.rev_hi);
+        if new_rev_lo >= new_rev_hi {
+            return None;
+        }
+        let (b_lo, b_hi) = rev
+            .occ
+            .rank_set_pair(SymbolSet::below(c), iv.rev_lo, iv.rev_hi);
+        let offset = b_hi - b_lo;
+        let new_size = new_rev_hi - new_rev_lo;
+        Some(BidirInterval {
+            fwd_lo: iv.fwd_lo + offset,
+            fwd_hi: iv.fwd_lo + offset + new_size,
+            rev_lo: new_rev_lo,
+            rev_hi: new_rev_hi,
+            len: iv.len + 1,
+        })
+    }
+
+    /// Mirror of [`extend_right_reference`] on the forward index.
+    fn extend_left_reference(iv: &BidirInterval, c: u8, fwd: &FmIndex) -> Option<BidirInterval> {
+        let c_val = fwd.c_array.get(c);
+        let new_fwd_lo = c_val + fwd.occ.rank(c, iv.fwd_lo);
+        let new_fwd_hi = c_val + fwd.occ.rank(c, iv.fwd_hi);
+        if new_fwd_lo >= new_fwd_hi {
+            return None;
+        }
+        let (b_lo, b_hi) = fwd
+            .occ
+            .rank_set_pair(SymbolSet::below(c), iv.fwd_lo, iv.fwd_hi);
+        let offset = b_hi - b_lo;
+        let new_size = new_fwd_hi - new_fwd_lo;
+        Some(BidirInterval {
+            fwd_lo: new_fwd_lo,
+            fwd_hi: new_fwd_hi,
+            rev_lo: iv.rev_lo + offset,
+            rev_hi: iv.rev_lo + offset + new_size,
+            len: iv.len + 1,
+        })
+    }
+
+    fn make_fwd_rev_with(s: &str, occ_encoding: crate::occ::OccEncoding) -> (FmIndex, FmIndex) {
+        let seq = DnaSequence::from_str(s).unwrap();
+        let config = FmIndexConfig {
+            sa_sample_rate: 1,
+            use_gpu: false,
+            occ_encoding,
+            ..Default::default()
+        };
+        let fwd = FmIndex::build_cpu(&[seq.clone()], &config).unwrap();
+        let rev_bases: Vec<u8> = seq.as_slice().iter().rev().cloned().collect();
+        let rev = FmIndex::build_cpu(&[DnaSequence::from_encoded(rev_bases)], &config).unwrap();
+        (fwd, rev)
+    }
+
+    /// Breadth-first over every cursor reachable by right extension (every substring of the
+    /// text up to `depth`), checking at each one that both extension directions equal the
+    /// unfused reference for all 16 codes and that `children_*` agree with `extend_*`.
+    fn assert_extensions_match_reference(fwd: &FmIndex, rev: &FmIndex, depth: usize) {
+        let mut frontier = vec![BidirInterval::full(fwd.text_len)];
+        let mut checked = 0usize;
+        for _ in 0..depth {
+            let mut next = Vec::new();
+            for iv in &frontier {
+                let kids_right = iv.children_right(rev);
+                let kids_left = iv.children_left(fwd);
+                for c in 0..ALPHABET_SIZE as u8 {
+                    let right = iv.extend_right(c, rev);
+                    assert_eq!(
+                        right,
+                        extend_right_reference(iv, c, rev),
+                        "extend_right({c}) on {iv:?}"
+                    );
+                    assert_eq!(
+                        kids_right[c as usize], right,
+                        "children_right[{c}] on {iv:?}"
+                    );
+                    let left = iv.extend_left(c, fwd);
+                    assert_eq!(
+                        left,
+                        extend_left_reference(iv, c, fwd),
+                        "extend_left({c}) on {iv:?}"
+                    );
+                    assert_eq!(kids_left[c as usize], left, "children_left[{c}] on {iv:?}");
+                    checked += 1;
+                    if let Some(child) = right {
+                        next.push(child);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        assert!(checked > 16, "walk covered {checked} extensions");
+    }
+
+    #[test]
+    fn extend_matches_unfused_reference_on_all_reachable_intervals() {
+        // Full IUPAC table, compact ACGT table (high codes have no lane), single-symbol table.
+        let texts = [
+            "ACGTNACGTRYSWKMBDHVACGTNNACGTAC",
+            "ACGTTGCAACGTACGTTGCAACGTGGA",
+            "AAAAAAAAAAAAAAAA",
+        ];
+        for enc in [
+            crate::occ::OccEncoding::Bitplane,
+            crate::occ::OccEncoding::OneHot,
+        ] {
+            for text in texts {
+                let (fwd, rev) = make_fwd_rev_with(text, enc);
+                assert_extensions_match_reference(&fwd, &rev, 6);
+            }
+        }
     }
 }

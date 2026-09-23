@@ -508,4 +508,113 @@ mod tests {
             }
         }
     }
+
+    // ── rank_with_below / rank_all_pair ──────────────────────────────────────
+
+    /// Texts covering every lane layout the fused path branches on: the full 16-lane table
+    /// (`all_lanes == u16::MAX`), a compact 5-lane one (codes `N..=V` have no lane while
+    /// their `below` set is non-empty, and `below(N)` covers every lane), and a 2-lane,
+    /// 1-plane one.
+    fn fused_rank_texts() -> Vec<String> {
+        vec![
+            "ACGTNRYSWKMBDHV".repeat(40),
+            "ACGTTGCAACGT".repeat(30),
+            "A".repeat(130),
+        ]
+    }
+
+    #[test]
+    fn rank_with_below_matches_rank_and_rank_set() {
+        for text in fused_rank_texts() {
+            let bwt = build_bwt_for(&text);
+            let n = bwt.len() as u32;
+            for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+                let occ = build_occ_table(&bwt, enc);
+                for c in 0..ALPHABET_SIZE as u8 {
+                    for i in 0..=n {
+                        assert_eq!(
+                            occ.rank_with_below(c, i),
+                            (occ.rank(c, i), occ.rank_set(SymbolSet::below(c), i)),
+                            "rank_with_below({c}, {i}) mismatch ({enc:?}, {} lanes)",
+                            occ.num_lanes()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rank_with_below_pair_matches_scalar() {
+        for text in fused_rank_texts() {
+            let bwt = build_bwt_for(&text);
+            let n = bwt.len() as u32;
+            for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+                let occ = build_occ_table(&bwt, enc);
+                for c in 0..ALPHABET_SIZE as u8 {
+                    for lo in (0..=n).step_by(7) {
+                        for hi in (lo..=n).step_by(11).chain([lo, n]) {
+                            let pair = occ.rank_with_below_pair(c, lo, hi);
+                            let scalar = (occ.rank_with_below(c, lo), occ.rank_with_below(c, hi));
+                            // `Some` exactly when `c` occurs in `bwt[lo..hi)`; otherwise the
+                            // extension is dead and the pair form skips the class ranks.
+                            let alive = occ.rank(c, lo) < occ.rank(c, hi);
+                            assert_eq!(
+                                pair,
+                                alive.then_some(scalar),
+                                "rank_with_below_pair({c}, {lo}, {hi}) mismatch ({enc:?})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rank_all_pair_matches_rank_all() {
+        for text in fused_rank_texts() {
+            let bwt = build_bwt_for(&text);
+            let n = bwt.len() as u32;
+            for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+                let occ = build_occ_table(&bwt, enc);
+                for lo in (0..=n).step_by(5) {
+                    // Includes the same-block (`lo`, `lo + 1`) and degenerate (`lo == hi`) pairs.
+                    for hi in (lo..=n).step_by(13).chain([lo, (lo + 1).min(n), n]) {
+                        assert_eq!(
+                            occ.rank_all_pair(lo, hi),
+                            (occ.rank_all(lo), occ.rank_all(hi)),
+                            "rank_all_pair({lo}, {hi}) mismatch ({enc:?})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn below_lanes_matches_set_lanes_and_is_rebuilt_after_deserialization() {
+        for text in fused_rank_texts() {
+            let bwt = build_bwt_for(&text);
+            for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+                let occ = build_occ_table(&bwt, enc);
+                for c in 0..ALPHABET_SIZE as u8 {
+                    assert_eq!(
+                        occ.below_lanes[c as usize],
+                        occ.set_lanes(SymbolSet::below(c)),
+                        "below_lanes[{c}] ({enc:?}, {} lanes)",
+                        occ.num_lanes()
+                    );
+                }
+                let bytes = bincode::serialize(&occ).unwrap();
+                let mut restored: crate::occ::OccTable = bincode::deserialize(&bytes).unwrap();
+                assert_eq!(
+                    restored.below_lanes, [0u16; ALPHABET_SIZE],
+                    "derived field must not be stored on disk"
+                );
+                restored.rebuild_derived();
+                assert_eq!(restored, occ);
+            }
+        }
+    }
 }
