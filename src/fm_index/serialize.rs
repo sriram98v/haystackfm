@@ -73,7 +73,7 @@ impl FmIndex {
         })?;
         let header_index = HeaderIndex::build(&deserialized.seq_headers)?;
         let mut occ = deserialized.occ;
-        occ.build_select_hints();
+        occ.rebuild_derived();
         Ok(Self {
             header_index,
             c_array: deserialized.c_array,

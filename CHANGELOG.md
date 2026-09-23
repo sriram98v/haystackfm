@@ -9,6 +9,10 @@ Before 1.0, a breaking change bumps the **minor** version.
 ## [Unreleased]
 
 ### Added
+- `OccTable::rank_with_below(c, i)` / `rank_with_below_pair(c, lo, hi)`: `rank(c, ·)` and
+  the class rank of every symbol below `c` from one block-record load per border — the
+  two numbers a bidirectional extension step needs. `OccTable::rank_all_pair(lo, hi)`:
+  `rank_all` on both borders with both records prefetched first.
 - `BidirInterval::contract_right` / `BidirFmIndex::contract_right`: the inverse of
   `extend_right` (Pc → P), the mirror of `contract_left` run on the reverse half (select,
   LCP widening and class rank on the reverse index, forward interval recovered from the
@@ -68,6 +72,11 @@ Before 1.0, a breaking change bumps the **minor** version.
     alphabet; `BidirFmIndex::compatible_set` exposes that alphabet's match set.
 
 ### Changed
+- `BidirInterval::extend_right` / `extend_left` touch two occ block records per step
+  instead of four: the LF rank and the `below(c)` class rank at each border now come from
+  one fused load (`rank_with_below_pair`), with the `below(c)` lane mask precomputed per
+  symbol at build/load time. `children_right` / `children_left` prefetch both borders
+  before ranking. Results are bit-identical.
 - **Breaking.** `BidirInterval` gains a `len: u32` field (the matched pattern length,
   maintained by every extension and contraction); struct literals must supply it.
 - `BidirFmIndex::build_cpu*` now builds the reverse half with the configured
