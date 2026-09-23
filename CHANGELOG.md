@@ -35,8 +35,11 @@ Before 1.0, a breaking change bumps the **minor** version.
 - `OccTable::select(c, r)`: position of the r-th occurrence of `c` in the BWT, from the
   existing superblock/block/lane-mask layout plus a small hint array (rebuilt on load,
   not serialized).
-- Serialized indexes now start with a 4-byte format marker (`"HFM\x01"`). Legacy blobs
-  without it still load, with `has_lcp() == false`.
+- Serialized indexes now start with a 4-byte format marker (`"HFM"` plus a version byte,
+  currently 2; see *Changed*). Legacy blobs without it still load, with
+  `has_lcp() == false`.
+- `benches/serialize.rs` and `examples/serde_profile.rs` measure `to_bytes` /
+  `from_bytes`, the single-threaded startup cost a consumer pays before any query.
 - `FmIndexError::LcpNotBuilt`, `PatternTooLong`, `InvalidContraction`.
 - `FwdInterval` (`BidirInterval::fwd()`): a forward-only row range with `extend_left`
   (an LF step, valid on any sub-range of an interval), `parent` (the nearest suffix-tree
@@ -77,6 +80,18 @@ Before 1.0, a breaking change bumps the **minor** version.
   one fused load (`rank_with_below_pair`), with the `below(c)` lane mask precomputed per
   symbol at build/load time. `children_right` / `children_left` prefetch both borders
   before ranking. Results are bit-identical.
+- **Breaking (on-disk format).** Serialized indexes are format version 2 (`"HFM\x02"`):
+  the occ table's checkpoints and block records, the SA samples, the LCP arrays and the
+  text are written as length-prefixed little-endian byte blobs that `from_bytes` copies
+  in bulk instead of decoding one element at a time through serde. Loading a 117 MB
+  bidirectional index (10 Mbp, `sa_sample_rate: 1`, `OneHot`, no LCP) drops from ~630 ms
+  to ~15 ms under the crate's release profile (~68 ms to ~10 ms at opt-level 3).
+  Version-1 (`"HFM\x01"`) and legacy blobs still load unchanged; any other `"HFM"` version
+  is rejected with a clear `DeserializeError`. `FORMAT_MAGIC` now reads `"HFM\x02"` and
+  `FORMAT_MAGIC_V1` names the previous marker. Blobs written by this version cannot be
+  read by older builds.
+- `BidirFmIndex::to_bytes` returns `SerializeError` instead of silently truncating the
+  length prefix when the forward half exceeds 4 GiB.
 - **Breaking.** `BidirInterval` gains a `len: u32` field (the matched pattern length,
   maintained by every extension and contraction); struct literals must supply it.
 - `BidirFmIndex::build_cpu*` now builds the reverse half with the configured

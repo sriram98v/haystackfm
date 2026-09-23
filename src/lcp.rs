@@ -25,13 +25,35 @@ pub const LCP_CAP: u16 = u16::MAX;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LcpArray {
     /// `lcp[i] = min(LCP(SA[i-1], SA[i]), LCP_CAP)`, `lcp[0] = 0`.
+    #[serde(with = "crate::serde_raw::u16s")]
     lcp: Vec<u16>,
     /// Minimum of `lcp` over each `LCP_BLOCK_SIZE`-row block.
+    #[serde(with = "crate::serde_raw::u16s")]
     block_min: Vec<u16>,
     /// Sparse table over `block_min` for levels `1..=max_level`, flattened level by level:
     /// level `k` holds `nb - 2^k + 1` entries, entry `j` = `min(block_min[j..j + 2^k])`.
     /// Level 0 is `block_min` itself.
+    #[serde(with = "crate::serde_raw::u16s")]
     sparse: Vec<u16>,
+}
+
+/// [`LcpArray`] as written by serialization format version 1: the three arrays as bincode
+/// element sequences rather than byte blobs. Read-only.
+#[derive(Deserialize)]
+pub(crate) struct LcpArrayV1 {
+    lcp: Vec<u16>,
+    block_min: Vec<u16>,
+    sparse: Vec<u16>,
+}
+
+impl From<LcpArrayV1> for LcpArray {
+    fn from(v1: LcpArrayV1) -> Self {
+        Self {
+            lcp: v1.lcp,
+            block_min: v1.block_min,
+            sparse: v1.sparse,
+        }
+    }
 }
 
 impl LcpArray {

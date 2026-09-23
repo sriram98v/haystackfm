@@ -58,6 +58,7 @@ pub struct OccTable {
     /// superblock_checkpoints[sb*num_lanes + lane] = cumulative count of lane's symbol
     /// in bwt[0..sb*SUPERBLOCK_SIZE). Touched once per SUPERBLOCK_SIZE (512) positions,
     /// so it stays a separate array rather than bloating the per-block record.
+    #[serde(with = "crate::serde_raw::u32s")]
     superblock_checkpoints: Vec<u32>,
     /// Per-block record, interleaved so one `rank`/`lf_step` call touches a single
     /// contiguous slice instead of 3 independent arrays (was `block_deltas: Vec<u16>` +
@@ -67,13 +68,13 @@ pub struct OccTable {
     /// depending on `encoding` (see [`OccEncoding`]).
     /// `block_stride` = `num_lanes*2 + (num_planes or num_lanes)*8` bytes; block `b`'s record
     /// starts at `block_data[b*block_stride..]`.
+    #[serde(with = "crate::serde_raw::bytes")]
     block_data: Vec<u8>,
     /// Byte stride of one block's record in `block_data`.
     block_stride: usize,
-    /// Which Level-3 lane encoding `block_data`'s trailing region uses.
-    /// `#[serde(default)]` so indices serialized before this field existed deserialize as
-    /// `Bitplane` (the only encoding that ever existed on disk).
-    #[serde(default)]
+    /// Which Level-3 lane encoding `block_data`'s trailing region uses. Every on-disk
+    /// format version stores it: bincode reads struct fields positionally, so a
+    /// `#[serde(default)]` could never stand in for a missing one.
     encoding: OccEncoding,
     pub text_len: u32,
     /// Select hints (see [`select`](Self::select)): derived from `superblock_checkpoints`,
@@ -85,6 +86,44 @@ pub struct OccTable {
     /// `lane_to_symbol`, so skipped on disk and rebuilt by `rebuild_derived`.
     #[serde(skip)]
     below_lanes: [u16; ALPHABET_SIZE],
+}
+
+/// [`OccTable`] as written by serialization format version 1 (and legacy blobs): the same
+/// fields with `superblock_checkpoints` as a bincode element sequence rather than a byte
+/// blob. Read-only; `From` converts into the live type with its derived state
+/// (`select_hints`, `below_lanes`) left empty, exactly like a freshly deserialized
+/// `OccTable`, for the caller (`FmIndex::from_bytes`, via `rebuild_derived`) to rebuild.
+#[derive(serde::Deserialize)]
+pub(crate) struct OccTableV1 {
+    num_lanes: u8,
+    num_planes: u8,
+    symbol_to_lane: [u8; ALPHABET_SIZE],
+    lane_to_symbol: [u8; ALPHABET_SIZE],
+    superblock_checkpoints: Vec<u32>,
+    block_data: Vec<u8>,
+    block_stride: usize,
+    /// Mandatory: bincode's struct reader supplies every field positionally, so
+    /// `#[serde(default)]` could never have applied to a blob missing it.
+    encoding: OccEncoding,
+    text_len: u32,
+}
+
+impl From<OccTableV1> for OccTable {
+    fn from(v1: OccTableV1) -> Self {
+        Self {
+            num_lanes: v1.num_lanes,
+            num_planes: v1.num_planes,
+            symbol_to_lane: v1.symbol_to_lane,
+            lane_to_symbol: v1.lane_to_symbol,
+            superblock_checkpoints: v1.superblock_checkpoints,
+            block_data: v1.block_data,
+            block_stride: v1.block_stride,
+            encoding: v1.encoding,
+            text_len: v1.text_len,
+            select_hints: Vec::new(),
+            below_lanes: [0; ALPHABET_SIZE],
+        }
+    }
 }
 
 /// Sentinel lane value meaning "symbol never appears in this BWT".

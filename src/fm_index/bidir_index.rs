@@ -401,8 +401,14 @@ impl BidirFmIndex {
         let fwd_bytes = self.fwd.to_bytes()?;
         let rev_bytes = self.rev.to_bytes()?;
         // Format: [4-byte fwd_len (LE)][fwd_bytes][rev_bytes]
+        let fwd_len = u32::try_from(fwd_bytes.len()).map_err(|_| {
+            FmIndexError::SerializeError(format!(
+                "forward half is {} bytes; the bidirectional container stores a u32 length",
+                fwd_bytes.len()
+            ))
+        })?;
         let mut out = Vec::with_capacity(4 + fwd_bytes.len() + rev_bytes.len());
-        out.extend_from_slice(&(fwd_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&fwd_len.to_le_bytes());
         out.extend_from_slice(&fwd_bytes);
         out.extend_from_slice(&rev_bytes);
         Ok(out)
@@ -997,5 +1003,40 @@ mod tests {
             iv2 = restored.extend_right(iv2, c).unwrap();
         }
         assert_eq!(iv1.size(), iv2.size());
+    }
+
+    /// Frozen at `9b32c9f` (format version 1) by a throwaway generator from the same input
+    /// and config `serialize.rs`'s fixture tests rebuild: `chr1` / `plasmid` / `tiny`,
+    /// `sa_sample_rate: 2, OneHot, build_lcp: true, lookup_depth: 3`. The fresh build's v2
+    /// bytes must equal the loaded index's, i.e. every stored field survived the version
+    /// upgrade.
+    #[test]
+    fn v1_bidir_fixture_loads_and_matches_a_fresh_build() {
+        use crate::alphabet::DnaSequence;
+        use crate::occ::OccEncoding;
+        let blob = include_bytes!("../../tests/fixtures/v1_bidir_onehot_lcp_lookup.hfm");
+        let loaded = BidirFmIndex::from_bytes(blob).unwrap();
+        let input = [
+            DnaSequence::from_str_with_header("ACGTNACGTRYSWKMBDHVACGTACGTTTGCA", "chr1").unwrap(),
+            DnaSequence::from_str_with_header("TTGACGTACGTNNACGGAAC", "plasmid").unwrap(),
+            DnaSequence::from_str_with_header("GATTACA", "tiny").unwrap(),
+        ];
+        let config = FmIndexConfig {
+            sa_sample_rate: 2,
+            use_gpu: false,
+            occ_encoding: OccEncoding::OneHot,
+            build_lcp: true,
+            lookup_depth: 3,
+            ..Default::default()
+        };
+        let fresh = BidirFmIndex::build_cpu(&input, &config).unwrap();
+        assert!(loaded.has_lcp());
+        assert_eq!(loaded.lookup_depth(), 3);
+        assert_eq!(loaded.to_bytes().unwrap(), fresh.to_bytes().unwrap());
+        let q: Vec<u8> = "ACGT".chars().map(|c| encode_char(c).unwrap()).collect();
+        assert_eq!(
+            loaded.find_smems(&q, 3, true),
+            fresh.find_smems(&q, 3, true)
+        );
     }
 }

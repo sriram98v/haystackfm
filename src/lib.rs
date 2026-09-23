@@ -49,6 +49,7 @@ pub mod fm_index;
 pub mod lcp;
 pub mod occ;
 mod prefetch;
+mod serde_raw;
 pub mod suffix_array;
 
 #[cfg(feature = "gpu")]

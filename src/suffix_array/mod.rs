@@ -55,11 +55,34 @@ pub struct SampledSuffixArray {
     /// Interleaved per-word records, `SA_RECORD_STRIDE` bytes each: bitvector word (bit i set
     /// iff `SA[i] % sample_rate == 0`), superblock checkpoint, delta. Word `w`'s record starts
     /// at `word_data[w * SA_RECORD_STRIDE..]`. Length: `ceil(text_len / 64) * SA_RECORD_STRIDE`.
+    #[serde(with = "crate::serde_raw::bytes")]
     word_data: Vec<u8>,
     /// SA values at sampled positions, in ascending BWT row order.
+    #[serde(with = "crate::serde_raw::u32s")]
     sa_vals: Vec<u32>,
     pub sample_rate: u32,
     text_len: u32,
+}
+
+/// [`SampledSuffixArray`] as written by serialization format version 1: `sa_vals` as a
+/// bincode element sequence rather than a byte blob. Read-only.
+#[derive(serde::Deserialize)]
+pub(crate) struct SampledSuffixArrayV1 {
+    word_data: Vec<u8>,
+    sa_vals: Vec<u32>,
+    sample_rate: u32,
+    text_len: u32,
+}
+
+impl From<SampledSuffixArrayV1> for SampledSuffixArray {
+    fn from(v1: SampledSuffixArrayV1) -> Self {
+        Self {
+            word_data: v1.word_data,
+            sa_vals: v1.sa_vals,
+            sample_rate: v1.sample_rate,
+            text_len: v1.text_len,
+        }
+    }
 }
 
 impl SampledSuffixArray {
