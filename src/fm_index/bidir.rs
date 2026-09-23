@@ -35,16 +35,20 @@ use crate::lcp::LCP_CAP;
 /// lexicographically smaller than c appear in the current interval, thereby
 /// locating the block of c-extending positions within the paired interval.
 ///
-/// ## Contraction (cP → P), see [`contract_left`](Self::contract_left)
+/// ## Contraction, see [`contract_left`](Self::contract_left) / [`contract_right`](Self::contract_right)
 ///
-/// The inverse of `extend_left`, using the forward index's select and LCP array:
+/// **Contract left** (cP → P) inverts `extend_left`, using the forward index's select and
+/// LCP array:
 /// ```text
 /// r        = select_fwd(c, fwd_lo − C[c] + 1)          // ψ(fwd_lo): row of P after its c
 /// [lo, hi) = LCP-expansion of [r, r + |cP-interval|) to all rows with prefix P
 /// offset   = Σ_{b < c} (Occ_fwd(b, hi) − Occ_fwd(b, lo))
 /// rev_lo   = rev_lo(cP) − offset
 /// ```
-/// The cursor therefore carries the matched pattern length in `len`.
+///
+/// **Contract right** (Pc → P) inverts `extend_right` with the same steps on the reverse
+/// index (Pc is c·P^R there), the roles of `fwd` and `rev` swapped. The cursor therefore
+/// carries the matched pattern length in `len`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BidirInterval {
     /// Start of the SA interval in the forward FM-index.
@@ -171,59 +175,70 @@ impl BidirInterval {
     ///   not the interval of `c·P` for the given `c` (detected when `fwd_lo` precedes
     ///   `C[c]` or the select runs past the last `c`).
     pub fn contract_left(&self, c: u8, fwd: &FmIndex) -> Result<Self, FmIndexError> {
-        let lcp = fwd.lcp.as_ref().ok_or(FmIndexError::LcpNotBuilt)?;
+        let Some(ell) = self.contracted_len(fwd)? else {
+            return Ok(Self::full(fwd.text_len));
+        };
+        let (fwd_lo, fwd_hi, rev_lo) =
+            contract_half(self.fwd_lo, self.size(), self.rev_lo, ell, c, fwd)?;
+        Ok(Self {
+            fwd_lo,
+            fwd_hi,
+            rev_lo,
+            rev_hi: rev_lo + (fwd_hi - fwd_lo),
+            len: ell,
+        })
+    }
+
+    /// Contract the matched pattern on the right (Pc → P), the inverse of
+    /// [`extend_right`](Self::extend_right): `self` must be the interval of `Pc` (with
+    /// `len == |Pc|`) and `c` the symbol it was extended by. Returns the interval of `P`.
+    ///
+    /// Mirror image of [`contract_left`](Self::contract_left) on the **reverse** index
+    /// (appending `c` to `P` prepends it to `P^R`), with the same cost: one `select` and two
+    /// LCP reads on the reverse half, plus its `count_smaller_than` class rank.
+    ///
+    /// Sentinel-followed occurrences of `P` (P at the end of a reference) count towards the
+    /// forward offset as symbol `0 < c`, and `c == 0` (contracting `P$`) is allowed.
+    ///
+    /// # Errors
+    /// - [`FmIndexError::LcpNotBuilt`] if `rev` has no LCP array (built with
+    ///   `build_lcp = false`, on the GPU, or loaded from a blob written before the reverse
+    ///   half carried one).
+    /// - [`FmIndexError::PatternTooLong`] if `|P| > LCP_CAP`.
+    /// - [`FmIndexError::InvalidContraction`] if `self` is empty, has `len == 0`, or is
+    ///   not the interval of `P·c` for the given `c`.
+    pub fn contract_right(&self, c: u8, rev: &FmIndex) -> Result<Self, FmIndexError> {
+        let Some(ell) = self.contracted_len(rev)? else {
+            return Ok(Self::full(rev.text_len));
+        };
+        let (rev_lo, rev_hi, fwd_lo) =
+            contract_half(self.rev_lo, self.size(), self.fwd_lo, ell, c, rev)?;
+        Ok(Self {
+            fwd_lo,
+            fwd_hi: fwd_lo + (rev_hi - rev_lo),
+            rev_lo,
+            rev_hi,
+            len: ell,
+        })
+    }
+
+    /// Guards shared by both contractions: the length of the contracted pattern, or
+    /// `None` when it is the empty pattern (the caller returns the full interval).
+    fn contracted_len(&self, idx: &FmIndex) -> Result<Option<u32>, FmIndexError> {
+        if !idx.has_lcp() {
+            return Err(FmIndexError::LcpNotBuilt);
+        }
         if self.is_empty() || self.len == 0 {
             return Err(FmIndexError::InvalidContraction);
         }
         let ell = self.len - 1;
         if ell == 0 {
-            return Ok(Self::full(fwd.text_len));
+            return Ok(None);
         }
         if ell > LCP_CAP as u32 {
             return Err(FmIndexError::PatternTooLong(ell));
         }
-
-        // ψ(fwd_lo): the row of the suffix that follows the first occurrence's leading c.
-        // Every row of cP maps into interval(P), and the `size` rows of P preceded by c
-        // start at r, so [r, r + size) is a non-empty sub-range of interval(P).
-        let rank_in_c = self
-            .fwd_lo
-            .checked_sub(fwd.c_array.get(c))
-            .ok_or(FmIndexError::InvalidContraction)?;
-        let r = fwd
-            .occ
-            .select(c, rank_in_c + 1)
-            .ok_or(FmIndexError::InvalidContraction)?;
-        let size = self.size();
-        if r.checked_add(size).is_none_or(|end| end > fwd.text_len) {
-            return Err(FmIndexError::InvalidContraction);
-        }
-
-        // Widen to the maximal run of rows sharing an `ell`-prefix. O(1) when the boundary
-        // tests fail, i.e. when every occurrence of P is preceded by c.
-        let mut lo = r;
-        let mut hi = r + size;
-        if lcp.get(lo) >= ell {
-            lo = lcp.psv_below(lo, ell);
-        }
-        if hi < fwd.text_len && lcp.get(hi) >= ell {
-            hi = lcp.nsv_below(hi, ell);
-        }
-
-        // Invert extend_left's offset: the c-block sits after every occurrence of P
-        // preceded by a smaller symbol, so those are exactly the rows before it in rev.
-        let offset = count_smaller_than(c, lo, hi, fwd);
-        let rev_lo = self
-            .rev_lo
-            .checked_sub(offset)
-            .ok_or(FmIndexError::InvalidContraction)?;
-        Ok(Self {
-            fwd_lo: lo,
-            fwd_hi: hi,
-            rev_lo,
-            rev_hi: rev_lo + (hi - lo),
-            len: ell,
-        })
+        Ok(Some(ell))
     }
 
     // ── Class counts ──────────────────────────────────────────────────────────
@@ -379,6 +394,55 @@ impl BidirInterval {
 fn count_smaller_than(c: u8, lo: u32, hi: u32, index: &FmIndex) -> u32 {
     let (r_lo, r_hi) = index.occ.rank_set_pair(SymbolSet::below(c), lo, hi);
     r_hi - r_lo
+}
+
+/// Undo a prepend of `c` on `idx`'s half of a cursor: `[lo, lo + size)` is that half's
+/// interval of `c·X` and `other_lo` the paired half's start. Returns `(lo, hi, other_lo)`
+/// of `X`, whose length is `ell`. Shared by `contract_left` (`idx` = forward) and
+/// `contract_right` (`idx` = reverse); the caller has already checked `idx.has_lcp()`.
+fn contract_half(
+    lo: u32,
+    size: u32,
+    other_lo: u32,
+    ell: u32,
+    c: u8,
+    idx: &FmIndex,
+) -> Result<(u32, u32, u32), FmIndexError> {
+    let lcp = idx.lcp.as_ref().ok_or(FmIndexError::LcpNotBuilt)?;
+
+    // ψ(lo): the row of the suffix that follows the first occurrence's leading c. Every
+    // row of cX maps into interval(X), and the `size` rows of X preceded by c start at r,
+    // so [r, r + size) is a non-empty sub-range of interval(X).
+    let rank_in_c = lo
+        .checked_sub(idx.c_array.get(c))
+        .ok_or(FmIndexError::InvalidContraction)?;
+    let r = idx
+        .occ
+        .select(c, rank_in_c + 1)
+        .ok_or(FmIndexError::InvalidContraction)?;
+    if r.checked_add(size).is_none_or(|end| end > idx.text_len) {
+        return Err(FmIndexError::InvalidContraction);
+    }
+
+    // Widen to the maximal run of rows sharing an `ell`-prefix. O(1) when the boundary
+    // tests fail, i.e. when every occurrence of X is preceded by c.
+    let mut new_lo = r;
+    let mut new_hi = r + size;
+    if lcp.get(new_lo) >= ell {
+        new_lo = lcp.psv_below(new_lo, ell);
+    }
+    if new_hi < idx.text_len && lcp.get(new_hi) >= ell {
+        new_hi = lcp.nsv_below(new_hi, ell);
+    }
+
+    // Invert the extension's offset: the c-block sits after every occurrence of X
+    // preceded by a smaller symbol, so those are exactly the rows before it in the
+    // paired half.
+    let offset = count_smaller_than(c, new_lo, new_hi, idx);
+    let new_other_lo = other_lo
+        .checked_sub(offset)
+        .ok_or(FmIndexError::InvalidContraction)?;
+    Ok((new_lo, new_hi, new_other_lo))
 }
 
 #[cfg(test)]
@@ -762,6 +826,149 @@ mod tests {
         let iv = full.extend_left(1, &no_lcp).unwrap();
         assert!(matches!(
             iv.contract_left(1, &no_lcp),
+            Err(FmIndexError::LcpNotBuilt)
+        ));
+    }
+
+    // ── contract_right ────────────────────────────────────────────────────────
+
+    /// `ivs[k]` = interval of `pat[..k]`, built left-to-right with `extend_right`.
+    fn right_walk(pat: &[u8], fwd: &FmIndex, rev: &FmIndex) -> Vec<BidirInterval> {
+        let mut ivs = vec![BidirInterval::full(fwd.text_len)];
+        for &c in pat {
+            let next = ivs.last().unwrap().extend_right(c, rev).unwrap();
+            ivs.push(next);
+        }
+        ivs
+    }
+
+    fn assert_right_chain(pat: &[u8], fwd: &FmIndex, rev: &FmIndex, ctx: &str) {
+        let ivs = right_walk(pat, fwd, rev);
+        for k in 0..pat.len() {
+            assert_eq!(
+                ivs[k + 1].contract_right(pat[k], rev).unwrap(),
+                ivs[k],
+                "{ctx} k={k}"
+            );
+        }
+    }
+
+    #[test]
+    fn len_tracks_right_contractions_too() {
+        let (fwd, rev) = make_fwd_rev("ACGTACGTTTGACCA");
+        let full = BidirInterval::full(fwd.text_len);
+        let a = full.extend_left(encode("A")[0], &fwd).unwrap();
+        let ac = a.extend_right(encode("C")[0], &rev).unwrap();
+        assert_eq!(ac.len, 2);
+        for child in ac.children_right(&rev).iter().flatten() {
+            assert_eq!(child.len, 3);
+            assert_eq!(
+                child
+                    .contract_right(child_code(&ac, child, &rev), &rev)
+                    .unwrap(),
+                ac
+            );
+        }
+        let back = ac.contract_right(encode("C")[0], &rev).unwrap();
+        assert_eq!(back, a);
+        assert_eq!(back.len, 1);
+        assert_eq!(back.contract_left(encode("A")[0], &fwd).unwrap(), full);
+    }
+
+    /// The code `child` was produced by, found by matching against `children_right`.
+    fn child_code(parent: &BidirInterval, child: &BidirInterval, rev: &FmIndex) -> u8 {
+        parent
+            .children_right(rev)
+            .iter()
+            .position(|c| c.as_ref() == Some(child))
+            .unwrap() as u8
+    }
+
+    #[test]
+    fn contract_right_inverts_extend_right_for_every_prefix() {
+        let text = "ACGTACGTTTGACCAGGTACGTACGAAATTTCCCGGG";
+        let (fwd, rev) = make_fwd_rev(text);
+        for start in 0..text.len() {
+            for end in start + 1..=text.len() {
+                let pat = encode(&text[start..end]);
+                assert_right_chain(&pat, &fwd, &rev, &text[start..end]);
+            }
+        }
+    }
+
+    #[test]
+    fn contract_right_to_empty_pattern_gives_full_interval() {
+        let (fwd, rev) = make_fwd_rev("ACGTACGT");
+        let full = BidirInterval::full(fwd.text_len);
+        for c in encode("ACGT") {
+            let iv = full.extend_right(c, &rev).unwrap();
+            assert_eq!(iv.contract_right(c, &rev).unwrap(), full);
+        }
+    }
+
+    #[test]
+    fn contract_right_on_repeats_uses_lcp_expansion() {
+        // A^200: one occurrence of A^k sits at the sequence end, followed by the sentinel
+        // rather than A, so [r, r+size) on the reverse index != interval(P) there.
+        let text = "A".repeat(200);
+        let (fwd, rev) = make_fwd_rev(&text);
+        assert_right_chain(&encode(&text), &fwd, &rev, "A^200");
+        let text = "ACGT".repeat(100);
+        let (fwd, rev) = make_fwd_rev(&text);
+        for end in text.len() - 8..=text.len() {
+            assert_right_chain(&encode(&text[..end]), &fwd, &rev, "ACGT^100");
+        }
+    }
+
+    #[test]
+    fn contract_right_with_sentinel_symbol() {
+        let (fwd, rev) = make_fwd_rev("ACGTACGT");
+        let pat = encode("CGT");
+        let iv = *right_walk(&pat, &fwd, &rev).last().unwrap();
+        assert_eq!(iv.size(), 2);
+        // "CGT$": the occurrence at the sequence end.
+        let dollar = iv.extend_right(0, &rev).unwrap();
+        assert_eq!(dollar.size(), 1);
+        assert_eq!(dollar.contract_right(0, &rev).unwrap(), iv);
+    }
+
+    #[test]
+    fn contract_right_errors() {
+        let (fwd, rev) = make_fwd_rev("ACGTACGT");
+        let full = BidirInterval::full(fwd.text_len);
+        assert!(matches!(
+            full.contract_right(1, &rev),
+            Err(FmIndexError::InvalidContraction)
+        ));
+        let empty = BidirInterval {
+            fwd_lo: 3,
+            fwd_hi: 3,
+            rev_lo: 3,
+            rev_hi: 3,
+            len: 2,
+        };
+        assert!(matches!(
+            empty.contract_right(1, &rev),
+            Err(FmIndexError::InvalidContraction)
+        ));
+        // Wrong symbol: "AC" contracted by G — rev_lo precedes C_rev[G].
+        let ac = *right_walk(&encode("AC"), &fwd, &rev).last().unwrap();
+        assert!(ac.contract_right(encode("G")[0], &rev).is_err());
+
+        let seq = DnaSequence::from_str("ACGTACGT").unwrap();
+        let no_lcp = FmIndex::build_cpu(
+            &[seq],
+            &FmIndexConfig {
+                sa_sample_rate: 1,
+                use_gpu: false,
+                build_lcp: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let iv = full.extend_right(1, &no_lcp).unwrap();
+        assert!(matches!(
+            iv.contract_right(1, &no_lcp),
             Err(FmIndexError::LcpNotBuilt)
         ));
     }

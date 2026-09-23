@@ -9,6 +9,10 @@ Before 1.0, a breaking change bumps the **minor** version.
 ## [Unreleased]
 
 ### Added
+- `BidirInterval::contract_right` / `BidirFmIndex::contract_right`: the inverse of
+  `extend_right` (Pc → P), the mirror of `contract_left` run on the reverse half (select,
+  LCP widening and class rank on the reverse index, forward interval recovered from the
+  offset). Same cost and error behaviour as `contract_left`.
 - `BidirInterval::contract_left` / `BidirFmIndex::contract_left`: the inverse of
   `extend_left` (cP → P) without re-walking. One `OccTable::select` on the forward half
   gives ψ of the interval's first row, the forward LCP array widens that sub-range to the
@@ -18,8 +22,11 @@ Before 1.0, a breaking change bumps the **minor** version.
   `has_lcp()` reports whether contraction is available.
 - `LcpArray` (`src/lcp.rs`): Kasai LCP over the SA rows stored capped at `u16::MAX`, with
   `psv_below` / `nsv_below`. Built during CPU construction while the full suffix array is
-  resident; `FmIndexConfig::build_lcp` (default `true`) controls it. Forward half only;
-  the reverse half of a `BidirFmIndex` never builds one.
+  resident; `FmIndexConfig::build_lcp` (default `true`) controls it. A `BidirFmIndex`
+  builds one per half (the forward one backs `contract_left` / `parent_fwd`, the reverse
+  one `contract_right`), so its resident and serialized size grows by ~2.7 B/base per
+  half. `BidirFmIndex::has_lcp()` is true only when both halves carry one; use
+  `fwd().has_lcp()` / `rev().has_lcp()` for a single direction.
 - `OccTable::select(c, r)`: position of the r-th occurrence of `c` in the BWT, from the
   existing superblock/block/lane-mask layout plus a small hint array (rebuilt on load,
   not serialized).

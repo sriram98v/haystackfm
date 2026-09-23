@@ -354,6 +354,37 @@ proptest! {
         }
     }
 
+    /// `contract_right` is the exact inverse of `extend_right` for every code (sentinel and
+    /// wildcards included) at every step of a left walk — the mirror of the property above
+    /// on the reverse half's LCP array.
+    #[test]
+    fn bidir_contract_right_inverts_extend_right(
+        texts in prop::collection::vec(iupac_string(150), 1..=4),
+        pattern in dna_string(8),
+        sa_sample_rate in 1usize..=32,
+        onehot in any::<bool>(),
+    ) {
+        let idx = build_bidir(&texts, sa_sample_rate, onehot);
+        prop_assert!(idx.has_lcp());
+        let pat = encode_pat(&pattern);
+        let mut iv = idx.full_interval();
+        for (k, &c) in pat.iter().rev().enumerate() {
+            let Some(next) = idx.extend_left(iv, c) else { break };
+            iv = next;
+            prop_assert_eq!(iv.len as usize, k + 1);
+            for code in 0..16u8 {
+                let Some(ext) = idx.extend_right(iv, code) else { continue };
+                let back = idx.contract_right(&ext, code);
+                prop_assert!(back.is_ok(), "contract_right({}) errored: {:?} | pattern='{}' step={} texts={:?}",
+                    code, back.err(), pattern, k, texts);
+                prop_assert_eq!(
+                    back.unwrap(), iv,
+                    "contract_right({}) | pattern='{}' step={} texts={:?}", code, pattern, k, texts
+                );
+            }
+        }
+    }
+
     /// The parent chain of a forward interval (via the LCP array) equals the oracle that
     /// backward-searches every shorter prefix and takes the first strictly larger interval.
     #[test]

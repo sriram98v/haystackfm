@@ -184,6 +184,8 @@ let iv = bidir.full_interval();                 // BidirInterval for the empty p
 bidir.extend_right(iv, code) / extend_left(iv, code)   // Option<BidirInterval>
 bidir.contract_left(&iv, code)                  // Result<BidirInterval>: cP → P, the inverse
                                                 //   of extend_left (needs `build_lcp`, CPU)
+bidir.contract_right(&iv, code)                 // Result<BidirInterval>: Pc → P, the inverse
+                                                //   of extend_right (same requirements)
 bidir.lookup_interval(kmer)                     // Option<BidirInterval>: seed a cursor from the
                                                 //   k-mer tables (`lookup_depth`), no extensions
 // Forward-only intervals (no reverse half): ancestor walks and sub-ranges

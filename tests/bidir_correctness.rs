@@ -977,6 +977,244 @@ mod wild {
                 no_lcp.contract_left(&iv, alphabet::A),
                 Err(FmIndexError::LcpNotBuilt)
             ));
+            let iv = no_lcp
+                .extend_right(no_lcp.full_interval(), alphabet::A)
+                .unwrap();
+            assert!(matches!(
+                no_lcp.contract_right(&iv, alphabet::A),
+                Err(FmIndexError::LcpNotBuilt)
+            ));
+        }
+
+        // ── contract_right ────────────────────────────────────────────────────
+
+        /// `ivs[k]` = interval of `pat[..k]`, built left-to-right with `extend_right`.
+        fn right_chain(idx: &BidirFmIndex, pat: &[u8]) -> Vec<BidirInterval> {
+            let mut ivs = vec![idx.full_interval()];
+            for &c in pat {
+                let next = idx.extend_right(*ivs.last().unwrap(), c).unwrap();
+                ivs.push(next);
+            }
+            ivs
+        }
+
+        /// Interval of `pat` built right-to-left with `extend_left` (independent route).
+        fn left_only(idx: &BidirFmIndex, pat: &[u8]) -> BidirInterval {
+            pat.iter().rev().fold(idx.full_interval(), |iv, &c| {
+                idx.extend_left(iv, c).unwrap()
+            })
+        }
+
+        fn assert_right_round_trip(idx: &BidirFmIndex, iv: BidirInterval, c: u8, ctx: &str) {
+            let ext = idx.extend_right(iv, c).unwrap();
+            let back = idx
+                .contract_right(&ext, c)
+                .unwrap_or_else(|e| panic!("{ctx}: contract_right({c}) failed: {e}"));
+            assert_eq!(back, iv, "{ctx}: contract_right({c}) != original");
+        }
+
+        fn assert_right_chain(idx: &BidirFmIndex, pat: &[u8], ctx: &str) {
+            let ivs = right_chain(idx, pat);
+            for k in 0..pat.len() {
+                let got = idx.contract_right(&ivs[k + 1], pat[k]).unwrap();
+                assert_eq!(got, ivs[k], "{ctx} k={k}");
+            }
+        }
+
+        #[test]
+        fn contract_right_inverts_extend_right_on_random_iupac_multi_seq() {
+            let mut rng = SmallRng::seed_from_u64(0x0DD5_1DE5);
+            let mut saw_wild = false;
+            let mut saw_sentinel = false;
+            for &rate in &[1u32, 32] {
+                for &enc in &[OccEncoding::Bitplane, OccEncoding::OneHot] {
+                    for iter in 0..30 {
+                        let nseq = rng.random_range(1..=4);
+                        let seqs: Vec<Vec<u8>> = (0..nseq)
+                            .map(|_| {
+                                let len = rng.random_range(5..=120);
+                                let runs = rng.random_range(0..=3);
+                                random_seq(&mut rng, len, runs, iter % 3 == 0, iter % 4 == 0)
+                            })
+                            .collect();
+                        let idx = build(&seqs, rate, enc);
+                        assert!(idx.has_lcp());
+                        for seq in &seqs {
+                            for _ in 0..6 {
+                                let plen = rng.random_range(1..=12.min(seq.len()));
+                                let start = rng.random_range(0..=seq.len() - plen);
+                                let pat = &seq[start..start + plen];
+                                let ctx = format!("rate={rate} enc={enc:?} pat={}", show(pat));
+                                let iv = left_only(&idx, pat);
+                                assert_eq!(iv.len as usize, plen);
+                                for c in 0..ALPHABET_SIZE as u8 {
+                                    if idx.extend_right(iv, c).is_none() {
+                                        continue;
+                                    }
+                                    saw_wild |= is_wild(c);
+                                    saw_sentinel |= c == 0;
+                                    assert_right_round_trip(&idx, iv, c, &ctx);
+                                }
+                                assert_right_chain(&idx, pat, &ctx);
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(saw_wild, "no wildcard contraction exercised");
+            assert!(saw_sentinel, "no sentinel contraction exercised");
+        }
+
+        #[test]
+        fn contract_right_across_reference_wildcards_and_inside_wild_patterns() {
+            let idx = build_str(&["ACGRYTACGN", "ACGTACGRYT", "NNACGTRR", "RYTACG"]);
+            for pat in [
+                "YTACG", "RYTACG", "TACG", "ACG", "NACGT", "RR", "N", "GRYT", "ACGR",
+            ] {
+                let pat = pat
+                    .chars()
+                    .map(|ch| alphabet::encode_char(ch).unwrap())
+                    .collect::<Vec<_>>();
+                assert_right_chain(&idx, &pat, &show(&pat));
+                let iv = left_only(&idx, &pat);
+                for c in 0..ALPHABET_SIZE as u8 {
+                    if idx.extend_right(iv, c).is_some() {
+                        assert_right_round_trip(&idx, iv, c, &show(&pat));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn contract_right_undoes_every_child_of_compatible_fanout() {
+            let mut rng = SmallRng::seed_from_u64(78);
+            for iter in 0..20 {
+                let seqs: Vec<Vec<u8>> = (0..rng.random_range(1..=3))
+                    .map(|_| {
+                        let len = rng.random_range(10..=80);
+                        random_seq(&mut rng, len, 3, iter % 2 == 0, false)
+                    })
+                    .collect();
+                let idx = build(&seqs, 1, OccEncoding::OneHot);
+                for seq in &seqs {
+                    let plen = rng.random_range(1..=6.min(seq.len()));
+                    let start = rng.random_range(0..=seq.len() - plen);
+                    let iv = left_only(&idx, &seq[start..start + plen]);
+                    for &q in WILD_CODES.iter().chain(BASES.iter()) {
+                        for c in idx.compatible_set(q).iter() {
+                            if idx.extend_right(iv, c).is_some() {
+                                assert_right_round_trip(&idx, iv, c, &format!("q={q}"));
+                            }
+                        }
+                    }
+                    // `children_right` slot `c` is `extend_right(c)`; each contracts back.
+                    for (c, child) in idx.children_right(&iv).iter().enumerate() {
+                        if let Some(child) = child {
+                            assert_eq!(idx.contract_right(child, c as u8).unwrap(), iv);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn contract_right_on_repeated_and_identical_sequences() {
+            // Identical copies: occurrences of P are followed by different symbols
+            // (sentinel vs base), so the reverse-half sub-range must be LCP-widened.
+            let idx = build_str(&["ACGTACGT", "ACGTACGT", "ACGTACGT", "TACGTACG"]);
+            let text: Vec<u8> = "ACGTACGT"
+                .chars()
+                .map(|c| alphabet::encode_char(c).unwrap())
+                .collect();
+            for start in 0..text.len() {
+                for end in start + 1..=text.len() {
+                    assert_right_chain(&idx, &text[start..end], "copies");
+                }
+            }
+            let long_a = "A".repeat(200);
+            let idx = build_str(&[&long_a, &long_a, "TAAAA"]);
+            assert_right_chain(&idx, &[alphabet::A; 200], "A^200");
+        }
+
+        #[test]
+        fn contract_both_ends_interleaved_on_ambiguous_patterns() {
+            // Grow a cursor by a random mix of left/right extensions over IUPAC references,
+            // then undo them in reverse order; every intermediate cursor must reappear.
+            let mut rng = SmallRng::seed_from_u64(0xB0D1_B0D1);
+            for iter in 0..40 {
+                let seqs: Vec<Vec<u8>> = (0..rng.random_range(1..=3))
+                    .map(|_| {
+                        let len = rng.random_range(10..=100);
+                        random_seq(&mut rng, len, 3, iter % 2 == 0, iter % 3 == 0)
+                    })
+                    .collect();
+                let idx = build(
+                    &seqs,
+                    if iter % 2 == 0 { 1 } else { 16 },
+                    OccEncoding::Bitplane,
+                );
+                for seq in &seqs {
+                    let plen = rng.random_range(1..=15.min(seq.len()));
+                    let start = rng.random_range(0..=seq.len() - plen);
+                    let pat = &seq[start..start + plen];
+                    // Pick a seed position inside the pattern and grow outwards.
+                    let mut l = rng.random_range(0..plen);
+                    let mut r = l;
+                    let mut stack: Vec<(bool, u8, BidirInterval)> = Vec::new();
+                    let mut iv = idx.full_interval();
+                    while l > 0 || r < plen {
+                        let go_left = r == plen || (l > 0 && rng.random_bool(0.5));
+                        let (c, next) = if go_left {
+                            l -= 1;
+                            (pat[l], idx.extend_left(iv, pat[l]).unwrap())
+                        } else {
+                            let c = pat[r];
+                            r += 1;
+                            (c, idx.extend_right(iv, c).unwrap())
+                        };
+                        stack.push((go_left, c, iv));
+                        iv = next;
+                    }
+                    assert_eq!(iv.len as usize, plen);
+                    while let Some((was_left, c, prev)) = stack.pop() {
+                        let back = if was_left {
+                            idx.contract_left(&iv, c)
+                        } else {
+                            idx.contract_right(&iv, c)
+                        };
+                        let ctx = format!("pat={} left={was_left} c={c}", show(pat));
+                        iv = back.unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                        assert_eq!(iv, prev, "{ctx}");
+                    }
+                    assert_eq!(iv, idx.full_interval());
+                }
+            }
+        }
+
+        #[test]
+        fn contract_right_survives_serialization() {
+            let seqs = vec![
+                "ACGTRYACGTNNACGT"
+                    .chars()
+                    .map(|c| alphabet::encode_char(c).unwrap())
+                    .collect::<Vec<_>>(),
+                "TTACGTACGTAA"
+                    .chars()
+                    .map(|c| alphabet::encode_char(c).unwrap())
+                    .collect::<Vec<_>>(),
+            ];
+            let idx = build(&seqs, 4, OccEncoding::Bitplane);
+            let back = BidirFmIndex::from_bytes(&idx.to_bytes().unwrap()).unwrap();
+            assert!(back.has_lcp());
+            assert!(back.fwd().has_lcp() && back.rev().has_lcp());
+            let pat = &seqs[0][3..9];
+            let ivs = right_chain(&idx, pat);
+            for k in 0..pat.len() {
+                let a = idx.contract_right(&ivs[k + 1], pat[k]).unwrap();
+                let b = back.contract_right(&ivs[k + 1], pat[k]).unwrap();
+                assert_eq!(a, b);
+                assert_eq!(a, ivs[k]);
+            }
         }
     }
 
