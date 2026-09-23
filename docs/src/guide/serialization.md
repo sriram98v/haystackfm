@@ -14,12 +14,18 @@ let restored = FmIndex::from_bytes(&bytes)?; // FmIndex
 serialization tag, so a reloaded index keeps the matching semantics it was built with (see
 [Custom Alphabets](./alphabets.md)).
 
-Bytes start with a 4-byte format marker (`"HFM"` + version). Blobs written before the
-marker existed still load, but they carry no LCP array, so `has_lcp()` is `false` and
-`contract_left` / `contract_right` return `FmIndexError::LcpNotBuilt`; rebuild and
-re-serialize to get it. Bidirectional blobs written when only the forward half carried an
-LCP array load the same way: `contract_left` works, `contract_right` does not, and
-`has_lcp()` (which requires both halves) is `false`.
+Bytes start with a 4-byte format marker (`"HFM"` + a version byte, currently 2). Version 2
+stores the large arrays (occ table, SA samples, LCP arrays, text) as raw little-endian byte
+blobs that `from_bytes` copies in bulk rather than decoding element by element, so a
+117 MB bidirectional index loads in about 15 ms instead of about 630 ms. Version-1 blobs
+(`"HFM\x01"`) still load; any other `"HFM"` version is rejected with
+`FmIndexError::DeserializeError` rather than misparsed.
+
+Blobs written before the marker existed also still load, but they carry no LCP array, so
+`has_lcp()` is `false` and `contract_left` / `contract_right` return
+`FmIndexError::LcpNotBuilt`; rebuild and re-serialize to get it. Bidirectional blobs written
+when only the forward half carried an LCP array load the same way: `contract_left` works,
+`contract_right` does not, and `has_lcp()` (which requires both halves) is `false`.
 
 ## Sequence ids are stable
 
