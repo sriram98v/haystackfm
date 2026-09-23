@@ -789,6 +789,44 @@ mod tests {
     }
 
     #[test]
+    fn default_config_builds_no_lcp() {
+        // The LCP arrays are opt-in: a default config carries none, every contraction
+        // reports it, and the (versioned) blob round-trips that state.
+        assert!(!FmIndexConfig::default().build_lcp);
+        let idx = BidirFmIndex::build_cpu(
+            &[DnaSequence::from_str("ACGTACGTTTGACCA").unwrap()],
+            &FmIndexConfig {
+                use_gpu: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!idx.has_lcp());
+        assert!(!idx.fwd().has_lcp());
+        assert!(!idx.rev().has_lcp());
+        let iv = idx
+            .extend_right(idx.full_interval(), encode("A")[0])
+            .unwrap();
+        assert!(matches!(
+            idx.contract_left(&iv, encode("A")[0]),
+            Err(FmIndexError::LcpNotBuilt)
+        ));
+        assert!(matches!(
+            idx.contract_right(&iv, encode("A")[0]),
+            Err(FmIndexError::LcpNotBuilt)
+        ));
+        assert!(matches!(
+            idx.parent_fwd(&iv.fwd()),
+            Err(FmIndexError::LcpNotBuilt)
+        ));
+        let bytes = idx.to_bytes().unwrap();
+        assert_eq!(&bytes[4..8], &crate::fm_index::serialize::FORMAT_MAGIC);
+        let back = BidirFmIndex::from_bytes(&bytes).unwrap();
+        assert!(!back.has_lcp());
+        assert_eq!(back.count_interval(&iv), idx.count_interval(&iv));
+    }
+
+    #[test]
     fn full_interval_covers_all() {
         let idx = bidir("ACGTACGT");
         let iv = idx.full_interval();

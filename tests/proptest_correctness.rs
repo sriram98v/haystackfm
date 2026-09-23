@@ -104,6 +104,7 @@ fn build_bidir(texts: &[String], sa_sample_rate: usize, onehot: bool) -> BidirFm
             } else {
                 OccEncoding::Bitplane
             },
+            build_lcp: true,
             ..Default::default()
         },
     )

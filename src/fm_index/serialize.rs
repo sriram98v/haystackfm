@@ -203,6 +203,7 @@ mod tests {
         let config = FmIndexConfig {
             sa_sample_rate: 2,
             use_gpu: false,
+            build_lcp: true,
             ..Default::default()
         };
         let original = FmIndex::build_cpu(&[seq], &config).unwrap();

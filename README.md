@@ -183,9 +183,12 @@ bidir.seq_headers() / seq_header(id) / seq_id(header)
 let iv = bidir.full_interval();                 // BidirInterval for the empty pattern
 bidir.extend_right(iv, code) / extend_left(iv, code)   // Option<BidirInterval>
 bidir.contract_left(&iv, code)                  // Result<BidirInterval>: cP → P, the inverse
-                                                //   of extend_left (needs `build_lcp`, CPU)
+                                                //   of extend_left
 bidir.contract_right(&iv, code)                 // Result<BidirInterval>: Pc → P, the inverse
-                                                //   of extend_right (same requirements)
+                                                //   of extend_right
+//   Contractions (and parent_fwd below) need the opt-in LCP arrays: build with
+//   `FmIndexConfig { build_lcp: true, .. }` (CPU only, ~2.7 B/base per half), else
+//   they return `FmIndexError::LcpNotBuilt`.
 bidir.lookup_interval(kmer)                     // Option<BidirInterval>: seed a cursor from the
                                                 //   k-mer tables (`lookup_depth`), no extensions
 // Forward-only intervals (no reverse half): ancestor walks and sub-ranges

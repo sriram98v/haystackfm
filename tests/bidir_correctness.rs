@@ -374,6 +374,7 @@ mod wild {
             sa_sample_rate,
             use_gpu: false,
             occ_encoding,
+            build_lcp: true,
             ..Default::default()
         }
     }
@@ -1411,6 +1412,7 @@ mod wild {
                     sa_sample_rate: 2,
                     use_gpu: false,
                     lookup_depth: depth,
+                    build_lcp: true,
                     ..Default::default()
                 },
             )

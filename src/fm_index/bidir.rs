@@ -456,6 +456,7 @@ mod tests {
         let config = FmIndexConfig {
             sa_sample_rate: 1,
             use_gpu: false,
+            build_lcp: true,
             ..Default::default()
         };
         let fwd = FmIndex::build_cpu(&[seq.clone()], &config).unwrap();
