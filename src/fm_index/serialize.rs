@@ -2,13 +2,21 @@
 //!
 //! ## Format
 //!
-//! Version 2 (current): [`FORMAT_MAGIC`] (`"HFM\x02"`) followed by the bincode encoding of
-//! [`SerializableFmIndex`], in which the large numeric vectors (occ checkpoints and block
-//! records, SA samples, LCP arrays, the text) are length-prefixed little-endian byte blobs
-//! (`crate::serde_raw`) that load with one copy each instead of one deserializer call per
-//! element.
+//! Version 3 (current): [`FORMAT_MAGIC`] (`"HFM\x03"`) followed by the bincode encoding of
+//! [`SerializableFmIndex`]. The large numeric vectors (occ checkpoints and block records,
+//! SA samples, LCP arrays, lookup table, the text) are length-prefixed little-endian byte
+//! blobs (`crate::serde_raw`) that load with one copy each. The alphabet's matching tables
+//! ([`AlphabetFns`]) are stored in full, so an index built with a custom alphabet loads back
+//! with the semantics it was built with; the lookup table lists wildcard variants per k-mer
+//! (`crate::fm_index::lookup`).
 //!
-//! Version 1 ([`FORMAT_MAGIC_V1`], `"HFM\x01"`): the same fields with those vectors as plain
+//! Version 2 ([`FORMAT_MAGIC_V2`], `"HFM\x02"`): blobs as above, but only the alphabet *tag*
+//! is stored (so only built-in alphabets load) and the lookup table is exact-only. Still
+//! read (`OwnedSerializableFmIndexV2`), never written. A version-1/2 lookup table built for
+//! an `IupacDna` index whose reference holds ambiguity codes missed matches; it is rebuilt
+//! at load (same depth), otherwise it is converted in place.
+//!
+//! Version 1 ([`FORMAT_MAGIC_V1`], `"HFM\x01"`): version-2 fields with the vectors as plain
 //! element sequences. Still read (`OwnedSerializableFmIndexV1`), never written.
 //!
 //! Legacy (no magic): version-1 field encodings without the LCP array. Distinguishable
@@ -19,22 +27,24 @@
 //! Any other `"HFM"` version byte is rejected with a clear error rather than misparsed.
 
 use super::FmIndex;
-use crate::alphabet::alphabet_fns_from_tag;
+use crate::alphabet::{alphabet_fns_from_tag, AlphabetFns};
 use crate::c_array::CArray;
 use crate::error::FmIndexError;
-use crate::fm_index::lookup::LookupTable;
+use crate::fm_index::lookup::{LookupTable, LookupTableV1};
 use crate::fm_index::seq_id::HeaderIndex;
 use crate::lcp::{LcpArray, LcpArrayV1};
 use crate::occ::{OccTable, OccTableV1};
 use crate::suffix_array::{SampledSuffixArray, SampledSuffixArrayV1};
 
-/// Leading bytes of a serialized index: `"HFM"` plus the format version (currently 2).
-pub const FORMAT_MAGIC: [u8; 4] = *b"HFM\x02";
+/// Leading bytes of a serialized index: `"HFM"` plus the format version (currently 3).
+pub const FORMAT_MAGIC: [u8; 4] = *b"HFM\x03";
+/// Magic of format version 2, still accepted by [`FmIndex::from_bytes`].
+pub const FORMAT_MAGIC_V2: [u8; 4] = *b"HFM\x02";
 /// Magic of format version 1, still accepted by [`FmIndex::from_bytes`].
 pub const FORMAT_MAGIC_V1: [u8; 4] = *b"HFM\x01";
 
 impl FmIndex {
-    /// Serialize the FM-index to bytes (format version 2, see the module docs).
+    /// Serialize the FM-index to bytes (format version 3, see the module docs).
     pub fn to_bytes(&self) -> Result<Vec<u8>, FmIndexError> {
         let serializable = SerializableFmIndex {
             c_array: &self.c_array,
@@ -47,7 +57,7 @@ impl FmIndex {
             seq_headers: &self.seq_headers,
             lookup: self.lookup.as_ref(),
             lcp: self.lcp.as_ref(),
-            alphabet_tag: self.alphabet_fns.tag,
+            alphabet: &self.alphabet_fns,
         };
         let body = bincode::serialize(&serializable)
             .map_err(|e| FmIndexError::SerializeError(e.to_string()))?;
@@ -57,12 +67,14 @@ impl FmIndex {
         Ok(out)
     }
 
-    /// Deserialize an FM-index from bytes: the current format, format version 1, or a
-    /// legacy unversioned blob (which loads without an LCP array). See the module docs.
+    /// Deserialize an FM-index from bytes: the current format, format versions 1 and 2, or
+    /// a legacy unversioned blob (which loads without an LCP array). See the module docs.
     ///
-    /// The alphabet tag stored in the bytes is used to reconstruct the matching
-    /// semantics. Returns [`FmIndexError::DeserializeError`] for unknown tags and for
-    /// format versions this build does not read.
+    /// Version 3 carries the alphabet's matching tables; older versions carry a tag from
+    /// which a built-in alphabet is reconstructed. Returns
+    /// [`FmIndexError::DeserializeError`] for unknown or reserved tags, for a built-in tag
+    /// whose stored tables do not match the built-in alphabet, and for format versions this
+    /// build does not read.
     ///
     /// The header -> [`SeqId`](crate::SeqId) map is a pure function of the stored headers,
     /// so it is rebuilt here rather than serialized; likewise the occ table's select hints.
@@ -75,33 +87,41 @@ impl FmIndex {
                 data.len()
             )));
         }
-        let de = |e: bincode::Error| FmIndexError::DeserializeError(e.to_string());
-        let deserialized: OwnedSerializableFmIndex =
-            if let Some(body) = data.strip_prefix(&FORMAT_MAGIC) {
-                bincode::deserialize(body).map_err(de)?
-            } else if let Some(body) = data.strip_prefix(&FORMAT_MAGIC_V1) {
-                bincode::deserialize::<OwnedSerializableFmIndexV1>(body)
-                    .map_err(de)?
-                    .into()
-            } else if let [b'H', b'F', b'M', version, ..] = data {
-                return Err(FmIndexError::DeserializeError(format!(
-                    "unsupported serialized FM-index format version {version} \
-                     (this build reads versions 1 and 2)"
-                )));
-            } else {
-                bincode::deserialize::<LegacyOwnedSerializableFmIndex>(data)
-                    .map_err(de)?
-                    .into()
-            };
-        let alphabet_fns = alphabet_fns_from_tag(deserialized.alphabet_tag).ok_or_else(|| {
-            FmIndexError::DeserializeError(format!(
-                "unknown alphabet tag {} in serialized FM-index",
-                deserialized.alphabet_tag
-            ))
-        })?;
+        let (deserialized, old_lookup) = decode(data)?;
+        let alphabet_fns = deserialized.alphabet;
+        if alphabet_fns.tag() < 128 {
+            match alphabet_fns_from_tag(alphabet_fns.tag()) {
+                Some(builtin) if builtin == alphabet_fns => {}
+                Some(_) => {
+                    return Err(FmIndexError::DeserializeError(format!(
+                        "serialized FM-index carries built-in alphabet tag {} with tables \
+                         that do not match that alphabet",
+                        alphabet_fns.tag()
+                    )));
+                }
+                None => {
+                    return Err(FmIndexError::DeserializeError(format!(
+                        "reserved alphabet tag {} in serialized FM-index (custom alphabets \
+                         use tags >= 128)",
+                        alphabet_fns.tag()
+                    )));
+                }
+            }
+        }
         let header_index = HeaderIndex::build(&deserialized.seq_headers)?;
         let mut occ = deserialized.occ;
         occ.rebuild_derived();
+        // A version-1/2 table is upgraded only once the occ table can answer ranks again.
+        let lookup = match (deserialized.lookup, old_lookup) {
+            (Some(table), _) => Some(table),
+            (None, Some(old)) => Some(old.upgrade(
+                deserialized.text_len,
+                &deserialized.c_array,
+                &occ,
+                &alphabet_fns,
+            )),
+            (None, None) => None,
+        };
         Ok(Self {
             header_index,
             c_array: deserialized.c_array,
@@ -112,14 +132,93 @@ impl FmIndex {
             num_sequences: deserialized.num_sequences,
             seq_boundaries: deserialized.seq_boundaries,
             seq_headers: deserialized.seq_headers,
-            lookup: deserialized.lookup,
+            lookup,
             alphabet_fns,
             lcp: deserialized.lcp,
         })
     }
 }
 
-/// Format version 2 write layout. Field order is the wire order.
+/// Decode any accepted format into the current field layout. A version-1/2 lookup table
+/// comes back separately: converting it needs a working occ table, which the caller has.
+fn decode(data: &[u8]) -> Result<(OwnedSerializableFmIndex, Option<LookupTableV1>), FmIndexError> {
+    let de = |e: bincode::Error| FmIndexError::DeserializeError(e.to_string());
+    if let Some(body) = data.strip_prefix(&FORMAT_MAGIC) {
+        let v3: OwnedSerializableFmIndex = bincode::deserialize(body).map_err(de)?;
+        Ok((v3, None))
+    } else if let Some(body) = data.strip_prefix(&FORMAT_MAGIC_V2) {
+        let v2: OwnedSerializableFmIndexV2 = bincode::deserialize(body).map_err(de)?;
+        let alphabet = alphabet_from_tag(v2.alphabet_tag)?;
+        Ok((
+            OwnedSerializableFmIndex {
+                c_array: v2.c_array,
+                occ: v2.occ,
+                sa_samples: v2.sa_samples,
+                text: v2.text,
+                text_len: v2.text_len,
+                num_sequences: v2.num_sequences,
+                seq_boundaries: v2.seq_boundaries,
+                seq_headers: v2.seq_headers,
+                lookup: None,
+                lcp: v2.lcp,
+                alphabet,
+            },
+            v2.lookup,
+        ))
+    } else if let Some(body) = data.strip_prefix(&FORMAT_MAGIC_V1) {
+        let v1: OwnedSerializableFmIndexV1 = bincode::deserialize(body).map_err(de)?;
+        let alphabet = alphabet_from_tag(v1.alphabet_tag)?;
+        Ok((
+            OwnedSerializableFmIndex {
+                c_array: v1.c_array,
+                occ: v1.occ.into(),
+                sa_samples: v1.sa_samples.into(),
+                text: v1.text,
+                text_len: v1.text_len,
+                num_sequences: v1.num_sequences,
+                seq_boundaries: v1.seq_boundaries,
+                seq_headers: v1.seq_headers,
+                lookup: None,
+                lcp: v1.lcp.map(Into::into),
+                alphabet,
+            },
+            v1.lookup,
+        ))
+    } else if let [b'H', b'F', b'M', version, ..] = data {
+        Err(FmIndexError::DeserializeError(format!(
+            "unsupported serialized FM-index format version {version} \
+             (this build reads versions 1, 2 and 3)"
+        )))
+    } else {
+        let legacy: LegacyOwnedSerializableFmIndex = bincode::deserialize(data).map_err(de)?;
+        let alphabet = alphabet_from_tag(legacy.alphabet_tag)?;
+        Ok((
+            OwnedSerializableFmIndex {
+                c_array: legacy.c_array,
+                occ: legacy.occ.into(),
+                sa_samples: legacy.sa_samples.into(),
+                text: legacy.text,
+                text_len: legacy.text_len,
+                num_sequences: legacy.num_sequences,
+                seq_boundaries: legacy.seq_boundaries,
+                seq_headers: legacy.seq_headers,
+                lookup: None,
+                lcp: None,
+                alphabet,
+            },
+            legacy.lookup,
+        ))
+    }
+}
+
+/// Formats before 3 store only the alphabet tag, so only built-in alphabets load from them.
+fn alphabet_from_tag(tag: u8) -> Result<AlphabetFns, FmIndexError> {
+    alphabet_fns_from_tag(tag).ok_or_else(|| {
+        FmIndexError::DeserializeError(format!("unknown alphabet tag {tag} in serialized FM-index"))
+    })
+}
+
+/// Format version 3 write layout. Field order is the wire order.
 #[derive(serde::Serialize)]
 struct SerializableFmIndex<'a> {
     c_array: &'a CArray,
@@ -135,12 +234,12 @@ struct SerializableFmIndex<'a> {
     lookup: Option<&'a LookupTable>,
     /// Present when built with `FmIndexConfig::build_lcp` (format version 1 onwards).
     lcp: Option<&'a LcpArray>,
-    /// Tag identifying the alphabet used for matching (0 = IupacDna, 1 = ExactDna).
-    /// Kept last: `test_serialize_bad_tag_rejected` corrupts the final byte to reach it.
-    alphabet_tag: u8,
+    /// The alphabet's matching tables; its tag is the blob's final byte, which
+    /// `test_serialize_bad_tag_rejected` corrupts to reach it.
+    alphabet: &'a AlphabetFns,
 }
 
-/// Format version 2 read layout; mirrors [`SerializableFmIndex`].
+/// Format version 3 read layout; mirrors [`SerializableFmIndex`].
 #[derive(serde::Deserialize)]
 struct OwnedSerializableFmIndex {
     c_array: CArray,
@@ -155,6 +254,24 @@ struct OwnedSerializableFmIndex {
     lookup: Option<LookupTable>,
     lcp: Option<LcpArray>,
     /// Kept last (see [`SerializableFmIndex`]).
+    alphabet: AlphabetFns,
+}
+
+/// Format version 2 read layout: version-3 blobs, an exact-only lookup table and the
+/// alphabet tag alone.
+#[derive(serde::Deserialize)]
+struct OwnedSerializableFmIndexV2 {
+    c_array: CArray,
+    occ: OccTable,
+    sa_samples: SampledSuffixArray,
+    #[serde(with = "crate::serde_raw::bytes")]
+    text: Vec<u8>,
+    text_len: u32,
+    num_sequences: u32,
+    seq_boundaries: Vec<u32>,
+    seq_headers: Vec<String>,
+    lookup: Option<LookupTableV1>,
+    lcp: Option<LcpArray>,
     alphabet_tag: u8,
 }
 
@@ -171,9 +288,8 @@ struct OwnedSerializableFmIndexV1 {
     num_sequences: u32,
     seq_boundaries: Vec<u32>,
     seq_headers: Vec<String>,
-    lookup: Option<LookupTable>,
+    lookup: Option<LookupTableV1>,
     lcp: Option<LcpArrayV1>,
-    /// Kept last (see [`SerializableFmIndex`]).
     alphabet_tag: u8,
 }
 
@@ -188,45 +304,8 @@ struct LegacyOwnedSerializableFmIndex {
     num_sequences: u32,
     seq_boundaries: Vec<u32>,
     seq_headers: Vec<String>,
-    lookup: Option<LookupTable>,
-    /// Kept last (see [`SerializableFmIndex`]).
+    lookup: Option<LookupTableV1>,
     alphabet_tag: u8,
-}
-
-impl From<OwnedSerializableFmIndexV1> for OwnedSerializableFmIndex {
-    fn from(v1: OwnedSerializableFmIndexV1) -> Self {
-        Self {
-            c_array: v1.c_array,
-            occ: v1.occ.into(),
-            sa_samples: v1.sa_samples.into(),
-            text: v1.text,
-            text_len: v1.text_len,
-            num_sequences: v1.num_sequences,
-            seq_boundaries: v1.seq_boundaries,
-            seq_headers: v1.seq_headers,
-            lookup: v1.lookup,
-            lcp: v1.lcp.map(Into::into),
-            alphabet_tag: v1.alphabet_tag,
-        }
-    }
-}
-
-impl From<LegacyOwnedSerializableFmIndex> for OwnedSerializableFmIndex {
-    fn from(legacy: LegacyOwnedSerializableFmIndex) -> Self {
-        Self {
-            c_array: legacy.c_array,
-            occ: legacy.occ.into(),
-            sa_samples: legacy.sa_samples.into(),
-            text: legacy.text,
-            text_len: legacy.text_len,
-            num_sequences: legacy.num_sequences,
-            seq_boundaries: legacy.seq_boundaries,
-            seq_headers: legacy.seq_headers,
-            lookup: legacy.lookup,
-            lcp: None,
-            alphabet_tag: legacy.alphabet_tag,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -289,11 +368,15 @@ mod tests {
 
     // ── Frozen-format fixtures ────────────────────────────────────────────────
     //
-    // `tests/fixtures/*.hfm` were written once at `9b32c9f` (format version 1) by a
-    // throwaway generator from exactly the input and configs below; the legacy blob is the
-    // version-1 Bitplane blob minus its magic and the `Option<LcpArray>` None byte. CPU
-    // construction is deterministic, so a fresh build must serialize to the same version-2
-    // bytes as the loaded fixture — i.e. every stored field survived the version upgrade.
+    // `tests/fixtures/v1_*.hfm` were written at `9b32c9f` (format version 1) by a throwaway
+    // generator and `v2_*.hfm` at `7e4bff0` (format version 2) by `examples/gen_fixtures.rs`,
+    // both from exactly the input and configs below; the legacy blob is the version-1
+    // Bitplane blob minus its magic and the `Option<LcpArray>` None byte. CPU construction
+    // is deterministic, so a fresh build must serialize to the same current-format bytes as
+    // the loaded fixture — i.e. every stored field survived the version upgrade. The OneHot
+    // fixtures carry a depth-3 lookup table over a reference with ambiguity codes: under
+    // `IupacDna` the old exact-only table is rebuilt at load, under `ExactDna` it is
+    // converted in place; either way it must equal what a fresh build produces.
 
     fn fixture_input() -> Vec<DnaSequence> {
         vec![
@@ -326,7 +409,13 @@ mod tests {
     }
 
     fn assert_matches_fresh_build(loaded: &FmIndex, config: &FmIndexConfig) {
-        let fresh = FmIndex::build_cpu(&fixture_input(), config).unwrap();
+        assert_matches_fresh_build_with::<IupacDna>(loaded, config);
+    }
+
+    fn assert_matches_fresh_build_with<A: Alphabet>(loaded: &FmIndex, config: &FmIndexConfig) {
+        let fresh = FmIndex::build_cpu_with::<A>(&fixture_input(), config).unwrap();
+        assert_eq!(loaded.alphabet_fns, fresh.alphabet_fns);
+        assert_eq!(loaded.lookup, fresh.lookup);
         assert_eq!(loaded.to_bytes().unwrap(), fresh.to_bytes().unwrap());
         assert_eq!(loaded.has_lcp(), config.build_lcp);
         assert_eq!(loaded.seq_headers(), fresh.seq_headers());
@@ -364,7 +453,111 @@ mod tests {
     }
 
     #[test]
-    fn test_v2_roundtrip_every_field_on_every_config() {
+    fn test_v2_onehot_fixture_loads_and_rebuilds_its_lookup_table() {
+        let blob = include_bytes!("../../tests/fixtures/v2_onehot_lcp_lookup.hfm");
+        assert_eq!(&blob[..4], &super::FORMAT_MAGIC_V2);
+        let loaded = FmIndex::from_bytes(blob).unwrap();
+        assert!(loaded.has_lcp());
+        // The reference has N and R..V; the rebuilt table lists their variants.
+        let lut = loaded.lookup.as_ref().unwrap();
+        assert_eq!(lut.depth, 3);
+        assert!(lut.num_intervals() > 0);
+        assert_matches_fresh_build(&loaded, &onehot_fixture_config());
+        // Queries whose seed window matches reference ambiguity codes agree with a full
+        // (table-less) search — the old exact-only table would have missed them.
+        let full = FmIndex::build_cpu(
+            &fixture_input(),
+            &FmIndexConfig {
+                lookup_depth: 0,
+                ..onehot_fixture_config()
+            },
+        )
+        .unwrap();
+        for pattern in ["TNA", "TCA", "GCA", "ACG", "NNA", "TAC"] {
+            let p = encode_pattern(pattern);
+            assert!(full.count(&p) > 0, "{pattern}");
+            assert_eq!(loaded.count(&p), full.count(&p), "{pattern}");
+            assert_eq!(loaded.locate(&p), full.locate(&p), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn test_v2_bitplane_fixture_loads_without_lcp() {
+        let blob = include_bytes!("../../tests/fixtures/v2_bitplane_nolcp.hfm");
+        assert_eq!(&blob[..4], &super::FORMAT_MAGIC_V2);
+        let loaded = FmIndex::from_bytes(blob).unwrap();
+        assert!(loaded.lookup.is_none());
+        assert_matches_fresh_build(&loaded, &bitplane_fixture_config());
+    }
+
+    #[test]
+    fn test_v2_exact_fixture_converts_its_lookup_table_in_place() {
+        let blob = include_bytes!("../../tests/fixtures/v2_exact_onehot_lookup.hfm");
+        assert_eq!(&blob[..4], &super::FORMAT_MAGIC_V2);
+        let loaded = FmIndex::from_bytes(blob).unwrap();
+        assert_eq!(loaded.alphabet_fns, ExactDna::fns());
+        assert_matches_fresh_build_with::<ExactDna>(&loaded, &onehot_fixture_config());
+        assert_eq!(loaded.count(&encode_pattern("N")), 0);
+    }
+
+    #[test]
+    fn test_v2_fixture_with_unknown_tag_rejected() {
+        let mut blob = include_bytes!("../../tests/fixtures/v2_bitplane_nolcp.hfm").to_vec();
+        *blob.last_mut().unwrap() = 0xFF;
+        let err = FmIndex::from_bytes(&blob).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown alphabet tag 255"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_custom_alphabet_roundtrip() {
+        // A matches A or N in the reference; nothing else is ambiguous.
+        struct AOrN;
+        impl Alphabet for AOrN {
+            fn fns() -> AlphabetFns {
+                AlphabetFns::from_compatible_fn(
+                    |c| match c {
+                        x if x == A => &[A, N],
+                        x if x == C => &[C],
+                        x if x == G => &[G],
+                        x if x == T => &[T],
+                        _ => &[],
+                    },
+                    &[A, C, G, T],
+                    200,
+                )
+            }
+        }
+        let seq = DnaSequence::from_str("ACGTNACGT").unwrap();
+        let config = FmIndexConfig {
+            sa_sample_rate: 1,
+            use_gpu: false,
+            lookup_depth: 2,
+            ..Default::default()
+        };
+        let original = FmIndex::build_cpu_with::<AOrN>(&[seq], &config).unwrap();
+        let bytes = original.to_bytes().unwrap();
+        assert_eq!(*bytes.last().unwrap(), 200);
+        let restored = FmIndex::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.alphabet_fns, AOrN::fns());
+        assert_eq!(restored.lookup, original.lookup);
+        assert_eq!(restored.to_bytes().unwrap(), bytes);
+        for pattern in ["A", "AN", "ACG", "NA", "TN"] {
+            let p = encode_pattern(pattern);
+            assert_eq!(restored.count(&p), original.count(&p), "{pattern}");
+            assert_eq!(restored.locate(&p), original.locate(&p), "{pattern}");
+        }
+        // "A" matches the two A's and the N; "TA" only "TN" (position 3); N matches nothing.
+        assert_eq!(restored.count(&encode_pattern("A")), 3);
+        assert_eq!(restored.count(&encode_pattern("TA")), 1);
+        assert_eq!(restored.locate(&encode_pattern("TA")).len(), 1);
+        assert_eq!(restored.count(&encode_pattern("N")), 0);
+    }
+
+    #[test]
+    fn test_v3_roundtrip_every_field_on_every_config() {
         use crate::occ::OccEncoding;
         for encoding in [OccEncoding::Bitplane, OccEncoding::OneHot] {
             for build_lcp in [false, true] {
@@ -391,7 +584,8 @@ mod tests {
                     assert_eq!(restored.seq_headers, original.seq_headers);
                     assert_eq!(restored.lcp, original.lcp);
                     assert_eq!(restored.lookup.is_some(), lookup_depth > 0);
-                    assert_eq!(restored.alphabet_fns.tag, original.alphabet_fns.tag);
+                    assert_eq!(restored.lookup, original.lookup);
+                    assert_eq!(restored.alphabet_fns, original.alphabet_fns);
                     assert_eq!(restored.to_bytes().unwrap(), bytes);
                     assert_matches_fresh_build(&restored, &config);
                 }
@@ -417,17 +611,16 @@ mod tests {
             .unwrap()
             .to_bytes()
             .unwrap();
-        bytes[3] = 3;
+        bytes[3] = 4;
         let err = FmIndex::from_bytes(&bytes).unwrap_err();
         assert!(
-            err.to_string().contains("format version 3"),
+            err.to_string().contains("format version 4"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
     fn test_serialize_bad_tag_rejected() {
-        // Manually corrupt the alphabet_tag to an unknown value and verify error.
         let seq = DnaSequence::from_str("ACGT").unwrap();
         let config = FmIndexConfig {
             sa_sample_rate: 4,
@@ -435,14 +628,28 @@ mod tests {
             ..Default::default()
         };
         let original = FmIndex::build_cpu(&[seq], &config).unwrap();
-        let mut bytes = original.to_bytes().unwrap();
-        // Overwrite the last byte (alphabet_tag, stored last by bincode) with 0xFF.
-        if let Some(last) = bytes.last_mut() {
-            *last = 0xFF;
-        }
+        let bytes = original.to_bytes().unwrap();
+        // The tag is the blob's last byte. A reserved value is rejected...
+        let mut reserved = bytes.clone();
+        *reserved.last_mut().unwrap() = 0x7F;
+        let err = FmIndex::from_bytes(&reserved).unwrap_err();
         assert!(
-            FmIndex::from_bytes(&bytes).is_err(),
-            "should reject unknown alphabet tag"
+            err.to_string().contains("reserved alphabet tag 127"),
+            "{err}"
+        );
+        // ...and so is a built-in tag whose stored tables belong to another alphabet.
+        let mut mismatched = bytes.clone();
+        *mismatched.last_mut().unwrap() = 1;
+        let err = FmIndex::from_bytes(&mismatched).unwrap_err();
+        assert!(err.to_string().contains("do not match"), "{err}");
+        // A custom tag with the IUPAC tables is a legitimate custom alphabet.
+        let mut custom = bytes;
+        *custom.last_mut().unwrap() = 0xFF;
+        let restored = FmIndex::from_bytes(&custom).unwrap();
+        assert_eq!(restored.alphabet_fns.tag(), 0xFF);
+        assert_eq!(
+            restored.alphabet_fns.compatible(N),
+            IupacDna::fns().compatible(N)
         );
     }
 

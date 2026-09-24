@@ -31,7 +31,9 @@ pub struct FmIndexConfig {
     /// Whether to use GPU acceleration. Falls back to CPU if GPU unavailable.
     pub use_gpu: bool,
     /// Depth of the ACGT prefix lookup table for seeding backward search.
-    /// 0 disables the table. Depth k uses 4^k × 8 bytes (k=10 → ~8 MB, k=13 → ~537 MB).
+    /// 0 disables the table. Depth k uses about 4^k × 12 bytes on a pure-ACGT reference
+    /// (k=10 → ~12 MB, k=13 → ~800 MB), plus 8 bytes per reference stretch that matches a
+    /// k-mer through ambiguity codes (see [`crate::fm_index::lookup`]).
     /// Default: 0 (disabled).
     pub lookup_depth: u32,
     /// Number of threads for CPU index construction.  Rayon thread pool is
@@ -212,7 +214,7 @@ impl FmIndex {
                 text_len,
                 &c_array,
                 &occ,
-                alphabet_fns.core_symbols,
+                &alphabet_fns,
             ))
         } else {
             None

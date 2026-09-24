@@ -675,10 +675,11 @@ mod wild {
                 assert_eq!(fan_l, idx.count_left_in(&iv, set), "left q={q} step={step}");
                 // The wildcard-only slice of the fan-out is the intended premise query.
                 let wild_only: u32 = idx
-                    .extend_right_compatible(iv, q)
-                    .zip((idx.compatible_set(q)).iter())
-                    .filter(|(_, code)| *code >= alphabet::N)
-                    .map(|(c, _)| c.size())
+                    .compatible_set(q)
+                    .iter()
+                    .filter(|&code| code >= alphabet::N)
+                    .filter_map(|code| idx.extend_right(iv, code))
+                    .map(|c| c.size())
                     .sum();
                 assert_eq!(
                     wild_only,

@@ -1,4 +1,3 @@
-use crate::alphabet::ALPHABET_SIZE;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::BidirFmIndex;
 use crate::fm_index::seq_id::SeqId;
@@ -64,7 +63,7 @@ impl BidirFmIndex {
     ///    skip it.
     /// 3. Accept seeds that are ≥ `min_len` and both left- and right-maximal.
     ///
-    /// Complexity: O(|query|² × α) where α = [`ALPHABET_SIZE`].
+    /// Complexity: O(|query|² × α) where α = [`ALPHABET_SIZE`](crate::alphabet::ALPHABET_SIZE).
     /// In practice much better: once a long SMEM is found the inner loop
     /// advances to the SMEM's right boundary.
     ///
@@ -217,12 +216,8 @@ impl BidirFmIndex {
     /// following symbols), and the sentinel is incompatible with every base, so occurrences
     /// sitting at the end of a reference are captured here rather than silently lost.
     fn drop_set(&self, ivs: &[BidirInterval], c: u8) -> Vec<BidirInterval> {
-        let compat = (self.rev.alphabet_fns.compatible_fn)(c);
         let mut out = Vec::new();
-        for sym in 0..ALPHABET_SIZE as u8 {
-            if compat.contains(&sym) {
-                continue;
-            }
+        for sym in self.rev.alphabet_fns.compatible(c).complement().iter() {
             for iv in ivs {
                 if let Some(ext) = iv.extend_right(sym, &self.rev) {
                     out.push(ext);
@@ -414,7 +409,11 @@ impl BidirFmIndex {
             return true;
         }
         match self.sequence(id) {
-            Some(seq) => !(self.fwd.alphabet_fns.compatible_fn)(c).contains(&seq[off as usize - 1]),
+            Some(seq) => !self
+                .fwd
+                .alphabet_fns
+                .compatible(c)
+                .contains(seq[off as usize - 1]),
             None => true,
         }
     }
@@ -444,9 +443,8 @@ fn coverage(ivs: &[BidirInterval]) -> u32 {
 
 /// Extend each interval in `ivs` right by `c`, using the index's alphabet compatibility.
 fn extend_multi_right(ivs: &[BidirInterval], c: u8, rev: &FmIndex) -> Vec<BidirInterval> {
-    let bases = (rev.alphabet_fns.compatible_fn)(c);
     let mut result = Vec::new();
-    for &base in bases {
+    for base in rev.alphabet_fns.compatible(c).iter() {
         for iv in ivs {
             if let Some(ext) = iv.extend_right(base, rev) {
                 result.push(ext);
@@ -458,9 +456,8 @@ fn extend_multi_right(ivs: &[BidirInterval], c: u8, rev: &FmIndex) -> Vec<BidirI
 
 /// Extend each interval in `ivs` left by `c`, using the index's alphabet compatibility.
 fn extend_multi_left(ivs: &[BidirInterval], c: u8, fwd: &FmIndex) -> Vec<BidirInterval> {
-    let bases = (fwd.alphabet_fns.compatible_fn)(c);
     let mut result = Vec::new();
-    for &base in bases {
+    for base in fwd.alphabet_fns.compatible(c).iter() {
         for iv in ivs {
             if let Some(ext) = iv.extend_left(base, fwd) {
                 result.push(ext);

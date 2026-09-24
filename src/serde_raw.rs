@@ -7,8 +7,8 @@
 //! by the raw bytes, which `bincode`'s slice reader hands to the visitor as a single slice:
 //! one length check and one copy, however large the vector.
 //!
-//! On the wire, `bytes` is identical to the derived encoding of a `Vec<u8>`; `u16s` and
-//! `u32s` differ from the derived encoding only in the length prefix (bytes, not elements),
+//! On the wire, `bytes` is identical to the derived encoding of a `Vec<u8>`; `u16s`, `u32s`
+//! and `u32_pairs` differ from the derived encoding only in the length prefix (bytes, not elements),
 //! which is why using them is a format-version change (see `fm_index::serialize`).
 //! Elements are always written little-endian, so blobs are portable across hosts.
 
@@ -94,6 +94,43 @@ pub(crate) mod u32s {
     }
 }
 
+/// `Vec<(u32, u32)>` as a little-endian byte blob, 8 bytes per pair (`lo` then `hi`).
+pub(crate) mod u32_pairs {
+    use super::*;
+
+    pub(crate) fn serialize<T, S>(v: &T, s: S) -> Result<S::Ok, S::Error>
+    where
+        T: AsRef<[(u32, u32)]> + ?Sized,
+        S: Serializer,
+    {
+        let v = v.as_ref();
+        let mut out = Vec::with_capacity(v.len() * 8);
+        for &(lo, hi) in v {
+            out.extend_from_slice(&lo.to_le_bytes());
+            out.extend_from_slice(&hi.to_le_bytes());
+        }
+        s.serialize_bytes(&out)
+    }
+
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<(u32, u32)>, D::Error> {
+        d.deserialize_bytes(BlobVisitor {
+            width: 8,
+            decode: |b| {
+                b.chunks_exact(8)
+                    .map(|c| {
+                        (
+                            u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                            u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+                        )
+                    })
+                    .collect()
+            },
+        })
+    }
+}
+
 /// Accepts a byte blob whose length is a multiple of `width` and decodes it in one pass.
 /// `visit_borrowed_bytes` / `visit_byte_buf` fall through to `visit_bytes` by default, so
 /// this works for borrowing and owning deserializers alike.
@@ -133,6 +170,8 @@ mod tests {
         b: Vec<u16>,
         #[serde(with = "crate::serde_raw::u32s")]
         c: Vec<u32>,
+        #[serde(with = "crate::serde_raw::u32_pairs")]
+        d: Vec<(u32, u32)>,
     }
 
     #[derive(Serialize)]
@@ -143,6 +182,8 @@ mod tests {
         b: &'a [u16],
         #[serde(with = "crate::serde_raw::u32s")]
         c: &'a [u32],
+        #[serde(with = "crate::serde_raw::u32_pairs")]
+        d: &'a [(u32, u32)],
     }
 
     #[derive(Serialize)]
@@ -150,6 +191,7 @@ mod tests {
         a: Vec<u8>,
         b: Vec<u16>,
         c: Vec<u32>,
+        d: Vec<(u32, u32)>,
     }
 
     fn sample(n: usize) -> Raw {
@@ -159,6 +201,7 @@ mod tests {
             c: (0..n)
                 .map(|i| (i as u32).wrapping_mul(0x9E37_79B9))
                 .collect(),
+            d: (0..n).map(|i| (i as u32, (i * 3) as u32)).collect(),
         }
     }
 
@@ -173,6 +216,7 @@ mod tests {
                 a: &raw.a,
                 b: &raw.b,
                 c: &raw.c,
+                d: &raw.d,
             };
             assert_eq!(bincode::serialize(&borrowed).unwrap(), bytes, "n = {n}");
         }
@@ -185,11 +229,13 @@ mod tests {
             a: raw.a.clone(),
             b: Vec::new(),
             c: Vec::new(),
+            d: Vec::new(),
         };
         let only_a = Raw {
             a: raw.a.clone(),
             b: Vec::new(),
             c: Vec::new(),
+            d: Vec::new(),
         };
         assert_eq!(
             bincode::serialize(&only_a).unwrap(),
@@ -203,6 +249,7 @@ mod tests {
             a: Vec::new(),
             b: vec![0x0102],
             c: vec![0x0304_0506],
+            d: vec![(0x0708_090A, 0x0B0C_0D0E)],
         };
         let bytes = bincode::serialize(&raw).unwrap();
         let expected: Vec<u8> = [
@@ -211,6 +258,8 @@ mod tests {
             &[0x02, 0x01],
             4u64.to_le_bytes().as_slice(),
             &[0x06, 0x05, 0x04, 0x03],
+            8u64.to_le_bytes().as_slice(),
+            &[0x0A, 0x09, 0x08, 0x07, 0x0E, 0x0D, 0x0C, 0x0B],
         ]
         .concat();
         assert_eq!(bytes, expected);
@@ -228,5 +277,16 @@ mod tests {
         .concat();
         let err = bincode::deserialize::<Raw>(&bytes).unwrap_err();
         assert!(err.to_string().contains("multiple of 4"), "{err}");
+        // `d` claims 12 bytes (one and a half pairs).
+        let bytes: Vec<u8> = [
+            0u64.to_le_bytes().as_slice(),
+            0u64.to_le_bytes().as_slice(),
+            0u64.to_le_bytes().as_slice(),
+            12u64.to_le_bytes().as_slice(),
+            &[0; 12],
+        ]
+        .concat();
+        let err = bincode::deserialize::<Raw>(&bytes).unwrap_err();
+        assert!(err.to_string().contains("multiple of 8"), "{err}");
     }
 }

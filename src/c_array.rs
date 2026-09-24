@@ -1,4 +1,4 @@
-use crate::alphabet::ALPHABET_SIZE;
+use crate::alphabet::{SymbolSet, ALPHABET_SIZE};
 use crate::bwt::Bwt;
 
 /// C array: `C[c]` = number of characters in the text that are lexicographically smaller than c.
@@ -64,6 +64,13 @@ impl CArray {
             text_len
         };
         upper - self.data[c as usize]
+    }
+
+    /// The set of symbols that occur in the text at least once.
+    pub fn present_symbols(&self, text_len: u32) -> SymbolSet {
+        (0..ALPHABET_SIZE as u8)
+            .filter(|&c| self.symbol_count(c, text_len) > 0)
+            .collect()
     }
 }
 
