@@ -62,9 +62,9 @@ GPU-accelerated FM-index for DNA sequences. Compiles to native (Vulkan/Metal/DX1
 ### Key modules
 | Path | Role |
 |------|------|
-| `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic, cursor (`bidir.rs`: extend/contract) |
+| `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic, cursor (`bidir.rs`: extend/contract); `lookup.rs` depth-k table with per-k-mer exact slot + wildcard variants |
 | `src/fm_index/fwd_interval.rs` | `FwdInterval`: forward-only row range — LF step on sub-ranges, LCP parent (ancestor walk), locate |
-| `src/fm_index/serialize.rs`, `src/serde_raw.rs` | On-disk format (`HFM` + version byte, v2 current; v1 and legacy readers kept, fixtures under `tests/fixtures/`); `serde_raw` codecs store big `Vec<u8/u16/u32>` as LE byte blobs so `from_bytes` copies in bulk |
+| `src/fm_index/serialize.rs`, `src/serde_raw.rs` | On-disk format (`HFM` + version byte, v3 current: alphabet tables stored inline, CSR lookup table; v2/v1/legacy readers kept, fixtures under `tests/fixtures/` written by `examples/gen_fixtures.rs`); `serde_raw` codecs store big `Vec<u8/u16/u32/(u32,u32)>` as LE byte blobs so `from_bytes` copies in bulk |
 | `src/lcp.rs` | Capped u16 LCP array (Kasai at CPU build) + block minima / sparse table for psv/nsv; one per bidir half, opt-in via `FmIndexConfig::build_lcp` (default off), backs `contract_left` (fwd) / `contract_right` (rev) |
 | `src/gpu/` | WebGPU pipeline setup, buffer management, `GpuContext` (process-wide OnceLock cache) |
 | `src/suffix_array/`, `src/bwt/`, `src/occ/` | CPU and GPU implementations of each index component |

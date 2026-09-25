@@ -5,7 +5,9 @@ use super::SuffixArray;
 /// Build a suffix array using the pSACAK algorithm.
 ///
 /// Time: O(n), Space: O(n).
-/// Requires `text` to end with a unique minimum sentinel byte (0).
+/// Requires `text` to end with the sentinel byte 0, the minimum symbol. Interior sentinels
+/// separating concatenated sequences are allowed; they share that byte value and sort by
+/// the sequence that follows each one.
 pub fn build_suffix_array(text: &[u8]) -> SuffixArray {
     if text.is_empty() {
         return SuffixArray { data: vec![] };

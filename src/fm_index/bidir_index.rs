@@ -756,7 +756,7 @@ async fn resolve_mem_hits_gpu(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Reverse a concatenated encoded text (bytes 0–4) and wrap it as a single DnaSequence.
+/// Reverse a concatenated encoded text (alphabet codes 0–15) and wrap it as a single DnaSequence.
 ///
 /// Sentinels (0) in the middle of the text become interior characters of the reversed
 /// sequence; the FM-index treats them as the lexicographically smallest character, so

@@ -14,12 +14,21 @@ let restored = FmIndex::from_bytes(&bytes)?; // FmIndex
 serialization tag, so a reloaded index keeps the matching semantics it was built with (see
 [Custom Alphabets](./alphabets.md)).
 
-Bytes start with a 4-byte format marker (`"HFM"` + a version byte, currently 2). Version 2
-stores the large arrays (occ table, SA samples, LCP arrays, text) as raw little-endian byte
-blobs that `from_bytes` copies in bulk rather than decoding element by element, so a
-117 MB bidirectional index loads in about 15 ms instead of about 630 ms. Version-1 blobs
-(`"HFM\x01"`) still load; any other `"HFM"` version is rejected with
+Bytes start with a 4-byte format marker (`"HFM"` + a version byte, currently 3). Version 3
+stores the alphabet's matching tables in full, so an index built with a custom `Alphabet`
+loads back with the semantics it was built with (versions 1 and 2 stored only a tag, so
+only the built-in alphabets load from them), and its lookup table lists the reference
+stretches that match each k-mer through ambiguity codes. The large arrays (occ table, SA
+samples, LCP arrays, lookup table, text) are raw little-endian byte blobs that `from_bytes`
+copies in bulk rather than decoding element by element, so a 117 MB bidirectional index
+loads in about 15 ms instead of about 630 ms. Version-1 (`"HFM\x01"`) and version-2
+(`"HFM\x02"`) blobs still load; any other `"HFM"` version is rejected with
 `FmIndexError::DeserializeError` rather than misparsed.
+
+A version-1 or version-2 lookup table was built without ambiguity-code matching. When the
+index uses `IupacDna` and its reference contains ambiguity codes, that table is rebuilt at
+load (same depth, a few hundred milliseconds at depth 10); otherwise it is converted in
+place.
 
 Blobs written before the marker existed also still load, but they carry no LCP array, so
 `has_lcp()` is `false` and `contract_left` / `contract_right` return

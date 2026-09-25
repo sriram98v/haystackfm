@@ -69,7 +69,8 @@ impl BidirFmIndex {
     ///
     /// # Parameters
     ///
-    /// - `query`: encoded DNA bases (values 1–4; 0 = sentinel, should not appear).
+    /// - `query`: encoded alphabet codes (1–15; ambiguity codes fan out over the reference
+    ///   codes they match under the index's alphabet; 0 = sentinel, must not appear).
     /// - `min_len`: discard matches shorter than this (must be ≥ 1).
     /// - `locate`: if `true`, populate `Mem::positions` with reference positions.
     ///

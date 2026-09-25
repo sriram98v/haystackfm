@@ -33,8 +33,8 @@ const OFFSET_MASK: u32 = !INCOMPLETE;
 /// A fixed-depth table mapping every core-symbol k-mer to the SA intervals matching it.
 ///
 /// Entries are stored in CSR form: `offsets` has `radix^depth + 1` elements and entry `e`
-/// owns `intervals[offsets[e] .. offsets[e + 1]]` (offsets masked by [`OFFSET_MASK`]). Bit 31
-/// of `offsets[e]` is the entry's [`INCOMPLETE`] flag.
+/// owns `intervals[offsets[e] .. offsets[e + 1]]` (offsets masked by `OFFSET_MASK`). Bit 31
+/// of `offsets[e]` is the entry's `INCOMPLETE` flag.
 ///
 /// Entry invariants: an entry with no intervals matches nothing. Otherwise slot 0 is the
 /// exact k-mer's interval (`(0, 0)` when the exact k-mer does not occur but a variant does),

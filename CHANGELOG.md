@@ -9,6 +9,17 @@ Before 1.0, a breaking change bumps the **minor** version.
 ## [Unreleased]
 
 ### Added
+- `AlphabetFns::new` / `from_compatible_fn` / `compatible` / `core` / `tag`: an alphabet's
+  matching semantics as data — one `SymbolSet` of compatible reference codes per query
+  code plus the core symbol set and a tag. `CArray::present_symbols`.
+- `LookupHit` and `LookupTable::MAX_VARIANTS_PER_ENTRY`: a k-mer entry now exposes its
+  exact interval and the intervals of its wildcard variants, and whether it is complete.
+- `examples/gen_fixtures.rs` writes the frozen-format fixtures under `tests/fixtures/`;
+  version-2 fixtures (`v2_*.hfm`) added, including an `ExactDna` one.
+- The WGSL `COMPAT` / `COMPAT_LEN` tables in `locate_search.wgsl` and `mem_find.wgsl` are
+  parsed out of the shader sources by a plain unit test and checked against `IupacDna`,
+  instead of against a hand-copied Rust array.
+- `serde_raw::u32_pairs` blob codec for `Vec<(u32, u32)>`.
 - `OccTable::rank_with_below(c, i)` / `rank_with_below_pair(c, lo, hi)`: `rank(c, ·)` and
   the class rank of every symbol below `c` from one block-record load per border — the
   two numbers a bidirectional extension step needs. `OccTable::rank_all_pair(lo, hi)`:
@@ -75,6 +86,28 @@ Before 1.0, a breaking change bumps the **minor** version.
     alphabet; `BidirFmIndex::compatible_set` exposes that alphabet's match set.
 
 ### Changed
+- **Breaking (on-disk format).** Serialized indexes are format version 3 (`"HFM\x03"`):
+  the alphabet's matching tables are stored in full (35 bytes) instead of a tag, so an
+  index built with a custom `Alphabet` loads back with the semantics it was built with,
+  and the lookup table is stored in CSR form with wildcard variants (see *Fixed*). A
+  built-in tag (0, 1) must match its tables and tags 2..=127 are reserved; both are
+  rejected with `DeserializeError`. Version-2, version-1 and legacy blobs still load;
+  their lookup table is converted in place when it is provably complete (pure-ACGT
+  reference, or `ExactDna`) and rebuilt at load otherwise. `FORMAT_MAGIC` now reads
+  `"HFM\x03"`, `FORMAT_MAGIC_V2` names the previous marker. Blobs written by this version
+  cannot be read by older builds.
+- **Breaking.** `AlphabetFns` fields are private; construct with `AlphabetFns::new` or
+  `AlphabetFns::from_compatible_fn` and read with `compatible(q)` / `core()` / `tag()`.
+  `compatible_set` remains as an alias. The fan-out order of `extend_*_compatible`,
+  backward search and MEM extension is ascending code order (unchanged for the built-in
+  alphabets, whose tables were already ascending).
+- **Breaking.** `LookupTable::get` returns `Option<LookupHit>` (exact slot plus variant
+  intervals and a completeness flag) instead of `Option<(u32, u32)>`. Its build takes the
+  `AlphabetFns` rather than a core-symbol slice. Memory on a pure-ACGT reference is about
+  `12 × 4^depth` bytes (was 8) plus 8 bytes per stored wildcard variant.
+- Backward search and the locate resolve table intersect the query code's compatibility
+  mask with the text's present symbols once per step, instead of walking a slice and
+  checking each symbol's count: one loop iteration per present compatible code.
 - `BidirInterval::extend_right` / `extend_left` touch two occ block records per step
   instead of four: the LF rank and the `below(c)` class rank at each border now come from
   one fused load (`rank_with_below_pair`), with the `below(c)` lane mask precomputed per
@@ -106,6 +139,20 @@ Before 1.0, a breaking change bumps the **minor** version.
   unchanged; extending by a high IUPAC code no longer costs up to 30 extra rank calls.
 
 ### Fixed
+- With `IupacDna` and `lookup_depth > 0`, `count` / `locate` / `locate_positions*` missed
+  reference occurrences that match the query only through an ambiguity code inside the
+  last `lookup_depth` query positions (reference `ANG`, query `ACG`, depth 3 → 0 instead
+  of 1): the depth-k table was built by exact A/C/G/T steps and seeded the search as if
+  those steps had run. Each entry now also carries the intervals of the reference
+  stretches that match its k-mer through ambiguity codes (at most
+  `MAX_VARIANTS_PER_ENTRY`; an entry past the cap is marked incomplete and searched
+  fully). `BidirFmIndex::lookup_interval` keeps its literal semantics: the exact interval
+  is always slot 0. Default `lookup_depth` is 0, so indexes built without the table were
+  unaffected.
+- `tests/bidir_correctness.rs` no longer zips a filtered fan-out with the compatible set
+  (labels would shift after an empty child).
+- Stale comments: occ block-record layout, reverse-text code range, suffix-array sentinel
+  requirement, SMEM query code range.
 - `benches/query.rs` compiles again (its `FmIndexConfig` literals predated the
   `lookup_depth` / `build_threads` / `occ_encoding` fields) and gains a `wild_counts` group
   comparing `count_wild_right` against the 11-code `extend_right` fan-out.
