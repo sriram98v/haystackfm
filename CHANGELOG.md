@@ -102,7 +102,8 @@ Before 1.0, a breaking change bumps the **minor** version.
   backward search and MEM extension is ascending code order (unchanged for the built-in
   alphabets, whose tables were already ascending).
 - **Breaking.** `LookupTable::get` returns `Option<LookupHit>` (exact slot plus variant
-  intervals and a completeness flag) instead of `Option<(u32, u32)>`. Its build takes the
+  intervals and a completeness flag) instead of `Option<(u32, u32)>`, and returns `None`
+  for a k-mer of the wrong length rather than debug-asserting. Its build takes the
   `AlphabetFns` rather than a core-symbol slice. Memory on a pure-ACGT reference is about
   `12 × 4^depth` bytes (was 8) plus 8 bytes per stored wildcard variant.
 - Backward search and the locate resolve table intersect the query code's compatibility

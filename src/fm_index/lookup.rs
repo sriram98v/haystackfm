@@ -167,17 +167,20 @@ impl LookupTable {
 
     /// Look up the entry for a slice of codes exactly `depth` long.
     ///
-    /// `codes` is ordered left-to-right (as the pattern appears). The rightmost
-    /// code maps to the LSB of the base-`radix` index (matching BFS construction).
+    /// `codes` is ordered left-to-right (as the pattern appears). The BFS consumes the
+    /// k-mer right to left (backward-search order), so the rightmost code is the most
+    /// significant base-`radix` digit of the entry index and the leftmost the least.
     ///
-    /// Returns `None` if any symbol is not a core symbol (caller falls back to
-    /// full search).
+    /// Returns `None` if `codes.len() != depth` or any symbol is not a core symbol
+    /// (caller falls back to full search).
     #[inline]
     pub fn get(&self, codes: &[u8]) -> Option<LookupHit<'_>> {
-        debug_assert_eq!(codes.len(), self.depth as usize);
+        if codes.len() != self.depth as usize {
+            return None;
+        }
         let radix = self.core.len() as usize;
         let mut idx = 0usize;
-        // Reverse iteration: rightmost code → LSB.
+        // Rightmost code first: it ends up in the most significant digit.
         for &c in codes.iter().rev() {
             if !self.core.contains(c) {
                 return None;
@@ -373,9 +376,16 @@ mod tests {
             let (lo, hi) = hit.intervals.first().copied().unwrap_or((0, 0));
             assert_eq!(hi - lo, idx.count(&pat), "{pat:?}");
         }
-        // Non-core symbols are not tabulated.
+        // Non-core symbols and wrong-length k-mers are not tabulated.
         assert!(lut.get(&[A, N]).is_none());
         assert!(lut.get(&[R, A]).is_none());
+        assert!(lut.get(&[A]).is_none());
+        assert!(lut.get(&[A, C, G]).is_none());
+        // Rightmost code is the most significant digit: "CA" and "AC" are distinct entries.
+        assert_ne!(
+            lut.get(&[C, A]).unwrap().intervals,
+            lut.get(&[A, C]).unwrap().intervals
+        );
     }
 
     // ── ExactDna alphabet tests ────────────────────────────────────────────────
