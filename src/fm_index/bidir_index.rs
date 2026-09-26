@@ -226,18 +226,27 @@ impl BidirFmIndex {
     /// extensions: the forward table gives the forward interval, the reverse table (queried
     /// with the reversed k-mer) the reverse one. `None` when no tables were built, when
     /// `kmer.len() != lookup_depth()`, when it contains a non-core symbol (ambiguity codes
-    /// are not tabulated), or when it does not occur.
+    /// are not tabulated), or when it does not occur literally. This is the exact k-mer's
+    /// cursor: reference stretches that match it only through ambiguity codes are not
+    /// included — fan out with [`extend_right_compatible`](Self::extend_right_compatible)
+    /// for those.
     pub fn lookup_interval(&self, kmer: &[u8]) -> Option<BidirInterval> {
         let depth = self.lookup_depth();
         if depth == 0 || kmer.len() != depth as usize {
             return None;
         }
-        let (fwd_lo, fwd_hi) = self.fwd.lookup.as_ref()?.get(kmer)?;
+        let &(fwd_lo, fwd_hi) = self.fwd.lookup.as_ref()?.get(kmer)?.intervals.first()?;
         if fwd_lo >= fwd_hi {
             return None;
         }
         let reversed: Vec<u8> = kmer.iter().rev().copied().collect();
-        let (rev_lo, rev_hi) = self.rev.lookup.as_ref()?.get(&reversed)?;
+        let &(rev_lo, rev_hi) = self
+            .rev
+            .lookup
+            .as_ref()?
+            .get(&reversed)?
+            .intervals
+            .first()?;
         debug_assert_eq!(fwd_hi - fwd_lo, rev_hi - rev_lo);
         Some(BidirInterval {
             fwd_lo,
@@ -747,7 +756,7 @@ async fn resolve_mem_hits_gpu(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Reverse a concatenated encoded text (bytes 0–4) and wrap it as a single DnaSequence.
+/// Reverse a concatenated encoded text (alphabet codes 0–15) and wrap it as a single DnaSequence.
 ///
 /// Sentinels (0) in the middle of the text become interior characters of the reversed
 /// sequence; the FM-index treats them as the lexicographically smallest character, so
@@ -1033,6 +1042,56 @@ mod tests {
         assert!(loaded.has_lcp());
         assert_eq!(loaded.lookup_depth(), 3);
         assert_eq!(loaded.to_bytes().unwrap(), fresh.to_bytes().unwrap());
+        let q: Vec<u8> = "ACGT".chars().map(|c| encode_char(c).unwrap()).collect();
+        assert_eq!(
+            loaded.find_smems(&q, 3, true),
+            fresh.find_smems(&q, 3, true)
+        );
+    }
+
+    /// Frozen at `7e4bff0` (format version 2) by `examples/gen_fixtures.rs` from the same
+    /// input and config. Both halves' lookup tables are rebuilt at load (the reference has
+    /// ambiguity codes and the alphabet is `IupacDna`), so the fresh build's bytes must
+    /// equal the loaded index's and `lookup_interval` must still give the exact k-mer.
+    #[test]
+    fn v2_bidir_fixture_loads_and_matches_a_fresh_build() {
+        use crate::alphabet::{DnaSequence, A, C, G, T};
+        use crate::occ::OccEncoding;
+        let blob = include_bytes!("../../tests/fixtures/v2_bidir_onehot_lcp_lookup.hfm");
+        let loaded = BidirFmIndex::from_bytes(blob).unwrap();
+        let input = [
+            DnaSequence::from_str_with_header("ACGTNACGTRYSWKMBDHVACGTACGTTTGCA", "chr1").unwrap(),
+            DnaSequence::from_str_with_header("TTGACGTACGTNNACGGAAC", "plasmid").unwrap(),
+            DnaSequence::from_str_with_header("GATTACA", "tiny").unwrap(),
+        ];
+        let config = FmIndexConfig {
+            sa_sample_rate: 2,
+            use_gpu: false,
+            occ_encoding: OccEncoding::OneHot,
+            build_lcp: true,
+            lookup_depth: 3,
+            ..Default::default()
+        };
+        let fresh = BidirFmIndex::build_cpu(&input, &config).unwrap();
+        assert!(loaded.has_lcp());
+        assert_eq!(loaded.lookup_depth(), 3);
+        assert_eq!(loaded.to_bytes().unwrap(), fresh.to_bytes().unwrap());
+        for kmer in [[A, C, G], [C, G, T], [G, A, T], [T, T, T]] {
+            let mut walked = loaded.full_interval();
+            let mut alive = true;
+            for &c in &kmer {
+                match loaded.extend_right(walked, c) {
+                    Some(next) => walked = next,
+                    None => {
+                        alive = false;
+                        break;
+                    }
+                }
+            }
+            let expect = alive.then_some(walked);
+            assert_eq!(loaded.lookup_interval(&kmer), expect, "{kmer:?}");
+            assert_eq!(fresh.lookup_interval(&kmer), expect, "{kmer:?}");
+        }
         let q: Vec<u8> = "ACGT".chars().map(|c| encode_char(c).unwrap()).collect();
         assert_eq!(
             loaded.find_smems(&q, 3, true),

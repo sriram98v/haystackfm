@@ -98,27 +98,14 @@ impl FmIndex {
         // `NONE` = no present symbol (empty result).
         const BRANCH: i16 = -2;
         const NONE: i16 = -1;
-        let compat_fn = self.alphabet_fns.compatible_fn;
+        let present = self.c_array.present_symbols(self.text_len);
         let mut resolve = [NONE; 256];
         for (byte, slot) in resolve.iter_mut().enumerate() {
-            let mut present: Option<u8> = None;
-            let mut branch = false;
-            for &r in compat_fn(byte as u8) {
-                if self.c_array.symbol_count(r, self.text_len) > 0 {
-                    if present.is_some() {
-                        branch = true;
-                        break;
-                    }
-                    present = Some(r);
-                }
-            }
-            *slot = if branch {
-                BRANCH
-            } else {
-                match present {
-                    Some(r) => r as i16,
-                    None => NONE,
-                }
+            let candidates = self.alphabet_fns.compatible(byte as u8) & present;
+            *slot = match candidates.len() {
+                0 => NONE,
+                1 => candidates.iter().next().unwrap() as i16,
+                _ => BRANCH,
             };
         }
 
@@ -243,13 +230,25 @@ impl FmIndex {
             let depth = lut.depth as usize;
             if pattern.len() >= depth {
                 let suffix = &pattern[pattern.len() - depth..];
-                if let Some(iv) = lut.get(suffix) {
-                    if iv.0 >= iv.1 {
-                        return vec![];
+                match lut.get(suffix) {
+                    // The entry lists the exact k-mer's interval and every wildcard
+                    // variant's; an incomplete entry dropped variants, so search it fully.
+                    Some(hit) if hit.complete => {
+                        let mut seed: Vec<(u32, u32)> = hit
+                            .intervals
+                            .iter()
+                            .copied()
+                            .filter(|&(lo, hi)| lo < hi)
+                            .collect();
+                        if seed.is_empty() {
+                            return vec![];
+                        }
+                        if seed.len() > 1 {
+                            merge_intervals_inplace(&mut seed);
+                        }
+                        (seed, pattern.len() - depth)
                     }
-                    (vec![iv], pattern.len() - depth)
-                } else {
-                    (vec![(0u32, self.text_len)], pattern.len())
+                    _ => (vec![(0u32, self.text_len)], pattern.len()),
                 }
             } else {
                 (vec![(0u32, self.text_len)], pattern.len())
@@ -261,16 +260,14 @@ impl FmIndex {
         // Scratch buffer reused across steps to avoid per-step allocations.
         let mut next: Vec<(u32, u32)> = Vec::with_capacity(16);
 
-        let compat_fn = self.alphabet_fns.compatible_fn;
+        let present = self.c_array.present_symbols(self.text_len);
         for &c in pattern[..start_rev_idx].iter().rev() {
-            let compat = compat_fn(c);
+            // Symbols absent from the text contribute empty intervals: mask them out once
+            // per step instead of testing each one.
+            let compat = self.alphabet_fns.compatible(c) & present;
             next.clear();
             for &(lo, hi) in &intervals {
-                for &r in compat {
-                    // Skip symbols absent from the text — they contribute empty intervals.
-                    if self.c_array.symbol_count(r, self.text_len) == 0 {
-                        continue;
-                    }
+                for r in compat.iter() {
                     let c_val = self.c_array.get(r);
                     let (rank_lo, rank_hi) = self.occ.rank_pair(r, lo, hi);
                     let new_lo = c_val + rank_lo;

@@ -268,13 +268,13 @@ Queries and references may contain any of the 16 IUPAC symbols:
 | | | H | A C T |
 | | | V | A C G |
 
-Two symbols match when their base sets share at least one nucleotide. Both the CPU (`compatible_symbols`) and GPU (WGSL `COMPAT` table) paths use the same lookup, and parity tests enforce they stay in sync.
+Two symbols match when their base sets share at least one nucleotide. The CPU carries this relation as `AlphabetFns` masks; the GPU hard-codes it as the WGSL `COMPAT` table, which a unit test parses out of the shader sources and checks against `IupacDna`.
 
 ---
 
 ## Alphabet Trait
 
-Matching semantics are pluggable via the `Alphabet` trait (`src/alphabet.rs`). `FmIndex` and `BidirFmIndex` store a runtime `AlphabetFns` bundle (function pointers + a serialization tag) rather than a generic type parameter, so the index type itself stays alphabet-agnostic.
+Matching semantics are pluggable via the `Alphabet` trait (`src/alphabet.rs`). `FmIndex` and `BidirFmIndex` store a runtime `AlphabetFns` value (one `SymbolSet` of compatible codes per query code, the core symbol set and a tag) rather than a generic type parameter, so the index type itself stays alphabet-agnostic; the tables are serialized with the index, so custom alphabets round-trip through `from_bytes`.
 
 | Alphabet | Behavior |
 |----------|----------|
@@ -287,7 +287,7 @@ use haystackfm::alphabet::ExactDna;
 let index = FmIndex::build_cpu_with::<ExactDna>(&seqs, &config)?;
 ```
 
-Implement `Alphabet` for a custom type to define your own symbol set and match rules — see the trait docs in `src/alphabet.rs` for the safety contract (stable function pointers, unique serialization tag ≥ 128).
+Implement `Alphabet` for a custom type to define your own symbol set and match rules — build the value with `AlphabetFns::new` or `AlphabetFns::from_compatible_fn`; see the trait docs in `src/alphabet.rs` for the contract (equal value every call, unique tag ≥ 128).
 
 ---
 
@@ -326,7 +326,7 @@ GPU MEM/SMEM pipeline  (3 passes)
 | Path | Role |
 |------|------|
 | `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic |
-| `src/fm_index/lookup.rs` | `LookupTable` — depth-k prefix table seeding `backward_search` in O(1) for core-symbol k-mers |
+| `src/fm_index/lookup.rs` | `LookupTable` — depth-k prefix table seeding `backward_search` in O(1) for core-symbol k-mers; each entry lists the exact interval and the wildcard variants the alphabet admits |
 | `src/alphabet.rs` | IUPAC encoding, `compatible_symbols`, `DnaSequence`, `Alphabet` trait (`IupacDna`, `ExactDna`) |
 | `src/gpu/` | WebGPU pipeline setup, buffer management, `GpuContext` |
 | `src/gpu/locate.rs` | `locate_batch_gpu` — 2-pass GPU locate |

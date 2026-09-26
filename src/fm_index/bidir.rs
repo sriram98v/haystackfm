@@ -359,8 +359,8 @@ impl BidirInterval {
     // ── Compatible-symbol fan-out ─────────────────────────────────────────────
 
     /// Extend right by every reference code the query code `q` matches under the index's
-    /// alphabet (`AlphabetFns::compatible_fn`), yielding one non-empty child per code in
-    /// that order. This is the fan-out `find_smems` / `find_mems` use internally.
+    /// alphabet (`AlphabetFns::compatible`), yielding one non-empty child per code in
+    /// ascending code order. This is the fan-out `find_smems` / `find_mems` use internally.
     ///
     /// Costs one `extend_right` per compatible code; to first ask cheaply whether any such
     /// child exists, use [`count_right_in`](Self::count_right_in) with the same set
@@ -371,9 +371,10 @@ impl BidirInterval {
         rev: &'a FmIndex,
     ) -> impl Iterator<Item = Self> + 'a {
         let iv = *self;
-        (rev.alphabet_fns.compatible_fn)(q)
+        rev.alphabet_fns
+            .compatible(q)
             .iter()
-            .filter_map(move |&c| iv.extend_right(c, rev))
+            .filter_map(move |c| iv.extend_right(c, rev))
     }
 
     /// Extend left by every reference code the query code `q` matches under the index's
@@ -384,9 +385,10 @@ impl BidirInterval {
         fwd: &'a FmIndex,
     ) -> impl Iterator<Item = Self> + 'a {
         let iv = *self;
-        (fwd.alphabet_fns.compatible_fn)(q)
+        fwd.alphabet_fns
+            .compatible(q)
             .iter()
-            .filter_map(move |&c| iv.extend_left(c, fwd))
+            .filter_map(move |c| iv.extend_left(c, fwd))
     }
 }
 

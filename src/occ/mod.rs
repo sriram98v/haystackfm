@@ -64,10 +64,11 @@ pub struct OccTable {
     /// contiguous slice instead of 3 independent arrays (was `block_deltas: Vec<u16>` +
     /// `planes: Vec<u64>` in separate `Vec`s — each `rank` call was 2-3 cache misses on a
     /// large index; profiling showed ~58% of `backward_search` self-time was these reads).
-    /// Layout per block: `[deltas: num_lanes x u16][planes-or-bitvecs: (num_planes|num_lanes) x u64]`,
-    /// depending on `encoding` (see [`OccEncoding`]).
-    /// `block_stride` = `num_lanes*2 + (num_planes or num_lanes)*8` bytes; block `b`'s record
-    /// starts at `block_data[b*block_stride..]`.
+    /// Layout per block: `[sb_counts: num_lanes x u32][deltas: num_lanes x u16]`
+    /// `[planes-or-bitvecs: (num_planes|num_lanes) x u64]`, depending on `encoding` (see
+    /// [`OccEncoding`]); the superblock counts are repeated in every block of a superblock
+    /// so a rank reads one record. `block_stride` = `num_lanes*6 + (num_planes or
+    /// num_lanes)*8` bytes; block `b`'s record starts at `block_data[b*block_stride..]`.
     #[serde(with = "crate::serde_raw::bytes")]
     block_data: Vec<u8>,
     /// Byte stride of one block's record in `block_data`.

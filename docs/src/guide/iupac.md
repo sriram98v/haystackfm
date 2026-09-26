@@ -50,9 +50,10 @@ the cost of a single extension. A sequence boundary (sentinel) never counts as w
 
 ## CPU/GPU parity
 
-Both paths use the same compatibility lookup — `compatible_symbols` on the CPU and the
-`COMPAT` table in WGSL on the GPU. Parity tests enforce that the two stay in sync, so a query
-returns the same matches whether it runs on the CPU or the GPU.
+Both paths use the same compatibility relation — the `IupacDna` masks on the CPU and the
+`COMPAT` table in WGSL on the GPU. A unit test parses the shader sources and checks the
+table against `IupacDna`, and GPU parity tests compare query results, so a query returns
+the same matches whether it runs on the CPU or the GPU.
 
 ## Opting out
 

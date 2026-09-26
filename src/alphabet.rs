@@ -10,8 +10,10 @@
 //! | 6–15 | R Y S W K M B D H V | degenerate IUPAC |
 //!
 //! [`compatible_symbols`] returns the set of codes whose base sets overlap with
-//! a given code. Both the CPU query path and the GPU WGSL shaders use this table;
-//! the WGSL `COMPAT` array is parity-tested against it in CI.
+//! a given code. An index carries that relation as [`AlphabetFns`], one [`SymbolSet`] per
+//! query code, so the CPU query path tests compatibility with a mask intersection. The GPU
+//! WGSL shaders hard-code the same IUPAC table; a unit test parses the shader sources and
+//! checks them against [`IupacDna`].
 
 use crate::error::FmIndexError;
 
@@ -202,8 +204,11 @@ pub fn compatible_symbols(code: u8) -> &'static [u8] {
 /// `count_right_in(SymbolSet::WILDCARDS)`.
 ///
 /// [`BidirInterval::count_wild_right`]: crate::fm_index::bidir::BidirInterval::count_wild_right
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, Debug, Default, serde::Serialize, serde::Deserialize,
+)]
 #[repr(transparent)]
+#[serde(transparent)]
 pub struct SymbolSet(u16);
 
 impl SymbolSet {
@@ -292,6 +297,7 @@ impl SymbolSet {
     }
 
     /// Iterate the member codes in ascending order.
+    #[inline]
     pub fn iter(self) -> impl Iterator<Item = u8> {
         let mut bits = self.0;
         std::iter::from_fn(move || {
@@ -337,35 +343,84 @@ impl FromIterator<u8> for SymbolSet {
 
 // ── Alphabet trait and built-in implementations ──────────────────────────────
 
-/// Runtime bundle of function pointers that define alphabet matching semantics.
+/// The matching semantics of an alphabet, as data: one [`SymbolSet`] of compatible reference
+/// codes per query code, the core (unambiguous) symbols the lookup table is built over, and
+/// a tag.
 ///
-/// Stored inside [`FmIndex`] so queries call the correct compatibility function
-/// without generic parameters on the struct itself.
+/// Stored inside [`FmIndex`] so queries test compatibility with a mask intersection, without
+/// generic parameters on the struct itself, and written into the serialized index (format
+/// version 3) so a custom alphabet loads back exactly as it was built.
 ///
 /// [`FmIndex`]: crate::fm_index::FmIndex
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AlphabetFns {
-    /// Given a query code, return the slice of reference codes it matches.
-    pub compatible_fn: fn(u8) -> &'static [u8],
-    /// The "core" (unambiguous) symbols used for the depth-k lookup table BFS.
-    pub core_symbols: &'static [u8],
-    /// Small integer tag used for serialization. 0 = [`IupacDna`], 1 = [`ExactDna`].
-    /// Custom implementations should use values ≥ 128.
-    pub tag: u8,
-}
-
-impl std::fmt::Debug for AlphabetFns {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "AlphabetFns {{ tag: {} }}", self.tag)
-    }
+    /// `compat[q]` = the reference codes query code `q` matches.
+    compat: [SymbolSet; ALPHABET_SIZE],
+    /// The "core" (unambiguous) symbols used as the radix of the depth-k lookup table.
+    core: SymbolSet,
+    /// Small integer identifying the alphabet: 0 = [`IupacDna`], 1 = [`ExactDna`],
+    /// 2..=127 reserved, ≥ 128 for custom alphabets. Serialized last.
+    tag: u8,
 }
 
 impl AlphabetFns {
-    /// The reference codes that query code `q` matches under this alphabet, as a
-    /// [`SymbolSet`]. Built from `compatible_fn`, so it agrees with backward search and
-    /// MEM extension for the index it came from (e.g. empty for `N` under [`ExactDna`]).
+    /// Build from explicit tables. `core` is the set of unambiguous symbols the lookup
+    /// table enumerates (`{A, C, G, T}` for both built-ins).
+    pub const fn new(compat: [SymbolSet; ALPHABET_SIZE], core: SymbolSet, tag: u8) -> Self {
+        Self { compat, core, tag }
+    }
+
+    /// Build from a compatibility function, evaluated once per code. Membership is all
+    /// that is kept: the fan-out order of query-time expansion is ascending code order,
+    /// whatever order `f` lists its codes in.
+    pub fn from_compatible_fn(f: fn(u8) -> &'static [u8], core_symbols: &[u8], tag: u8) -> Self {
+        let mut compat = [SymbolSet::EMPTY; ALPHABET_SIZE];
+        for (q, set) in compat.iter_mut().enumerate() {
+            *set = SymbolSet::from_codes(f(q as u8));
+        }
+        Self::new(compat, SymbolSet::from_codes(core_symbols), tag)
+    }
+
+    /// The reference codes that query code `q` matches under this alphabet. Empty for
+    /// `q >= ALPHABET_SIZE`, and e.g. empty for `N` under [`ExactDna`]. Backward search,
+    /// MEM extension and the cursor fan-out all expand a query code through this set.
+    #[inline]
+    pub fn compatible(&self, q: u8) -> SymbolSet {
+        if (q as usize) < ALPHABET_SIZE {
+            self.compat[q as usize]
+        } else {
+            SymbolSet::EMPTY
+        }
+    }
+
+    /// Alias of [`compatible`](Self::compatible).
+    #[inline]
     pub fn compatible_set(&self, q: u8) -> SymbolSet {
-        SymbolSet::from_codes((self.compatible_fn)(q))
+        self.compatible(q)
+    }
+
+    /// The core (unambiguous) symbols.
+    #[inline]
+    pub fn core(&self) -> SymbolSet {
+        self.core
+    }
+
+    /// The alphabet tag.
+    #[inline]
+    pub fn tag(&self) -> u8 {
+        self.tag
+    }
+
+    /// True if a lookup table built by exact core-symbol steps is complete for a text whose
+    /// present symbols are `present`: no core symbol matches any *other* present symbol.
+    /// (A core symbol absent from the text is fine: its entries are empty either way.)
+    pub(crate) fn exact_table_is_complete(&self, present: SymbolSet) -> bool {
+        self.core.iter().all(|s| {
+            self.compat[s as usize]
+                .intersection(present)
+                .difference(SymbolSet::single(s))
+                .is_empty()
+        })
     }
 }
 
@@ -374,33 +429,28 @@ impl AlphabetFns {
 /// Implement this to define custom symbol sets and match rules for use with
 /// [`FmIndex::build_cpu_with`].
 ///
-/// # Safety contract
-/// * [`fns`] must return consistent values every time it is called (same pointers).
-/// * [`tag`] must be unique across all impls in use within a program.
+/// # Contract
+/// * [`fns`] must return an equal value every time it is called.
+/// * [`tag`] must be ≥ 128 and unique across all impls in use within a program; values
+///   2..=127 are reserved and rejected when an index is loaded.
 ///
 /// [`FmIndex::build_cpu_with`]: crate::fm_index::FmIndex::build_cpu_with
 /// [`fns`]: Alphabet::fns
 /// [`tag`]: AlphabetFns::tag
 pub trait Alphabet: Send + Sync + 'static {
-    /// Return the function-pointer bundle for this alphabet.
+    /// Return the matching tables for this alphabet.
     fn fns() -> AlphabetFns;
 }
 
-/// Reconstruct an [`AlphabetFns`] from a serialized tag.
+/// Reconstruct a built-in [`AlphabetFns`] from its tag.
 ///
 /// Returns `None` for unrecognized tags.  Built-in tags: 0 = [`IupacDna`], 1 = [`ExactDna`].
+/// Format-1 and format-2 indices store only the tag, so only built-in alphabets load from
+/// them; format 3 stores the tables themselves.
 pub fn alphabet_fns_from_tag(tag: u8) -> Option<AlphabetFns> {
     match tag {
-        0 => Some(AlphabetFns {
-            compatible_fn: compatible_symbols,
-            core_symbols: &[A, C, G, T],
-            tag: 0,
-        }),
-        1 => Some(AlphabetFns {
-            compatible_fn: ExactDna::compatible,
-            core_symbols: &[A, C, G, T],
-            tag: 1,
-        }),
+        0 => Some(IupacDna::fns()),
+        1 => Some(ExactDna::fns()),
         _ => None,
     }
 }
@@ -415,11 +465,7 @@ pub struct IupacDna;
 
 impl Alphabet for IupacDna {
     fn fns() -> AlphabetFns {
-        AlphabetFns {
-            compatible_fn: compatible_symbols,
-            core_symbols: &[A, C, G, T],
-            tag: 0,
-        }
+        AlphabetFns::from_compatible_fn(compatible_symbols, &[A, C, G, T], 0)
     }
 }
 
@@ -448,11 +494,7 @@ impl ExactDna {
 
 impl Alphabet for ExactDna {
     fn fns() -> AlphabetFns {
-        AlphabetFns {
-            compatible_fn: ExactDna::compatible,
-            core_symbols: &[A, C, G, T],
-            tag: 1,
-        }
+        AlphabetFns::from_compatible_fn(ExactDna::compatible, &[A, C, G, T], 1)
     }
 }
 
@@ -775,90 +817,130 @@ mod tests {
     }
 
     #[test]
-    fn compatible_set_matches_compatible_fn_for_iupac_and_exact() {
-        for fns in [IupacDna::fns(), ExactDna::fns()] {
+    fn compatible_matches_compatible_fn_for_iupac_and_exact() {
+        for (fns, f) in [
+            (
+                IupacDna::fns(),
+                compatible_symbols as fn(u8) -> &'static [u8],
+            ),
+            (ExactDna::fns(), ExactDna::compatible),
+        ] {
             for q in 0..16u8 {
-                let expect = SymbolSet::from_codes((fns.compatible_fn)(q));
-                assert_eq!(fns.compatible_set(q), expect, "tag {} code {q}", fns.tag);
+                let expect = SymbolSet::from_codes(f(q));
+                assert_eq!(fns.compatible(q), expect, "tag {} code {q}", fns.tag());
+                assert_eq!(fns.compatible_set(q), expect);
             }
+            assert_eq!(fns.core(), SymbolSet::BASES);
+            // Codes past the alphabet match nothing rather than indexing out of range.
+            assert!(fns.compatible(16).is_empty());
+            assert!(fns.compatible(255).is_empty());
         }
-        assert_eq!(IupacDna::fns().compatible_set(N), SymbolSet::NON_SENTINEL);
-        assert!(ExactDna::fns().compatible_set(N).is_empty());
-        assert_eq!(ExactDna::fns().compatible_set(A), SymbolSet::single(A));
+        assert_eq!(IupacDna::fns().tag(), 0);
+        assert_eq!(ExactDna::fns().tag(), 1);
+        assert_eq!(IupacDna::fns().compatible(N), SymbolSet::NON_SENTINEL);
+        assert!(ExactDna::fns().compatible(N).is_empty());
+        assert_eq!(ExactDna::fns().compatible(A), SymbolSet::single(A));
         assert_eq!(
             IupacDna::fns()
-                .compatible_set(A)
+                .compatible(A)
                 .intersection(SymbolSet::WILDCARDS),
             SymbolSet::from_codes(&[N, R, W, M, D, H, V])
         );
     }
 
-    // Verifies that the WGSL COMPAT / COMPAT_LEN constants in
-    // shaders/locate_search.wgsl and shaders/mem_find.wgsl exactly match
-    // the compatible_symbols function above.  If this test fails, update the
-    // shader constants to match.
     #[test]
-    fn wgsl_compat_table_matches_compatible_symbols() {
-        // Expected COMPAT_LEN (one entry per code 0..16)
-        let expected_len: [u8; 16] = [0, 8, 8, 8, 8, 15, 12, 12, 12, 12, 12, 12, 14, 14, 14, 14];
+    fn alphabet_fns_round_trip_through_serde_and_tag_lookup() {
+        for fns in [IupacDna::fns(), ExactDna::fns()] {
+            assert_eq!(alphabet_fns_from_tag(fns.tag()), Some(fns));
+            let bytes = bincode::serialize(&fns).unwrap();
+            // 16 masks × 2 bytes + core mask + tag.
+            assert_eq!(bytes.len(), ALPHABET_SIZE * 2 + 2 + 1);
+            assert_eq!(*bytes.last().unwrap(), fns.tag());
+            let back: AlphabetFns = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(back, fns);
+        }
+        assert_eq!(alphabet_fns_from_tag(2), None);
+        assert_eq!(alphabet_fns_from_tag(200), None);
+    }
 
-        // Expected COMPAT flat table (code * 16 + k → symbol, 0 = padding)
-        #[rustfmt::skip]
-        let expected_compat: [[u8; 16]; 16] = [
-            // code  0 ($)
-            [0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
-            // code  1 (A): A N R W M D H V
-            [1,  5,  6,  9, 11, 13, 14, 15,  0,  0,  0,  0,  0,  0,  0,  0],
-            // code  2 (C): C N Y S M B H V
-            [2,  5,  7,  8, 11, 12, 14, 15,  0,  0,  0,  0,  0,  0,  0,  0],
-            // code  3 (G): G N R S K B D V
-            [3,  5,  6,  8, 10, 12, 13, 15,  0,  0,  0,  0,  0,  0,  0,  0],
-            // code  4 (T): T N Y W K B D H
-            [4,  5,  7,  9, 10, 12, 13, 14,  0,  0,  0,  0,  0,  0,  0,  0],
-            // code  5 (N): all 15 non-sentinel codes
-            [1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0],
-            // code  6 (R=A|G)
-            [1,  3,  5,  6,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0],
-            // code  7 (Y=C|T)
-            [2,  4,  5,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0],
-            // code  8 (S=G|C)
-            [2,  3,  5,  6,  7,  8, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0],
-            // code  9 (W=A|T)
-            [1,  4,  5,  6,  7,  9, 10, 11, 12, 13, 14, 15,  0,  0,  0,  0],
-            // code 10 (K=G|T)
-            [3,  4,  5,  6,  7,  8,  9, 10, 12, 13, 14, 15,  0,  0,  0,  0],
-            // code 11 (M=A|C)
-            [1,  2,  5,  6,  7,  8,  9, 11, 12, 13, 14, 15,  0,  0,  0,  0],
-            // code 12 (B=C|G|T)
-            [2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0],
-            // code 13 (D=A|G|T)
-            [1,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0],
-            // code 14 (H=A|C|T)
-            [1,  2,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0],
-            // code 15 (V=A|C|G)
-            [1,  2,  3,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  0],
-        ];
+    #[test]
+    fn exact_table_is_complete_only_when_core_symbols_match_nothing_else_present() {
+        let iupac = IupacDna::fns();
+        let exact = ExactDna::fns();
+        let acgt = SymbolSet::BASES.union(SymbolSet::single(SENTINEL));
+        let with_n = acgt.union(SymbolSet::single(N));
+        assert!(iupac.exact_table_is_complete(acgt));
+        assert!(!iupac.exact_table_is_complete(with_n));
+        // A wildcard in the text is harmless when the query side never matches it.
+        assert!(exact.exact_table_is_complete(with_n));
+        // A core symbol absent from the text does not make the table incomplete.
+        assert!(iupac.exact_table_is_complete(SymbolSet::from_codes(&[SENTINEL, A, C])));
+        // ...but a present wildcard still does.
+        assert!(!iupac.exact_table_is_complete(SymbolSet::from_codes(&[SENTINEL, A, R])));
+    }
 
-        for code in 0u8..16 {
-            let syms = compatible_symbols(code);
-            let len = syms.len() as u8;
-            assert_eq!(
-                len, expected_len[code as usize],
-                "COMPAT_LEN mismatch for code {code}"
-            );
-            // Check each compatible symbol matches the expected slot
-            for (k, &sym) in syms.iter().enumerate() {
+    /// Parse a `const NAME: array<u32, N> = array<u32, N>( ... );` literal out of WGSL
+    /// source: strip `//` comments, split the parenthesised body on commas, drop the `u`
+    /// suffix.
+    fn parse_wgsl_u32_array(src: &str, name: &str) -> Vec<u32> {
+        let decl = format!("const {name}:");
+        let start = src
+            .find(&decl)
+            .unwrap_or_else(|| panic!("no `{decl}` in shader"));
+        let body_start = src[start..].find('(').unwrap() + start + 1;
+        let body_end = src[body_start..].find(");").unwrap() + body_start;
+        src[body_start..body_end]
+            .lines()
+            .map(|line| line.split("//").next().unwrap())
+            .flat_map(|line| line.split(','))
+            .map(str::trim)
+            .filter(|tok| !tok.is_empty())
+            .map(|tok| {
+                tok.strip_suffix('u')
+                    .unwrap_or(tok)
+                    .parse::<u32>()
+                    .unwrap_or_else(|_| panic!("bad u32 literal {tok:?} in {name}"))
+            })
+            .collect()
+    }
+
+    // The GPU shaders hard-code the IUPAC compatibility relation as `COMPAT_LEN` /
+    // `COMPAT` constants. Parse them from the shader sources and check them against
+    // `IupacDna::fns()`, so a change to either side fails here rather than in a GPU-only
+    // parity test.
+    #[test]
+    fn wgsl_compat_tables_match_iupac_dna() {
+        let fns = IupacDna::fns();
+        for (path, src) in [
+            (
+                "shaders/locate_search.wgsl",
+                include_str!("../shaders/locate_search.wgsl"),
+            ),
+            (
+                "shaders/mem_find.wgsl",
+                include_str!("../shaders/mem_find.wgsl"),
+            ),
+        ] {
+            let lens = parse_wgsl_u32_array(src, "COMPAT_LEN");
+            let compat = parse_wgsl_u32_array(src, "COMPAT");
+            assert_eq!(lens.len(), ALPHABET_SIZE, "{path}: COMPAT_LEN size");
+            assert_eq!(compat.len(), ALPHABET_SIZE * 16, "{path}: COMPAT size");
+            for code in 0..ALPHABET_SIZE {
+                let expect: Vec<u32> = fns.compatible(code as u8).iter().map(u32::from).collect();
+                let row = &compat[code * 16..(code + 1) * 16];
                 assert_eq!(
-                    sym, expected_compat[code as usize][k],
-                    "COMPAT mismatch for code {code} slot {k}: got {sym}, expected {}",
-                    expected_compat[code as usize][k]
+                    lens[code] as usize,
+                    expect.len(),
+                    "{path}: COMPAT_LEN[{code}]"
                 );
-            }
-            // Padding slots must be 0
-            for k in syms.len()..16 {
                 assert_eq!(
-                    expected_compat[code as usize][k], 0,
-                    "COMPAT padding non-zero for code {code} slot {k}"
+                    &row[..expect.len()],
+                    &expect[..],
+                    "{path}: COMPAT row {code}"
+                );
+                assert!(
+                    row[expect.len()..].iter().all(|&x| x == 0),
+                    "{path}: COMPAT row {code} padding"
                 );
             }
         }
