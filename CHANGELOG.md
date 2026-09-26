@@ -8,6 +8,8 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-25
+
 ### Added
 - `AlphabetFns::new` / `from_compatible_fn` / `compatible` / `core` / `tag`: an alphabet's
   matching semantics as data — one `SymbolSet` of compatible reference codes per query
@@ -275,5 +277,6 @@ name, and its earlier history is not carried over here.
 - Licensed under Apache-2.0.
 
 [Unreleased]: https://github.com/sriram98v/haystackfm/commits/main
+[0.5.0]: https://crates.io/crates/haystackfm/0.5.0
 [0.4.0]: https://crates.io/crates/haystackfm/0.4.0
 [0.1.0]: https://crates.io/crates/haystackfm/0.1.0
