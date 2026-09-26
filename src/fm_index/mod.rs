@@ -1,13 +1,15 @@
 pub mod bidir;
 pub mod bidir_index;
 pub mod fwd_interval;
+pub mod half;
 pub mod lookup;
+pub(crate) mod prepare;
 pub mod query;
 pub mod seq_id;
 pub mod serialize;
 pub mod smem;
 
-use crate::alphabet::{self, Alphabet, AlphabetFns, DnaSequence, IupacDna};
+use crate::alphabet::{Alphabet, AlphabetFns, DnaSequence, IupacDna};
 use crate::bwt::cpu::build_bwt;
 use crate::c_array::CArray;
 use crate::error::FmIndexError;
@@ -16,11 +18,7 @@ use crate::fm_index::seq_id::{HeaderIndex, SeqId};
 use crate::lcp::LcpArray;
 use crate::occ::cpu::build_occ_table;
 use crate::occ::{OccEncoding, OccTable};
-use crate::suffix_array::cpu::build_suffix_array;
 use crate::suffix_array::SampledSuffixArray;
-
-#[cfg(not(target_arch = "wasm32"))]
-use rayon;
 
 /// Configuration for FM-index construction.
 #[derive(Debug, Clone)]
@@ -132,18 +130,9 @@ impl FmIndex {
             return Err(FmIndexError::EmptySequence);
         }
 
-        // Configure rayon thread pool when multi-threading is requested.
-        // We build inside a closure so the pool is scoped to construction.
-        #[cfg(not(target_arch = "wasm32"))]
-        if config.build_threads > 1 {
-            let threads = config.build_threads as usize;
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
-            return pool.install(|| Self::build_cpu_inner::<A>(sequences, config));
-        }
-        Self::build_cpu_inner::<A>(sequences, config)
+        prepare::in_build_pool(config.build_threads, || {
+            Self::build_cpu_inner::<A>(sequences, config)
+        })
     }
 
     fn build_cpu_inner<A: Alphabet>(
@@ -151,32 +140,17 @@ impl FmIndex {
         config: &FmIndexConfig,
     ) -> Result<Self, FmIndexError> {
         let alphabet_fns = A::fns();
-        let (text, seq_boundaries) = alphabet::concatenate_sequences(sequences)?;
-        let text_len = text.len() as u32;
-        let num_sequences = sequences.len() as u32;
-
-        let seq_headers: Vec<String> = sequences
-            .iter()
-            .enumerate()
-            .map(|(i, seq)| {
-                let h = seq.header();
-                if h.is_empty() {
-                    format!("seq_{}", i)
-                } else {
-                    h.to_string()
-                }
-            })
-            .collect();
-        // Built before the suffix array so a duplicate header fails fast rather than after
-        // the expensive construction passes.
-        let header_index = HeaderIndex::build(&seq_headers)?;
-
-        // C array from text before SA construction — BWT is a permutation of text,
-        // so character frequencies are identical. Avoids a second n-byte scan of BWT.
-        let c_array = CArray::from_text(&text);
-
-        // Build suffix array (single-threaded; psacak has no parallel API)
-        let sa = build_suffix_array(&text);
+        let prepare::Prepared {
+            text,
+            text_len,
+            num_sequences,
+            seq_boundaries,
+            seq_headers,
+            header_index,
+            c_array,
+            sa,
+            seq_starts,
+        } = prepare::prepare_cpu(sequences)?;
 
         // Build BWT from SA. The text is retained (not dropped) to back `sequence()`.
         let bwt = build_bwt(&text, &sa);
@@ -186,18 +160,8 @@ impl FmIndex {
             .build_lcp
             .then(|| LcpArray::build_kasai(&text, &sa.data));
 
-        // Sample SA then free it before building Occ (saves ~4n bytes of peak memory)
-        // Every sequence start must be sampled so `resolve_sa`'s LF-walk never crosses a
-        // sentinel (all sentinels share one byte value → ambiguous LF). `seq_boundaries[k]` is
-        // the start of sequence k+1, so the starts are `0` plus every boundary but the last.
-        let seq_starts: Vec<u32> = std::iter::once(0)
-            .chain(
-                seq_boundaries
-                    .iter()
-                    .take(seq_boundaries.len().saturating_sub(1))
-                    .copied(),
-            )
-            .collect();
+        // Sample SA then free it before building Occ (saves ~4n bytes of peak memory).
+        // Sequence starts are force-sampled (see `Prepared::seq_starts`).
         let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate, &seq_starts);
         drop(sa);
 
@@ -239,6 +203,12 @@ impl FmIndex {
     /// Total text length (including sentinels).
     pub fn text_len(&self) -> u32 {
         self.text_len
+    }
+
+    /// The occ table (rank over the BWT), e.g. for [`OccTable::heap_size_bytes`] or
+    /// [`RlBwt::from_occ`](crate::rlbwt::RlBwt::from_occ).
+    pub fn occ(&self) -> &OccTable {
+        &self.occ
     }
 
     /// Number of sequences indexed.
@@ -331,7 +301,7 @@ impl FmIndex {
             return Err(FmIndexError::EmptySequence);
         }
 
-        let (text, seq_boundaries) = alphabet::concatenate_sequences(sequences)?;
+        let (text, seq_boundaries) = crate::alphabet::concatenate_sequences(sequences)?;
         let text_len = text.len() as u32;
         let num_sequences = sequences.len() as u32;
 

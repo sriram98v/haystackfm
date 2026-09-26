@@ -617,4 +617,35 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn validate_structure_accepts_built_tables_and_rejects_mismatched_buffers() {
+        let text = encode("ACGTNACGTRYACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+        let sa = build_suffix_array(&text);
+        let bwt = build_bwt(&text, &sa);
+        for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+            let occ = build_occ_table(&bwt, enc);
+            assert!(occ.validate_structure().is_ok());
+
+            let mut bad = occ.clone();
+            bad.block_data.truncate(bad.block_data.len() - 1);
+            assert!(bad.validate_structure().is_err());
+
+            let mut bad = occ.clone();
+            bad.text_len += BLOCK_SIZE;
+            assert!(bad.validate_structure().is_err());
+
+            let mut bad = occ.clone();
+            bad.superblock_checkpoints.push(0);
+            assert!(bad.validate_structure().is_err());
+
+            let mut bad = occ.clone();
+            bad.num_lanes += 1;
+            assert!(bad.validate_structure().is_err());
+
+            let mut bad = occ.clone();
+            bad.lane_to_symbol.swap(0, 1);
+            assert!(bad.validate_structure().is_err());
+        }
+    }
 }

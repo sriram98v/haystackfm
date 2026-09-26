@@ -1,5 +1,8 @@
 pub mod cpu;
+mod rank;
 pub mod select;
+
+pub use rank::BwtRank;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -311,6 +314,53 @@ impl OccTable {
                 .cast::<u64>()
                 .read_unaligned()
         }
+    }
+
+    /// Check that a deserialized table's layout fields agree with each other and with the
+    /// buffer sizes, so the unchecked record reads in `rank`/`symbol_at` stay in bounds.
+    /// Does not check that the counts are right — callers that need that rebuild and
+    /// compare (see `RlBwt::validate_and_rebuild`). Returns the first violation.
+    pub(crate) fn validate_structure(&self) -> Result<(), String> {
+        let num_lanes = self.num_lanes as usize;
+        if num_lanes > ALPHABET_SIZE || self.num_planes != num_planes_for(self.num_lanes) {
+            return Err("occ table lane counts are inconsistent".into());
+        }
+        for (c, &lane) in self.symbol_to_lane.iter().enumerate() {
+            if lane != NO_LANE
+                && (lane as usize >= num_lanes || self.lane_to_symbol[lane as usize] as usize != c)
+            {
+                return Err("occ table lane maps are inconsistent".into());
+            }
+        }
+        if self.lane_to_symbol[..num_lanes]
+            .iter()
+            .any(|&c| c as usize >= ALPHABET_SIZE || self.symbol_to_lane[c as usize] == NO_LANE)
+        {
+            return Err("occ table lane maps are inconsistent".into());
+        }
+        let width = match self.encoding {
+            OccEncoding::Bitplane => self.num_planes as usize,
+            OccEncoding::OneHot => num_lanes,
+        };
+        let num_blocks = self.text_len.div_ceil(BLOCK_SIZE) as usize;
+        let num_superblocks = self.text_len.div_ceil(SUPERBLOCK_SIZE) as usize;
+        if self.block_stride != num_lanes * 6 + width * 8
+            || Some(self.block_data.len()) != num_blocks.checked_mul(self.block_stride)
+            || self.superblock_checkpoints.len() != num_superblocks * num_lanes
+        {
+            return Err("occ table buffers do not match its length".into());
+        }
+        Ok(())
+    }
+
+    /// The Level-3 lane encoding this table was built with.
+    pub fn encoding(&self) -> OccEncoding {
+        self.encoding
+    }
+
+    /// Heap bytes held by this table (checkpoints, block records, select hints).
+    pub fn heap_size_bytes(&self) -> usize {
+        self.superblock_checkpoints.len() * 4 + self.block_data.len() + self.select_hints.len() * 4
     }
 
     /// Number of distinct symbols with a dedicated occ lane (`<= ALPHABET_SIZE`).

@@ -196,6 +196,39 @@ impl SampledSuffixArray {
         }
     }
 
+    /// Check that a deserialized value is internally consistent for a text of `text_len`
+    /// rows: record count, rank checkpoints, sample count, and every sampled value in
+    /// range. The accessors read records without bounds checks, so an untrusted value must
+    /// pass this before any `get`. Returns a description of the first violation.
+    pub(crate) fn validate(&self, text_len: u32) -> Result<(), String> {
+        if self.text_len != text_len {
+            return Err("SA samples cover a different text length".into());
+        }
+        let num_words = (text_len as usize).div_ceil(64);
+        if self.word_data.len() != num_words * SA_RECORD_STRIDE {
+            return Err("SA sample records do not match the text length".into());
+        }
+        let mut rank = 0u32;
+        for w in 0..num_words {
+            if self.sb_count_at(w) + self.delta_at(w) != rank {
+                return Err(format!("SA sample rank checkpoint wrong at word {w}"));
+            }
+            rank += self.word_at(w).count_ones();
+        }
+        if rank as usize != self.sa_vals.len() {
+            return Err("SA sample count differs from the sample bitvector".into());
+        }
+        if self.sa_vals.iter().any(|&v| v >= text_len) {
+            return Err("SA sample value past the text end".into());
+        }
+        Ok(())
+    }
+
+    /// Heap bytes held by the sample bitvector records and the sampled values.
+    pub fn heap_size_bytes(&self) -> usize {
+        self.word_data.len() + self.sa_vals.len() * 4
+    }
+
     /// Check if BWT row `i` has a sampled SA value.
     #[inline]
     pub fn is_sampled(&self, i: u32) -> bool {
@@ -342,5 +375,32 @@ mod tests {
         let sampled_count = sa.data.iter().filter(|&&v| v % 4 == 0).count();
         let found: usize = (0..sa.data.len() as u32).filter_map(|i| ssa.get(i)).count();
         assert_eq!(found, sampled_count);
+    }
+
+    #[test]
+    fn validate_accepts_built_samples_and_rejects_corruption() {
+        let (sa, _) =
+            make_sa("ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+        let n = sa.data.len() as u32;
+        let ssa = SampledSuffixArray::from_full(&sa, 4, &[0]);
+        assert!(ssa.validate(n).is_ok());
+        assert!(ssa.validate(n + 1).is_err());
+
+        let mut bad = ssa.clone();
+        bad.sa_vals.pop();
+        assert!(bad.validate(n).is_err());
+
+        let mut bad = ssa.clone();
+        bad.sa_vals[0] = n;
+        assert!(bad.validate(n).is_err());
+
+        let mut bad = ssa.clone();
+        bad.word_data.truncate(SA_RECORD_STRIDE);
+        assert!(bad.validate(n).is_err());
+
+        let mut bad = ssa;
+        let last = bad.word_data.len() - 2;
+        bad.word_data[last] ^= 1; // delta of the last word
+        assert!(bad.validate(n).is_err());
     }
 }

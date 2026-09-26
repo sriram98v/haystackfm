@@ -63,6 +63,10 @@ GPU-accelerated FM-index for DNA sequences. Compiles to native (Vulkan/Metal/DX1
 | Path | Role |
 |------|------|
 | `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic, cursor (`bidir.rs`: extend/contract); `lookup.rs` depth-k table with per-k-mer exact slot + wildcard variants |
+| `src/rlbwt/` | `RlBwt`: run-length BWT (run-head `OccTable` + run starts with bucket directory + per-symbol run-length prefix sums), implements `BwtRank`; `from_runs`/`from_bwt`/`from_occ`/`build_cpu` |
+| `src/rl_fm_index/` | `RlFmIndex` (count/locate via sampled SA, no text; `sa_sample_rate = 0` = count-only), `BidirRlFmIndex` (cursor via `FmHalf`), `"HRL\x01"`/`"HRB\x01"` serialization with full load-time validation |
+| `src/occ/rank.rs`, `src/fm_index/half.rs` | `BwtRank` (rank/access trait over `OccTable` and `RlBwt`) and sealed `FmHalf` (index half the `BidirInterval` cursor is generic over; contraction stays `FmIndex`-only) |
+| `src/fm_index/prepare.rs` | Construction prefix shared by `FmIndex` and `RlFmIndex` (concatenate, headers, C array, SA, forced-sample seq starts) |
 | `src/fm_index/fwd_interval.rs` | `FwdInterval`: forward-only row range — LF step on sub-ranges, LCP parent (ancestor walk), locate |
 | `src/fm_index/serialize.rs`, `src/serde_raw.rs` | On-disk format (`HFM` + version byte, v3 current: alphabet tables stored inline, CSR lookup table; v2/v1/legacy readers kept, fixtures under `tests/fixtures/` written by `examples/gen_fixtures.rs`); `serde_raw` codecs store big `Vec<u8/u16/u32/(u32,u32)>` as LE byte blobs so `from_bytes` copies in bulk |
 | `src/lcp.rs` | Capped u16 LCP array (Kasai at CPU build) + block minima / sparse table for psv/nsv; one per bidir half, opt-in via `FmIndexConfig::build_lcp` (default off), backs `contract_left` (fwd) / `contract_right` (rev) |

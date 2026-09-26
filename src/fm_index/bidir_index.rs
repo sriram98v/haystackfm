@@ -761,7 +761,7 @@ async fn resolve_mem_hits_gpu(
 /// Sentinels (0) in the middle of the text become interior characters of the reversed
 /// sequence; the FM-index treats them as the lexicographically smallest character, so
 /// the reverse index remains valid.
-fn reverse_as_sequence(text: &[u8]) -> Result<DnaSequence, FmIndexError> {
+pub(crate) fn reverse_as_sequence(text: &[u8]) -> Result<DnaSequence, FmIndexError> {
     // Strip the trailing sentinel before reversing so we don't double-sentinel.
     let stripped = if text.last() == Some(&crate::alphabet::SENTINEL) {
         &text[..text.len() - 1]
