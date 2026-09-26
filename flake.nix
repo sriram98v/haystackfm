@@ -55,7 +55,7 @@
         rec {
           haystackfm = rustPlatform.buildRustPackage {
             pname = "haystackfm";
-            version = "0.4.0";
+            version = "0.5.0";
 
             src = srcFor pkgs;
             cargoLock.lockFile = ./Cargo.lock;
