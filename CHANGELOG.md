@@ -8,6 +8,40 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+### Added
+- Run-length indexes for repetitive collections, the substrate for the move / b-move
+  structures:
+  - `RlBwt` (`haystackfm::rlbwt`): a run-length BWT (run-head occ table, run starts with a
+    bucket directory, per-symbol run-length prefix sums; ~9.6 bytes per run). Produced by
+    `RlBwt::from_runs`, `from_bwt`, `from_occ` (convert an existing index) and `build_cpu`;
+    inspected by `runs`, `num_runs`, `run_ratio`, `get`, `to_bwt`, `heap_size_bytes`.
+  - `RlFmIndex` / `RlFmIndexConfig` (`haystackfm::rl_fm_index`): `count`, `locate`,
+    `locate_positions`, `locate_rows`, `map_position`, header accessors; locate LF-walks to
+    the sampled SA. `sa_sample_rate = 0` builds a count-only index. `From<&FmIndex>`.
+  - `BidirRlFmIndex`: the `BidirInterval` cursor (`extend_*`, `children_*`, `count_*_in`,
+    `count_wild_*`, `*_compatible`), `count`, `locate_interval`. `From<&BidirFmIndex>`.
+  - Serialization under their own magics, `"HRL\x01"` and `"HRB\x01"`, validated in full at
+    load (run structure, head table, C array, SA samples).
+- `BwtRank`: the rank/access trait the query code needs, implemented by `OccTable` and
+  `RlBwt`. `FmHalf` (sealed): one half of a bidirectional index, as seen by the cursor.
+- `Bwt::runs`, `FmIndex::occ`, `OccTable::encoding`, `OccTable::heap_size_bytes`,
+  `SampledSuffixArray::heap_size_bytes`.
+- `benches/rl_query.rs`: run-length vs plain `count` / `locate` / `extend_right` on seeded
+  random and repetitive inputs.
+
+### Changed
+- `BidirInterval::extend_*`, `children_*`, `count_*_in`, `count_wild_*` and
+  `extend_*_compatible` are generic over `FmHalf` (source-compatible: `&FmIndex` still
+  works). Contraction still takes `&FmIndex`.
+
+### Fixed
+- `FmIndex::from_bytes` (and so `BidirFmIndex::from_bytes`) now checks the occ table's and
+  SA samples' buffers against their declared lengths before returning. Their record reads
+  are unchecked, so a corrupted or hand-crafted blob could previously read out of bounds
+  on the first query; it is now a `DeserializeError`.
+- The `BidirInterval` docs had the extension formulae's directions swapped (right extension
+  runs on the reverse index).
+
 ## [0.5.0] - 2026-09-25
 
 ### Added

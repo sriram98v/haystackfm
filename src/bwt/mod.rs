@@ -53,6 +53,20 @@ impl Bwt {
         (0..self.text_len).map(move |i| self.get(i))
     }
 
+    /// Maximal runs of equal symbols as `(symbol, length)`, in BWT order — the input of
+    /// [`RlBwt::from_runs`](crate::rlbwt::RlBwt::from_runs).
+    pub fn runs(&self) -> impl Iterator<Item = (u8, u32)> + '_ {
+        let mut chars = self.iter_chars().peekable();
+        std::iter::from_fn(move || {
+            let sym = chars.next()?;
+            let mut len = 1u32;
+            while chars.next_if_eq(&sym).is_some() {
+                len += 1;
+            }
+            Some((sym, len))
+        })
+    }
+
     /// Materialize as a `Vec<u32>` for GPU upload (one u32 per BWT char).
     pub fn to_u32_vec(&self) -> Vec<u32> {
         self.iter_chars().map(|b| b as u32).collect()

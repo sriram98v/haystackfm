@@ -12,6 +12,7 @@
 - [Concepts](./guide/concepts.md)
 - [Count & Locate](./guide/count-locate.md)
 - [MEM / SMEM Finding](./guide/mem-smem.md)
+- [Run-Length Indexes](./guide/run-length.md)
 - [IUPAC Ambiguity](./guide/iupac.md)
 - [Custom Alphabets](./guide/alphabets.md)
 - [GPU Acceleration](./guide/gpu.md)

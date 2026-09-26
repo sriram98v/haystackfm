@@ -1,5 +1,5 @@
 use super::FmIndex;
-use crate::fm_index::seq_id::SeqId;
+use crate::fm_index::seq_id::{map_text_position, SeqId};
 
 impl FmIndex {
     /// Count occurrences of a pattern in the indexed text.
@@ -357,20 +357,7 @@ impl FmIndex {
 
     /// Map a text position back to `(sequence_id, position_within_sequence)`.
     pub fn map_position(&self, text_pos: u32) -> Option<(SeqId, u32)> {
-        // Binary search for the sequence containing this position
-        let seq_idx = self
-            .seq_boundaries
-            .partition_point(|&boundary| boundary <= text_pos);
-        if seq_idx >= self.seq_boundaries.len() {
-            return None;
-        }
-        let seq_start = if seq_idx == 0 {
-            0
-        } else {
-            self.seq_boundaries[seq_idx - 1]
-        };
-        let pos_in_seq = text_pos - seq_start;
-        Some((SeqId::new(seq_idx as u32), pos_in_seq))
+        map_text_position(&self.seq_boundaries, text_pos)
     }
 
     /// Locate all occurrences of multiple patterns in parallel on the GPU.
@@ -404,7 +391,7 @@ impl FmIndex {
 /// Merge SA intervals in-place, combining overlapping or adjacent ones.
 ///
 /// Only called when `ivs.len() > 1` (IUPAC multi-symbol paths).
-fn merge_intervals_inplace(ivs: &mut Vec<(u32, u32)>) {
+pub(crate) fn merge_intervals_inplace(ivs: &mut Vec<(u32, u32)>) {
     ivs.sort_unstable_by_key(|&(lo, _)| lo);
     let mut write = 0usize;
     let (mut cur_lo, mut cur_hi) = ivs[0];
