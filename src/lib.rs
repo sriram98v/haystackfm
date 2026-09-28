@@ -47,6 +47,8 @@ pub mod c_array;
 pub mod error;
 pub mod fm_index;
 pub mod lcp;
+pub mod move_index;
+pub mod move_table;
 pub mod occ;
 mod prefetch;
 pub mod rl_fm_index;
@@ -71,6 +73,8 @@ pub use fm_index::smem::Mem;
 pub use fm_index::{FmIndex, FmIndexConfig};
 #[cfg(feature = "gpu")]
 pub use gpu::MemHit;
+pub use move_index::{BMoveCursor, BMoveIndex, MoveFmIndex, MoveFmIndexConfig};
+pub use move_table::MoveTable;
 pub use occ::{BwtRank, OccEncoding};
 pub use rl_fm_index::{BidirRlFmIndex, RlFmIndex, RlFmIndexConfig};
 pub use rlbwt::RlBwt;
