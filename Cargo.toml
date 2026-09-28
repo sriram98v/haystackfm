@@ -92,3 +92,7 @@ harness = false
 [[bench]]
 name = "rl_query"
 harness = false
+
+[[bench]]
+name = "move_query"
+harness = false

@@ -24,6 +24,23 @@ Before 1.0, a breaking change bumps the **minor** version.
     `count_wild_*`, `*_compatible`), `count`, `locate_interval`. `From<&BidirFmIndex>`.
   - Serialization under their own magics, `"HRL\x01"` and `"HRB\x01"`, validated in full at
     load (run structure, head table, C array, SA samples).
+- Move-structure indexes (`haystackfm::move_index`, `haystackfm::move_table`):
+  - `MoveTable`: a permutation of `[0, n)` stored as 16-byte rows (start, image, image row,
+    payload). `step` is one row read plus a short fast-forward. Optional Nishimoto–Tabei
+    balancing bounds the fast-forward.
+  - `MoveFmIndex` / `MoveFmIndexConfig`: an r-index on move tables.
+    - `count`, `locate`, `locate_positions`.
+    - Locate runs in `O(r)` space. SA samples at run boundaries give a toehold during
+      search. Balanced `φ` / `φ⁻¹` move tables with permuted-LCP samples enumerate the
+      interval from a toehold anywhere inside it.
+    - `locate: false` builds a count-only index.
+  - `BMoveIndex` / `BMoveCursor` (b-move): forward and reverse LF move tables driving a
+    cursor that carries both intervals, their rows and a toehold.
+    - Operations: `extend_*`, `children_*`, `count_*_in`, `count_wild_*`, `*_compatible`,
+      `locate(&cursor)`, `count`.
+    - `BMoveCursor::interval()` gives the equivalent `BidirInterval`.
+  - Serialization under `"HMV\x01"` / `"HBM\x01"`. Every table is validated on load.
+  - `benches/move_query.rs` compares plain, run-length and move-structure indexes.
 - `BwtRank`: the rank/access trait the query code needs, implemented by `OccTable` and
   `RlBwt`. `FmHalf` (sealed): one half of a bidirectional index, as seen by the cursor.
 - `Bwt::runs`, `FmIndex::occ`, `OccTable::encoding`, `OccTable::heap_size_bytes`,

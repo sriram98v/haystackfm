@@ -56,6 +56,35 @@ impl From<LcpArrayV1> for LcpArray {
     }
 }
 
+/// The permuted LCP array, uncapped: `plcp[x] = lcp(T[x..], T[SA[ISA[x] − 1]..])` (0 for
+/// the suffix in row 0), in text order. Kasai's algorithm without the final permutation;
+/// uses a transient `4n`-byte inverse suffix array. Sentinels are ordinary symbols, matching
+/// the order the suffix array was built with.
+pub(crate) fn plcp_u32(text: &[u8], sa: &[u32]) -> Vec<u32> {
+    let n = text.len();
+    assert_eq!(sa.len(), n, "suffix array length must equal text length");
+    let mut isa = vec![0u32; n];
+    for (row, &pos) in sa.iter().enumerate() {
+        isa[pos as usize] = row as u32;
+    }
+    let mut plcp = vec![0u32; n];
+    let mut h = 0usize;
+    for i in 0..n {
+        let row = isa[i] as usize;
+        if row == 0 {
+            h = 0;
+            continue;
+        }
+        let j = sa[row - 1] as usize;
+        while i + h < n && j + h < n && text[i + h] == text[j + h] {
+            h += 1;
+        }
+        plcp[i] = h as u32;
+        h = h.saturating_sub(1);
+    }
+    plcp
+}
+
 impl LcpArray {
     /// Build with Kasai's algorithm from the text (alphabet codes, sentinels included) and
     /// its full suffix array. Sentinels are ordinary symbols here, matching the order the
@@ -281,6 +310,25 @@ mod tests {
                 assert_eq!(lcp.get(i as u32), e, "seed {seed} row {i}");
             }
         }
+    }
+
+    #[test]
+    fn plcp_is_the_uncapped_lcp_in_text_order() {
+        for seed in 1..20u64 {
+            let text = random_text(seed, 300, 4);
+            let sa = naive_sa(&text);
+            let expected = naive_lcp(&text, &sa);
+            let plcp = plcp_u32(&text, &sa);
+            for (row, &e) in expected.iter().enumerate() {
+                assert_eq!(plcp[sa[row] as usize], e, "seed {seed} row {row}");
+            }
+        }
+        // Uncapped on a long repeat.
+        let mut text = vec![1u8; 70_000];
+        text.push(0);
+        let sa: Vec<u32> = (0..text.len() as u32).rev().collect();
+        let plcp = plcp_u32(&text, &sa);
+        assert_eq!(plcp[0], 69_999);
     }
 
     #[test]

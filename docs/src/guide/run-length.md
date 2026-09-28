@@ -75,13 +75,12 @@ Compared with the plain indexes, these are missing: the k-mer lookup table, LCP-
 Construction still builds the full suffix array, so peak memory is `O(n)`. Prefix-free
 parsing would lower that, and it is future work.
 
-## Roadmap: move and b-move
+## Move and b-move
 
-The run-length BWT is the substrate for the **move structure** (Nishimoto & Tabei).
-Splitting runs into balanced intervals and storing each one's LF image makes LF a
-constant-time table step instead of a rank. SA samples at run boundaries (toehold + φ,
-as in the r-index) make locate `O(r)`-space as well. **b-move** (Depuydt et al.) applies
-the same idea to both halves of the bidirectional index.
+The move structure builds on these runs. Each run's LF image is stored as a table row, so
+LF is a row read instead of a rank. SA samples at run boundaries (toehold + `φ`) make
+locate `O(r)`-space. See [Move Structure & b-move](./move.md) for `MoveFmIndex` and the
+bidirectional `BMoveIndex`.
 
 [`RlBwt`]: https://docs.rs/haystackfm/latest/haystackfm/rlbwt/struct.RlBwt.html
 [`RlFmIndex`]: https://docs.rs/haystackfm/latest/haystackfm/rl_fm_index/struct.RlFmIndex.html

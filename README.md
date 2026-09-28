@@ -229,7 +229,24 @@ bidir.extend_right(iv, code) / children_right(&iv) / count_right_in(&iv, set) / 
 RlFmIndex::from_bytes(&rl.to_bytes()?)?         // "HRL\x01"; BidirRlFmIndex uses "HRB\x01"
 ```
 
-Not yet: lookup table, LCP contraction, SMEM/MEM, GPU/WASM. Move / b-move structures build on this.
+Not yet: lookup table, LCP contraction, SMEM/MEM, GPU/WASM.
+
+### `MoveFmIndex` / `BMoveIndex` (move structure, b-move)
+
+LF as a move-table step, and r-index locate in `O(r)` space: toeholds plus `φ`/`φ⁻¹` move
+tables with permuted-LCP samples. On a 40-genome collection, locate is ~6× faster than
+`FmIndex`. See `docs/src/guide/move.md`.
+
+```rust
+let mv = MoveFmIndex::build_cpu(sequences, &MoveFmIndexConfig::default())?;  // locate: false → count-only
+mv.count(pattern) / mv.locate(pattern)
+
+let bm = BMoveIndex::build_cpu(sequences, &MoveFmIndexConfig::default())?;
+let cur = bm.extend_right(&bm.full_cursor(), code)?;   // BMoveCursor: intervals + rows + toehold
+bm.extend_left(&cur, code) / children_right(&cur) / count_right_in(&cur, set) / locate(&cur)
+cur.interval()                                  // → BidirInterval (identical to BidirFmIndex's)
+MoveFmIndex::from_bytes(&mv.to_bytes()?)?       // "HMV\x01"; BMoveIndex uses "HBM\x01"
+```
 
 ### `SeqId`
 
@@ -347,6 +364,7 @@ GPU MEM/SMEM pipeline  (3 passes)
 | Path | Role |
 |------|------|
 | `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic |
+| `src/move_table/`, `src/move_index/` | `MoveTable` (generic move structure, optional balancing), `MoveFmIndex` (r-index on move tables), `BMoveIndex` / `BMoveCursor` (b-move) |
 | `src/rlbwt/`, `src/rl_fm_index/` | `RlBwt` (run heads + run starts + per-symbol run-length sums), `RlFmIndex`, `BidirRlFmIndex`; `BwtRank` (`src/occ/rank.rs`) and `FmHalf` (`src/fm_index/half.rs`) let the cursor run on either rank backend |
 | `src/fm_index/lookup.rs` | `LookupTable` — depth-k prefix table seeding `backward_search` in O(1) for core-symbol k-mers; each entry lists the exact interval and the wildcard variants the alphabet admits |
 | `src/alphabet.rs` | IUPAC encoding, `compatible_symbols`, `DnaSequence`, `Alphabet` trait (`IupacDna`, `ExactDna`) |
