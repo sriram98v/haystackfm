@@ -12,8 +12,10 @@ use super::{BidirRlFmIndex, RlFmIndex};
 use crate::alphabet::AlphabetFns;
 use crate::c_array::CArray;
 use crate::error::FmIndexError;
+use crate::fm_index::lookup::LookupTable;
 use crate::fm_index::seq_id::HeaderIndex;
 use crate::fm_index::serialize::check_stored_alphabet;
+use crate::occ::BwtRank;
 use crate::rlbwt::RlBwt;
 use crate::suffix_array::SampledSuffixArray;
 
@@ -34,6 +36,9 @@ struct SerializableRlFmIndex<'a> {
     seq_boundaries: &'a [u32],
     seq_headers: &'a [String],
     alphabet: &'a AlphabetFns,
+    #[serde(with = "crate::serde_raw::u32s")]
+    seq_end_rows: &'a [u32],
+    lookup: Option<&'a LookupTable>,
 }
 
 /// Read layout, mirroring [`SerializableRlFmIndex`].
@@ -48,6 +53,9 @@ struct OwnedSerializableRlFmIndex {
     seq_boundaries: Vec<u32>,
     seq_headers: Vec<String>,
     alphabet: AlphabetFns,
+    #[serde(with = "crate::serde_raw::u32s")]
+    seq_end_rows: Vec<u32>,
+    lookup: Option<LookupTable>,
 }
 
 fn corrupt(what: impl std::fmt::Display) -> FmIndexError {
@@ -66,6 +74,8 @@ impl RlFmIndex {
             seq_boundaries: &self.seq_boundaries,
             seq_headers: &self.seq_headers,
             alphabet: &self.alphabet_fns,
+            seq_end_rows: &self.seq_end_rows,
+            lookup: self.lookup.as_ref(),
         })
         .map_err(|e| FmIndexError::SerializeError(e.to_string()))?;
         let mut out = Vec::with_capacity(FORMAT_MAGIC.len() + body.len());
@@ -112,6 +122,30 @@ impl RlFmIndex {
         {
             return Err(corrupt("sequence metadata disagrees with the text"));
         }
+        // Empty (reverse half) or one sentinel row per sequence, each row distinct and a
+        // sentinel row (`0..num_sequences`). A sequence's row must not hold a sentinel in
+        // the BWT unless the sequence is empty, or extraction would walk off its start.
+        if !d.seq_end_rows.is_empty() {
+            if d.seq_end_rows.len() != d.num_sequences as usize {
+                return Err(corrupt(
+                    "sequence end rows disagree with the sequence count",
+                ));
+            }
+            let mut seen = vec![false; d.num_sequences as usize];
+            for (k, &row) in d.seq_end_rows.iter().enumerate() {
+                let start = k.checked_sub(1).map_or(0, |j| d.seq_boundaries[j]);
+                let empty = d.seq_boundaries.get(k).is_some_and(|&end| end - start == 1);
+                if row >= d.num_sequences
+                    || std::mem::replace(&mut seen[row as usize], true)
+                    || (bwt.symbol_at(row) == crate::alphabet::SENTINEL) != empty
+                {
+                    return Err(corrupt("sequence end rows disagree with the BWT"));
+                }
+            }
+        }
+        if let Some(lookup) = &d.lookup {
+            lookup.validate(d.text_len, &d.alphabet).map_err(corrupt)?;
+        }
         let header_index = HeaderIndex::build(&d.seq_headers)?;
         Ok(Self {
             c_array: d.c_array,
@@ -123,6 +157,8 @@ impl RlFmIndex {
             seq_headers: d.seq_headers,
             header_index,
             alphabet_fns: d.alphabet,
+            seq_end_rows: d.seq_end_rows,
+            lookup: d.lookup,
         })
     }
 }
@@ -161,5 +197,64 @@ impl BidirRlFmIndex {
             return Err(corrupt("forward and reverse halves do not match"));
         }
         Ok(Self { fwd, rev })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::alphabet::DnaSequence;
+    use crate::rl_fm_index::RlFmIndexConfig;
+
+    fn index(lookup_depth: u32) -> RlFmIndex {
+        let seqs: Vec<DnaSequence> = ["ACGTTGCA", "ACGATGCA", "TTTT"]
+            .iter()
+            .map(|s| DnaSequence::from_str(s).unwrap())
+            .collect();
+        let config = RlFmIndexConfig {
+            sa_sample_rate: 4,
+            lookup_depth,
+            ..Default::default()
+        };
+        RlFmIndex::build_cpu(&seqs, &config).unwrap()
+    }
+
+    fn rejects(ix: &RlFmIndex) -> bool {
+        RlFmIndex::from_bytes(&ix.to_bytes().unwrap()).is_err()
+    }
+
+    #[test]
+    fn round_trip_keeps_extraction_and_lookup() {
+        let ix = index(3);
+        let back = RlFmIndex::from_bytes(&ix.to_bytes().unwrap()).unwrap();
+        assert_eq!(back.seq_end_rows, ix.seq_end_rows);
+        assert_eq!(back.lookup, ix.lookup);
+    }
+
+    #[test]
+    fn rejects_corrupted_sequence_end_rows() {
+        let good = index(0);
+        assert!(!rejects(&good));
+
+        let mut dup = good.clone();
+        dup.seq_end_rows[1] = dup.seq_end_rows[0];
+        assert!(rejects(&dup), "duplicate row");
+
+        let mut out_of_range = good.clone();
+        out_of_range.seq_end_rows[0] = good.num_sequences;
+        assert!(rejects(&out_of_range), "non-sentinel row");
+
+        let mut short = good.clone();
+        short.seq_end_rows.pop();
+        assert!(rejects(&short), "wrong count");
+    }
+
+    #[test]
+    fn rejects_corrupted_lookup_table() {
+        let mut ix = index(2);
+        let mut table = ix.lookup.take().unwrap();
+        table.depth = 3;
+        ix.lookup = Some(table);
+        assert!(rejects(&ix));
     }
 }

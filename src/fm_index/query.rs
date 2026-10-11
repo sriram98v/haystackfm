@@ -1,6 +1,8 @@
 use super::FmIndex;
 use crate::fm_index::seq_id::{map_text_position, SeqId};
 
+use crate::fm_index::lookup::seed_backward_search;
+
 impl FmIndex {
     /// Count occurrences of a pattern in the indexed text.
     ///
@@ -226,36 +228,12 @@ impl FmIndex {
         }
 
         // Attempt to seed from the depth-k lookup table.
-        let (mut intervals, start_rev_idx) = if let Some(ref lut) = self.lookup {
-            let depth = lut.depth as usize;
-            if pattern.len() >= depth {
-                let suffix = &pattern[pattern.len() - depth..];
-                match lut.get(suffix) {
-                    // The entry lists the exact k-mer's interval and every wildcard
-                    // variant's; an incomplete entry dropped variants, so search it fully.
-                    Some(hit) if hit.complete => {
-                        let mut seed: Vec<(u32, u32)> = hit
-                            .intervals
-                            .iter()
-                            .copied()
-                            .filter(|&(lo, hi)| lo < hi)
-                            .collect();
-                        if seed.is_empty() {
-                            return vec![];
-                        }
-                        if seed.len() > 1 {
-                            merge_intervals_inplace(&mut seed);
-                        }
-                        (seed, pattern.len() - depth)
-                    }
-                    _ => (vec![(0u32, self.text_len)], pattern.len()),
-                }
-            } else {
-                (vec![(0u32, self.text_len)], pattern.len())
-            }
-        } else {
-            (vec![(0u32, self.text_len)], pattern.len())
-        };
+        let (mut intervals, start_rev_idx) =
+            match seed_backward_search(self.lookup.as_ref(), pattern) {
+                Some((seed, _)) if seed.is_empty() => return vec![],
+                Some(seeded) => seeded,
+                None => (vec![(0u32, self.text_len)], pattern.len()),
+            };
 
         // Scratch buffer reused across steps to avoid per-step allocations.
         let mut next: Vec<(u32, u32)> = Vec::with_capacity(16);

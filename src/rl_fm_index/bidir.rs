@@ -6,8 +6,10 @@ use crate::alphabet::{Alphabet, DnaSequence, IupacDna, SymbolSet, ALPHABET_SIZE}
 use crate::error::FmIndexError;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::{reverse_as_sequence, BidirFmIndex};
+use crate::fm_index::fwd_interval::FwdInterval;
 use crate::fm_index::prepare::{in_build_pool, prepare_cpu};
 use crate::fm_index::seq_id::SeqId;
+use crate::fm_index::smem::{BidirSearch, Mem};
 
 /// Bidirectional run-length FM-index: [`RlFmIndex`] halves over the text `T` (`fwd`) and
 /// its reversal `T^R` (`rev`), the run-length counterpart of [`BidirFmIndex`].
@@ -17,8 +19,8 @@ use crate::fm_index::seq_id::SeqId;
 /// [`BidirFmIndex`] over the same references, since both halves index the same suffix
 /// arrays. Locate uses the forward half's SA samples; the reverse half carries none.
 ///
-/// Not yet supported compared with [`BidirFmIndex`]: cursor contraction (needs the LCP),
-/// k-mer `lookup_interval`, and SMEM/MEM finding.
+/// Not yet supported compared with [`BidirFmIndex`]: cursor contraction and `parent_fwd`
+/// (both need the LCP), and the GPU MEM/SMEM kernels.
 #[derive(Debug, Clone)]
 pub struct BidirRlFmIndex {
     pub(crate) fwd: RlFmIndex,
@@ -47,20 +49,39 @@ impl BidirRlFmIndex {
             // Reverse half: the byte-reversal of the same concatenated text, as one
             // sequence (see `BidirFmIndex::build_cpu_with`). It never locates.
             let rev_seq = reverse_as_sequence(&prepared.text)?;
-            let fwd = RlFmIndex::from_prepared(prepared, A::fns(), config);
+            let fwd = RlFmIndex::from_prepared(prepared, A::fns(), config, true);
             let rev_config = RlFmIndexConfig {
                 sa_sample_rate: 0,
                 ..config.clone()
             };
-            let rev = RlFmIndex::from_prepared(prepare_cpu(&[rev_seq])?, A::fns(), &rev_config);
+            // All sequence accessors delegate to the forward half.
+            let rev =
+                RlFmIndex::from_prepared(prepare_cpu(&[rev_seq])?, A::fns(), &rev_config, false);
             Ok(Self { fwd, rev })
         })
+    }
+
+    /// Build with GPU acceleration: a [`BidirFmIndex`] is built on the GPU and converted
+    /// (see [`from_bidir_fm_index`](Self::from_bidir_fm_index)).
+    #[cfg(feature = "gpu")]
+    pub async fn build(
+        sequences: &[DnaSequence],
+        config: &RlFmIndexConfig,
+    ) -> Result<Self, FmIndexError> {
+        let fm = BidirFmIndex::build(sequences, &config.gpu_fm_config()).await?;
+        let mut rl = Self::from_bidir_fm_index(&fm);
+        if config.sa_sample_rate == 0 {
+            rl.fwd.sa_samples = None;
+        }
+        rl.fwd.ensure_lookup(config.lookup_depth);
+        rl.rev.ensure_lookup(config.lookup_depth);
+        Ok(rl)
     }
 
     /// Convert an existing [`BidirFmIndex`] without rebuilding its suffix arrays. The
     /// reverse half's SA samples are dropped.
     pub fn from_bidir_fm_index(bidir: &BidirFmIndex) -> Self {
-        let mut rev = RlFmIndex::from_fm_index(bidir.rev());
+        let mut rev = RlFmIndex::convert(bidir.rev(), false);
         rev.sa_samples = None;
         Self {
             fwd: RlFmIndex::from_fm_index(bidir.fwd()),
@@ -160,6 +181,101 @@ impl BidirRlFmIndex {
         self.fwd.locate_rows(iv.fwd_lo, iv.fwd_hi)
     }
 
+    /// Occurrences of `iv`'s pattern (its size).
+    pub fn count_interval(&self, iv: &BidirInterval) -> u32 {
+        iv.size()
+    }
+
+    /// LF step on a forward row range (any sub-range of an interval): see
+    /// [`FwdInterval::extend_left`].
+    pub fn extend_left_fwd(&self, iv: &FwdInterval, c: u8) -> Option<FwdInterval> {
+        iv.extend_left(c, &self.fwd)
+    }
+
+    /// Locate every row of a forward interval via the forward SA samples.
+    ///
+    /// # Panics
+    /// If the forward half is count-only.
+    pub fn locate_fwd(&self, iv: &FwdInterval) -> Vec<(SeqId, u32)> {
+        self.fwd.locate_rows(iv.lo, iv.hi)
+    }
+
+    /// Depth of the k-mer lookup tables (`RlFmIndexConfig::lookup_depth`), or 0 when the
+    /// halves carry none (or disagree).
+    pub fn lookup_depth(&self) -> u32 {
+        match (&self.fwd.lookup, &self.rev.lookup) {
+            (Some(f), Some(r)) if f.depth == r.depth => f.depth,
+            _ => 0,
+        }
+    }
+
+    /// The cursor of `kmer` straight from the lookup tables: see
+    /// [`BidirFmIndex::lookup_interval`].
+    pub fn lookup_interval(&self, kmer: &[u8]) -> Option<BidirInterval> {
+        let depth = self.lookup_depth();
+        if depth == 0 || kmer.len() != depth as usize {
+            return None;
+        }
+        let &(fwd_lo, fwd_hi) = self.fwd.lookup.as_ref()?.get(kmer)?.intervals.first()?;
+        if fwd_lo >= fwd_hi {
+            return None;
+        }
+        let reversed: Vec<u8> = kmer.iter().rev().copied().collect();
+        let &(rev_lo, rev_hi) = self
+            .rev
+            .lookup
+            .as_ref()?
+            .get(&reversed)?
+            .intervals
+            .first()?;
+        // Tables from one build always agree; mismatched ones (a corrupted file) give no
+        // cursor rather than one of inconsistent widths.
+        if fwd_hi - fwd_lo != rev_hi.saturating_sub(rev_lo) {
+            return None;
+        }
+        Some(BidirInterval {
+            fwd_lo,
+            fwd_hi,
+            rev_lo,
+            rev_hi,
+            len: depth,
+        })
+    }
+
+    /// SMEMs of `query`: see [`BidirFmIndex::find_smems`]. Identical results, run on
+    /// run-length rank.
+    ///
+    /// # Panics
+    /// With `locate = true` on a count-only index.
+    pub fn find_smems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
+        self.smems(query, min_len, locate)
+    }
+
+    /// MEMs of `query`: see [`BidirFmIndex::find_mems`]. Identical results, run on
+    /// run-length rank.
+    ///
+    /// # Panics
+    /// With `locate = true` on a count-only index.
+    pub fn find_mems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
+        self.mems(query, min_len, locate)
+    }
+
+    /// Bases of sequence `id`, extracted from the forward BWT: see
+    /// [`RlFmIndex::sequence`].
+    pub fn sequence(&self, id: SeqId) -> Option<Vec<u8>> {
+        self.fwd.sequence(id)
+    }
+
+    /// Bases of the sequence carrying `header`.
+    pub fn sequence_by_header(&self, header: &str) -> Option<Vec<u8>> {
+        self.fwd.sequence_by_header(header)
+    }
+
+    /// Exclusive end of each reference (its sentinel included) in the concatenated text.
+    pub fn seq_boundaries(&self) -> &[u32] {
+        self.fwd.seq_boundaries()
+    }
+
     /// Total text length (sentinels included).
     pub fn text_len(&self) -> u32 {
         self.fwd.text_len
@@ -188,6 +304,36 @@ impl BidirRlFmIndex {
     /// Heap bytes of both halves.
     pub fn heap_size_bytes(&self) -> usize {
         self.fwd.heap_size_bytes() + self.rev.heap_size_bytes()
+    }
+}
+
+impl BidirSearch for BidirRlFmIndex {
+    type Half = RlFmIndex;
+
+    fn fwd_half(&self) -> &RlFmIndex {
+        &self.fwd
+    }
+
+    fn rev_half(&self) -> &RlFmIndex {
+        &self.rev
+    }
+
+    fn search_full_interval(&self) -> BidirInterval {
+        self.full_interval()
+    }
+
+    fn search_locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
+        self.fwd.locate_rows(lo, hi)
+    }
+
+    fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
+        rows.iter()
+            .map(|&row| {
+                self.fwd
+                    .map_position(self.fwd.resolve_row(row))
+                    .expect("resolved SA position must be within text bounds")
+            })
+            .collect()
     }
 }
 

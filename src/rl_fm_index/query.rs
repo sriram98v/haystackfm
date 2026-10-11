@@ -2,6 +2,7 @@
 //! [`BwtRank`], then LF-walks to the nearest SA sample.
 
 use super::RlFmIndex;
+use crate::fm_index::lookup::seed_backward_search;
 use crate::fm_index::query::merge_intervals_inplace;
 use crate::fm_index::seq_id::{map_text_position, SeqId};
 use crate::occ::BwtRank;
@@ -40,6 +41,12 @@ impl RlFmIndex {
             .collect()
     }
 
+    /// Batched [`locate_positions`](Self::locate_positions): one result per pattern, in
+    /// input order, as [`FmIndex::locate_positions_many`](crate::FmIndex::locate_positions_many).
+    pub fn locate_positions_many(&self, patterns: &[&[u8]]) -> Vec<Vec<u32>> {
+        patterns.iter().map(|p| self.locate_positions(p)).collect()
+    }
+
     /// Locate the suffix-array rows `lo..hi`: `(sequence id, offset)` per row, in row order.
     pub fn locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
         (lo..hi)
@@ -57,13 +64,17 @@ impl RlFmIndex {
 
     /// SA intervals of every text substring matching `pattern`, disjoint and sorted.
     pub(crate) fn backward_search(&self, pattern: &[u8]) -> Vec<(u32, u32)> {
-        let mut intervals = vec![(0u32, self.text_len)];
         if pattern.is_empty() {
-            return intervals;
+            return vec![(0u32, self.text_len)];
         }
+        let (mut intervals, rest) = match seed_backward_search(self.lookup.as_ref(), pattern) {
+            Some((seed, _)) if seed.is_empty() => return vec![],
+            Some(seeded) => seeded,
+            None => (vec![(0u32, self.text_len)], pattern.len()),
+        };
         let mut next: Vec<(u32, u32)> = Vec::with_capacity(16);
         let present = self.bwt.present_symbols();
-        for &q in pattern.iter().rev() {
+        for &q in pattern[..rest].iter().rev() {
             let compat = self.alphabet_fns.compatible(q) & present;
             next.clear();
             for &(lo, hi) in &intervals {

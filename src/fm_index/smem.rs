@@ -1,7 +1,9 @@
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::BidirFmIndex;
+use crate::fm_index::half::FmHalf;
 use crate::fm_index::seq_id::SeqId;
 use crate::fm_index::FmIndex;
+use crate::occ::BwtRank;
 
 /// A Maximal Exact Match (MEM) between a query and the indexed reference.
 ///
@@ -79,7 +81,71 @@ impl BidirFmIndex {
     /// SMEMs in order of increasing `query_start`.  Duplicate `(start, end)` pairs
     /// are deduplicated.
     pub fn find_smems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
+        self.smems(query, min_len, locate)
+    }
+
+    /// Find all MEMs of length ≥ `min_len`, in the MUMmer / BWA sense.
+    ///
+    /// A query interval `[s,e)` is reported when **at least one** of its occurrences is
+    /// maximal in both directions *at that occurrence* — that is, some occurrence is
+    /// preceded by a symbol incompatible with `query[s-1]` (or sits at a reference start,
+    /// or `s == 0`) and followed by a symbol incompatible with `query[e]` (or sits at a
+    /// reference end, or `e == query.len()`).
+    ///
+    /// This is deliberately weaker than requiring *every* occurrence to be maximal. Under
+    /// the stronger reading a single extendable occurrence in any one reference deletes the
+    /// interval, which collapses the result set onto [`find_smems`](Self::find_smems) and
+    /// makes per-reference match recovery systematically sparse in a database of
+    /// near-identical references.
+    ///
+    /// The SMEMs are exactly the containment-maximal MEMs, so this result is a strict
+    /// superset of [`find_smems`](Self::find_smems).
+    ///
+    /// `match_count` and `positions` cover **only the maximal occurrences**, not every
+    /// occurrence of the matched substring.
+    ///
+    /// Complexity: O(|query|² × α) for the extension sweep, plus O(α × |ivs|) at each
+    /// occurrence-count drop; O(|query|² × α²) worst case. The result can hold up to
+    /// O(|query|²) intervals — `min_len` is the only bound on output size.
+    pub fn find_mems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
+        self.mems(query, min_len, locate)
+    }
+}
+
+/// The SMEM/MEM sweep over any bidirectional index whose halves implement [`FmHalf`]:
+/// [`BidirFmIndex`] (occ-table rank) and
+/// [`BidirRlFmIndex`](crate::rl_fm_index::BidirRlFmIndex) (run-length rank). Needs only
+/// cursor extension, the forward half's BWT symbols, and forward-row locate — never the
+/// text — so the run-length index, which keeps none, gets the same results.
+pub(crate) trait BidirSearch {
+    type Half: FmHalf;
+
+    /// Forward half (index of `T`); cursor `fwd_*` rows refer to its SA.
+    fn fwd_half(&self) -> &Self::Half;
+
+    /// Reverse half (index of reversed `T`).
+    fn rev_half(&self) -> &Self::Half;
+
+    /// Cursor spanning every row.
+    fn search_full_interval(&self) -> BidirInterval;
+
+    /// `(sequence id, offset)` of forward SA rows `lo..hi`, in row order.
+    fn search_locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)>;
+
+    /// `(sequence id, offset)` of each listed forward SA row, in order.
+    fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)>;
+
+    /// SMEMs of `query`; see [`BidirFmIndex::find_smems`].
+    fn smems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
         self.smem_raws(query, min_len)
+            .into_iter()
+            .map(|raw| self.locate_raw(raw, locate))
+            .collect()
+    }
+
+    /// MEMs of `query`; see [`BidirFmIndex::find_mems`].
+    fn mems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
+        self.mem_raws(query, min_len)
             .into_iter()
             .map(|raw| self.locate_raw(raw, locate))
             .collect()
@@ -121,36 +187,6 @@ impl BidirFmIndex {
         smems
     }
 
-    /// Find all MEMs of length ≥ `min_len`, in the MUMmer / BWA sense.
-    ///
-    /// A query interval `[s,e)` is reported when **at least one** of its occurrences is
-    /// maximal in both directions *at that occurrence* — that is, some occurrence is
-    /// preceded by a symbol incompatible with `query[s-1]` (or sits at a reference start,
-    /// or `s == 0`) and followed by a symbol incompatible with `query[e]` (or sits at a
-    /// reference end, or `e == query.len()`).
-    ///
-    /// This is deliberately weaker than requiring *every* occurrence to be maximal. Under
-    /// the stronger reading a single extendable occurrence in any one reference deletes the
-    /// interval, which collapses the result set onto [`find_smems`](Self::find_smems) and
-    /// makes per-reference match recovery systematically sparse in a database of
-    /// near-identical references.
-    ///
-    /// The SMEMs are exactly the containment-maximal MEMs, so this result is a strict
-    /// superset of [`find_smems`](Self::find_smems).
-    ///
-    /// `match_count` and `positions` cover **only the maximal occurrences**, not every
-    /// occurrence of the matched substring.
-    ///
-    /// Complexity: O(|query|² × α) for the extension sweep, plus O(α × |ivs|) at each
-    /// occurrence-count drop; O(|query|² × α²) worst case. The result can hold up to
-    /// O(|query|²) intervals — `min_len` is the only bound on output size.
-    pub fn find_mems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
-        self.mem_raws(query, min_len)
-            .into_iter()
-            .map(|raw| self.locate_raw(raw, locate))
-            .collect()
-    }
-
     /// The MEMs of `query` as unresolved [`RawMem`]s.
     fn mem_raws(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
         if query.is_empty() || min_len == 0 {
@@ -184,7 +220,8 @@ impl BidirFmIndex {
 
         for i in 0..n {
             // All occurrences of a symbol compatible with `query[i]`.
-            let mut curr = extend_multi_right(&[self.full_interval()], query[i], &self.rev);
+            let mut curr =
+                extend_multi_right(&[self.search_full_interval()], query[i], self.rev_half());
             if curr.is_empty() {
                 continue;
             }
@@ -195,7 +232,7 @@ impl BidirFmIndex {
                     self.push_mem_candidate(&mut out, query, i, n, curr, min_len);
                     break;
                 }
-                let next = extend_multi_right(&curr, query[j], &self.rev);
+                let next = extend_multi_right(&curr, query[j], self.rev_half());
                 if coverage(&next) != coverage(&curr) {
                     let dropped = self.drop_set(&curr, query[j]);
                     self.push_mem_candidate(&mut out, query, i, j, dropped, min_len);
@@ -218,9 +255,9 @@ impl BidirFmIndex {
     /// sitting at the end of a reference are captured here rather than silently lost.
     fn drop_set(&self, ivs: &[BidirInterval], c: u8) -> Vec<BidirInterval> {
         let mut out = Vec::new();
-        for sym in self.rev.alphabet_fns.compatible(c).complement().iter() {
+        for sym in self.rev_half().alphabet().compatible(c).complement().iter() {
             for iv in ivs {
-                if let Some(ext) = iv.extend_right(sym, &self.rev) {
+                if let Some(ext) = iv.extend_right(sym, self.rev_half()) {
                     out.push(ext);
                 }
             }
@@ -254,7 +291,7 @@ impl BidirFmIndex {
         };
         let match_count = match left_ctx {
             None => coverage(&ivs),
-            Some(c) => coverage(&ivs) - coverage(&extend_multi_left(&ivs, c, &self.fwd)),
+            Some(c) => coverage(&ivs) - coverage(&extend_multi_left(&ivs, c, self.fwd_half())),
         };
         if match_count == 0 {
             return;
@@ -288,7 +325,11 @@ impl BidirFmIndex {
         while pivot < n {
             // Forward extension from `pivot`, collecting right-maximal prefixes as
             // (interval set for query[pivot..end), end).
-            let mut curr = extend_multi_right(&[self.full_interval()], query[pivot], &self.rev);
+            let mut curr = extend_multi_right(
+                &[self.search_full_interval()],
+                query[pivot],
+                self.rev_half(),
+            );
             if curr.is_empty() {
                 pivot += 1; // query[pivot] absent from the text
                 continue;
@@ -301,7 +342,7 @@ impl BidirFmIndex {
                     prefixes.push((curr, n));
                     break;
                 }
-                let next = extend_multi_right(&curr, query[j], &self.rev);
+                let next = extend_multi_right(&curr, query[j], self.rev_half());
                 let ncov = coverage(&next);
                 if ncov != cov {
                     // Some occurrences of query[pivot..j) do not extend right by query[j];
@@ -331,7 +372,7 @@ impl BidirFmIndex {
                 // Verify right-maximality (left-maximality is guaranteed by the backward stop):
                 // the whole set must fail to extend right by query[end].
                 let right_maximal =
-                    end == n || extend_multi_right(&bivs, query[end], &self.rev).is_empty();
+                    end == n || extend_multi_right(&bivs, query[end], self.rev_half()).is_empty();
                 if !right_maximal {
                     continue;
                 }
@@ -364,7 +405,7 @@ impl BidirFmIndex {
     ) -> (Vec<BidirInterval>, usize) {
         let mut start = from;
         while start > 0 {
-            let next = extend_multi_left(&ivs, query[start - 1], &self.fwd);
+            let next = extend_multi_left(&ivs, query[start - 1], self.fwd_half());
             if next.is_empty() {
                 break;
             }
@@ -374,20 +415,31 @@ impl BidirFmIndex {
         (ivs, start)
     }
 
-    /// Resolve a [`RawMem`] into a public [`Mem`], locating reference positions only when
-    /// `locate` is set.
+    /// Resolve a [`RawMem`] into a [`Mem`], locating its occurrences when `locate` is set.
     ///
     /// When `left_ctx` is set, occurrences that are left-extendable are dropped here so that
     /// `positions` holds exactly the maximal occurrences already counted by `match_count`.
+    /// The symbol preceding the occurrence at forward row `r` is `BWT[r]`, so the test runs
+    /// on the BWT before locating and needs no text. An occurrence at a reference start has
+    /// a sentinel there, which no query symbol is compatible with: it is always kept.
     fn locate_raw(&self, raw: RawMem, locate: bool) -> Mem {
-        let positions = if locate {
+        let positions = if !locate {
+            Vec::new()
+        } else if let Some(c) = raw.left_ctx {
+            let fwd = self.fwd_half();
+            let compat = fwd.alphabet().compatible(c);
+            let rows: Vec<u32> = raw
+                .ivs
+                .iter()
+                .flat_map(|iv| iv.fwd_lo..iv.fwd_hi)
+                .filter(|&row| !compat.contains(fwd.bwt_rank().symbol_at(row)))
+                .collect();
+            self.search_locate_row_list(&rows)
+        } else {
             raw.ivs
                 .iter()
-                .flat_map(|iv| self.locate_interval(iv))
-                .filter(|&(id, off)| self.is_left_maximal_at(id, off, raw.left_ctx))
+                .flat_map(|iv| self.search_locate_rows(iv.fwd_lo, iv.fwd_hi))
                 .collect()
-        } else {
-            Vec::new()
         };
         Mem {
             query_start: raw.query_start,
@@ -396,27 +448,38 @@ impl BidirFmIndex {
             positions,
         }
     }
+}
 
-    /// Whether the occurrence starting at `off` in reference `id` is left-maximal.
-    ///
-    /// `left_ctx` is `None` for matches anchored at the query start and for candidates whose
-    /// intervals were already extended left as far as they go, both of which are maximal by
-    /// construction. Reads the retained forward text, which a `BidirFmIndex` always keeps
-    /// (only the reverse half calls `forget_text`); if it is unavailable the occurrence is
-    /// kept rather than guessed away.
-    fn is_left_maximal_at(&self, id: SeqId, off: u32, left_ctx: Option<u8>) -> bool {
-        let Some(c) = left_ctx else { return true };
-        if off == 0 {
-            return true;
-        }
-        match self.sequence(id) {
-            Some(seq) => !self
-                .fwd
-                .alphabet_fns
-                .compatible(c)
-                .contains(seq[off as usize - 1]),
-            None => true,
-        }
+impl BidirSearch for BidirFmIndex {
+    type Half = FmIndex;
+
+    fn fwd_half(&self) -> &FmIndex {
+        &self.fwd
+    }
+
+    fn rev_half(&self) -> &FmIndex {
+        &self.rev
+    }
+
+    fn search_full_interval(&self) -> BidirInterval {
+        self.full_interval()
+    }
+
+    fn search_locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
+        self.fwd.locate_rows(lo, hi)
+    }
+
+    fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
+        let mut text_positions = Vec::with_capacity(rows.len());
+        self.fwd.resolve_sa_batch(rows, &mut text_positions);
+        text_positions
+            .into_iter()
+            .map(|pos| {
+                self.fwd
+                    .map_position(pos)
+                    .expect("resolved SA position must be within text bounds")
+            })
+            .collect()
     }
 }
 
@@ -427,7 +490,7 @@ impl BidirFmIndex {
 /// intervals describe matches one symbol longer than `[query_start, query_end)` — they carry
 /// the trailing symbol that failed to extend — except when `query_end` is the query length.
 /// Occurrence *start* positions are unaffected, so locating needs no offset adjustment.
-struct RawMem {
+pub(crate) struct RawMem {
     query_start: usize,
     query_end: usize,
     match_count: u32,
@@ -443,9 +506,9 @@ fn coverage(ivs: &[BidirInterval]) -> u32 {
 }
 
 /// Extend each interval in `ivs` right by `c`, using the index's alphabet compatibility.
-fn extend_multi_right(ivs: &[BidirInterval], c: u8, rev: &FmIndex) -> Vec<BidirInterval> {
+fn extend_multi_right<H: FmHalf>(ivs: &[BidirInterval], c: u8, rev: &H) -> Vec<BidirInterval> {
     let mut result = Vec::new();
-    for base in rev.alphabet_fns.compatible(c).iter() {
+    for base in rev.alphabet().compatible(c).iter() {
         for iv in ivs {
             if let Some(ext) = iv.extend_right(base, rev) {
                 result.push(ext);
@@ -456,9 +519,9 @@ fn extend_multi_right(ivs: &[BidirInterval], c: u8, rev: &FmIndex) -> Vec<BidirI
 }
 
 /// Extend each interval in `ivs` left by `c`, using the index's alphabet compatibility.
-fn extend_multi_left(ivs: &[BidirInterval], c: u8, fwd: &FmIndex) -> Vec<BidirInterval> {
+fn extend_multi_left<H: FmHalf>(ivs: &[BidirInterval], c: u8, fwd: &H) -> Vec<BidirInterval> {
     let mut result = Vec::new();
-    for base in fwd.alphabet_fns.compatible(c).iter() {
+    for base in fwd.alphabet().compatible(c).iter() {
         for iv in ivs {
             if let Some(ext) = iv.extend_left(base, fwd) {
                 result.push(ext);
