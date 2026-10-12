@@ -15,6 +15,9 @@ fn corpus() -> Vec<Vec<u8>> {
         vec![A; 300],
         (0..257).map(|i| if i % 2 == 0 { A } else { C }).collect(),
         (0..200).map(|i| (i % 16) as u8).collect(),
+        // Exactly 6 and 7 present symbols: the last one-line layout and the first two-line.
+        (0..700).map(|i| ((i / 3) % 6) as u8).collect(),
+        (0..700).map(|i| ((i / 3) % 7) as u8).collect(),
         vec![T, T, SENTINEL, A, A, A, N, N, G, C, C, C, C],
     ];
     // Uniform over the full IUPAC alphabet (r ≈ n).

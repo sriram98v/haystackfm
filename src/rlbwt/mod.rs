@@ -7,8 +7,9 @@
 //!
 //! - **run blocks**: the runs in groups of [`RUNS_PER_BLOCK`], one 64-byte-aligned block
 //!   each (two when more than [`INLINE_LANES`] symbols occur) holding the group's run start
-//!   rows, its run-head symbols (nibbles) and, per symbol present in the BWT, its rank at
-//!   the group's first row;
+//!   rows plus the next group's first (so every run's end is on its own line), its run-head
+//!   symbols (nibbles) and, per symbol present in the BWT, its rank at the group's first
+//!   row;
 //! - **bucket directory**: for every `2^bucket_shift` rows, the run holding the bucket's
 //!   first row, narrowing the predecessor search to a few runs.
 //!
@@ -40,12 +41,16 @@ const RUNS_PER_BUCKET: u64 = 4;
 /// Runs per block. A block's starts and heads fill words `0..=8`.
 pub(crate) const RUNS_PER_BLOCK: usize = 8;
 
-/// Present symbols whose rank samples fit in a single 64-byte block (words `9..16`). With
+/// Present symbols whose rank samples fit in a single 64-byte block (words `10..16`). With
 /// more, every block takes two lines.
-const INLINE_LANES: usize = 7;
+const INLINE_LANES: usize = 6;
+
+/// Word of a block's head nibbles. Words `0..=8` are the starts of its eight runs and of
+/// the next block's first run, so a run's end never needs another line.
+const HEAD_WORD: usize = RUNS_PER_BLOCK + 1;
 
 /// Word of the first rank sample in a block.
-const SAMPLE_WORD: usize = RUNS_PER_BLOCK + 1;
+const SAMPLE_WORD: usize = RUNS_PER_BLOCK + 2;
 
 /// Runs [`BwtRank::extend_ranks`] walks before switching to two independent ranks.
 const MAX_SCAN_RUNS: usize = 8;
@@ -197,7 +202,9 @@ impl RlBwt {
                 blocks[base].0[t] = start;
                 nibbles |= (head as u32) << (4 * t);
             }
-            blocks[base].0[RUNS_PER_BLOCK] = nibbles;
+            let next = (b + 1) * RUNS_PER_BLOCK;
+            blocks[base].0[RUNS_PER_BLOCK] = starts.get(next).copied().unwrap_or(len);
+            blocks[base].0[HEAD_WORD] = nibbles;
         }
 
         let mut rl = Self {
@@ -367,10 +374,16 @@ impl RlBwt {
         self.blocks[(k / RUNS_PER_BLOCK) * self.lines_per_block].0[k % RUNS_PER_BLOCK]
     }
 
+    /// End row of run `k` (`start(k + 1)`), read from run `k`'s own block.
+    #[inline(always)]
+    fn end(&self, k: usize) -> u32 {
+        self.blocks[(k / RUNS_PER_BLOCK) * self.lines_per_block].0[k % RUNS_PER_BLOCK + 1]
+    }
+
     /// Head symbol of run `k`.
     #[inline(always)]
     fn head(&self, k: usize) -> u8 {
-        let nibbles = self.blocks[(k / RUNS_PER_BLOCK) * self.lines_per_block].0[RUNS_PER_BLOCK];
+        let nibbles = self.blocks[(k / RUNS_PER_BLOCK) * self.lines_per_block].0[HEAD_WORD];
         ((nibbles >> (4 * (k % RUNS_PER_BLOCK))) & 15) as u8
     }
 
@@ -410,7 +423,7 @@ impl RlBwt {
         let mut k = self.run_of(lo);
         while self.start(k) < hi {
             if !set.contains(self.head(k)) {
-                out.extend(self.start(k).max(lo)..self.start(k + 1).min(hi));
+                out.extend(self.start(k).max(lo)..self.end(k).min(hi));
             }
             k += 1;
         }
@@ -424,8 +437,17 @@ impl RlBwt {
         }
         let b = (i >> self.bucket_shift) as usize;
         let mut base = self.buckets[b] as usize;
-        // The run holding `i` is the last of `[base, base + n]` starting at or before `i`.
-        let mut n = self.buckets[b + 1] as usize - base;
+        let top = self.buckets[b + 1] as usize;
+        // The run holding `i` is the last of `[base, top]` starting at or before `i`. Keep
+        // the search on `base`'s block when `i` ends there (its end is stored in-line);
+        // otherwise the answer starts at or after the next block.
+        let block_first = base / RUNS_PER_BLOCK * RUNS_PER_BLOCK;
+        let mut n = if i < self.end(block_first + RUNS_PER_BLOCK - 1) {
+            top.min(block_first + RUNS_PER_BLOCK - 1) - base
+        } else {
+            base = block_first + RUNS_PER_BLOCK;
+            top - base
+        };
         while n > 0 {
             let half = n / 2;
             let mid = base + half + 1;
@@ -446,7 +468,7 @@ impl RlBwt {
         let b = k / RUNS_PER_BLOCK;
         let t = k % RUNS_PER_BLOCK;
         let line = &self.blocks[b * self.lines_per_block].0;
-        let nibbles = line[RUNS_PER_BLOCK];
+        let nibbles = line[HEAD_WORD];
         let mut rank = self.sample(b, lane);
         for u in 0..t {
             if (nibbles >> (4 * u)) & 15 == c as u32 {
@@ -465,7 +487,7 @@ impl RlBwt {
         let b = k / RUNS_PER_BLOCK;
         let t = k % RUNS_PER_BLOCK;
         let line = &self.blocks[b * self.lines_per_block].0;
-        let nibbles = line[RUNS_PER_BLOCK];
+        let nibbles = line[HEAD_WORD];
         let mut rank: u32 = set
             .iter()
             .map(|c| self.sample(b, self.lane_of[c as usize]))
@@ -486,7 +508,7 @@ impl RlBwt {
         let b = k / RUNS_PER_BLOCK;
         let t = k % RUNS_PER_BLOCK;
         let line = &self.blocks[b * self.lines_per_block].0;
-        let nibbles = line[RUNS_PER_BLOCK];
+        let nibbles = line[HEAD_WORD];
         let mut out = [0u32; ALPHABET_SIZE];
         for c in self.present.iter() {
             out[c as usize] = self.sample(b, self.lane_of[c as usize]);
@@ -586,7 +608,7 @@ impl BwtRank for RlBwt {
             }
             let head = self.head(k);
             if head <= c {
-                let overlap = self.start(k + 1).min(hi) - self.start(k).max(lo);
+                let overlap = self.end(k).min(hi) - self.start(k).max(lo);
                 if head == c {
                     count += overlap;
                 } else {
@@ -624,7 +646,7 @@ impl BwtRank for RlBwt {
             if k - k_lo == MAX_SCAN_RUNS {
                 return (at_lo, self.rank_all_at(hi, self.run_of(hi)));
             }
-            at_hi[self.head(k) as usize] += self.start(k + 1).min(hi) - self.start(k).max(lo);
+            at_hi[self.head(k) as usize] += self.end(k).min(hi) - self.start(k).max(lo);
             k += 1;
         }
         (at_lo, at_hi)
