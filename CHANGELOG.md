@@ -8,6 +8,12 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-10-12
+
+### Changed
+- Run-length blocks store the next block's first run start in-line, so run searches and
+  scans stay on one cache line; rank samples hold up to six symbols in one line.
+
 ## [0.6.5] - 2026-10-12
 
 ### Fixed
