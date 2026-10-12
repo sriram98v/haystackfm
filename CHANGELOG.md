@@ -8,6 +8,27 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-12
+
+### Added
+- `BidirRlFmIndex::find_smems` / `find_mems`: SMEM and MEM finding on the run-length index,
+  identical to `BidirFmIndex`'s. The sweep is shared through a crate-private trait over both
+  index types; per-occurrence left-maximality now reads the forward BWT instead of the
+  retained text.
+- `RlFmIndex::sequence` / `sequence_by_header`: extraction by LF-walk from one stored
+  sentinel row per sequence (the text is not retained).
+- k-mer lookup table on `RlFmIndex` (`RlFmIndexConfig::lookup_depth`) seeding backward
+  search; `BidirRlFmIndex::lookup_interval` / `lookup_depth`.
+- `RlFmIndex::locate_positions_many`; `BidirRlFmIndex::extend_left_fwd`, `locate_fwd`,
+  `count_interval`; `FwdInterval::extend_left` generic over `FmHalf`.
+- GPU `RlFmIndex::build` / `BidirRlFmIndex::build` (feature `gpu`): an uncompressed GPU
+  build, then converted.
+- `examples/size_compare.rs`: uncompressed vs run-length size, SMEM/MEM and extraction
+  parity and timings on a FASTA.
+
+### Changed
+- `"HRL\x01"` / `"HRB\x01"` files also carry the sequence end rows and the lookup table.
+
 ## [0.6.1] - 2026-10-12
 
 ### Added
