@@ -8,6 +8,15 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-12
+
+### Changed
+- Run-length `rank_all_pair` reads a narrow range's ranks off one predecessor search, so
+  `BidirInterval::children_*` cost one rank pass; the run-length sweeps take each step's
+  compatible extension and drop set from it.
+- The run-length MEM sweep computes each drop's left-maximal occurrence count from
+  coverages instead of left-extending, and builds a drop set only for accepted candidates.
+
 ## [0.6.3] - 2026-10-12
 
 ### Changed
