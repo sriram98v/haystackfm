@@ -9,7 +9,7 @@ use crate::fm_index::bidir_index::{reverse_as_sequence, BidirFmIndex};
 use crate::fm_index::fwd_interval::FwdInterval;
 use crate::fm_index::prepare::{in_build_pool, prepare_cpu};
 use crate::fm_index::seq_id::SeqId;
-use crate::fm_index::smem::{BidirSearch, Mem, RawMem};
+use crate::fm_index::smem::{BidirSearch, Mem, RawMem, ShallowCache};
 
 /// Bidirectional run-length FM-index: [`RlFmIndex`] halves over the text `T` (`fwd`) and
 /// its reversal `T^R` (`rev`), the run-length counterpart of [`BidirFmIndex`].
@@ -25,6 +25,8 @@ use crate::fm_index::smem::{BidirSearch, Mem, RawMem};
 pub struct BidirRlFmIndex {
     pub(crate) fwd: RlFmIndex,
     pub(crate) rev: RlFmIndex,
+    /// Shallow k-mer interval sets seeding the SMEM/MEM sweeps. Derived from the halves.
+    pub(crate) shallow: ShallowCache,
 }
 
 impl BidirRlFmIndex {
@@ -57,7 +59,7 @@ impl BidirRlFmIndex {
             // All sequence accessors delegate to the forward half.
             let rev =
                 RlFmIndex::from_prepared(prepare_cpu(&[rev_seq])?, A::fns(), &rev_config, false);
-            Ok(Self { fwd, rev })
+            Ok(Self::from_halves(fwd, rev))
         })
     }
 
@@ -83,10 +85,13 @@ impl BidirRlFmIndex {
     pub fn from_bidir_fm_index(bidir: &BidirFmIndex) -> Self {
         let mut rev = RlFmIndex::convert(bidir.rev(), false);
         rev.sa_samples = None;
-        Self {
-            fwd: RlFmIndex::from_fm_index(bidir.fwd()),
-            rev,
-        }
+        Self::from_halves(RlFmIndex::from_fm_index(bidir.fwd()), rev)
+    }
+
+    /// Pair two halves and derive the sweep cache.
+    pub(crate) fn from_halves(fwd: RlFmIndex, rev: RlFmIndex) -> Self {
+        let shallow = ShallowCache::build(BidirInterval::full(fwd.text_len), &rev, fwd.text_len);
+        Self { fwd, rev, shallow }
     }
 
     /// The forward half (index of `T`); `BidirInterval::fwd_*` rows refer to its SA.
@@ -303,7 +308,7 @@ impl BidirRlFmIndex {
 
     /// Heap bytes of both halves.
     pub fn heap_size_bytes(&self) -> usize {
-        self.fwd.heap_size_bytes() + self.rev.heap_size_bytes()
+        self.fwd.heap_size_bytes() + self.rev.heap_size_bytes() + self.shallow.heap_size_bytes()
     }
 }
 
@@ -324,6 +329,10 @@ impl BidirSearch for BidirRlFmIndex {
 
     fn search_locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
         self.fwd.locate_rows(lo, hi)
+    }
+
+    fn shallow(&self, kmer: &[u8]) -> Option<&[BidirInterval]> {
+        self.shallow.get(kmer)
     }
 
     fn locate_all(&self, raws: Vec<RawMem>, locate: bool) -> Vec<Mem> {

@@ -136,6 +136,33 @@ pub(crate) trait BidirSearch {
     /// `(sequence id, offset)` of each listed forward SA row, in order.
     fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)>;
 
+    /// The interval set of `kmer` exactly as the sweeps' right extension from the full
+    /// interval builds it (same intervals, same order), when the backend caches it.
+    fn shallow(&self, _kmer: &[u8]) -> Option<&[BidirInterval]> {
+        None
+    }
+
+    /// Into `out`: the interval set of `query[start..=j]`, given `curr`, that of
+    /// `query[start..j]`. Returns whether `fanout` now holds `curr`'s children; it does not
+    /// when the set came from [`shallow`](Self::shallow).
+    fn right_step(
+        &self,
+        query: &[u8],
+        (start, j): (usize, usize),
+        curr: &[BidirInterval],
+        fanout: &mut Fanout,
+        out: &mut Vec<BidirInterval>,
+    ) -> bool {
+        if let Some(set) = self.shallow(&query[start..=j]) {
+            out.clear();
+            out.extend_from_slice(set);
+            return false;
+        }
+        fanout.right(curr, self.rev_half());
+        fanout.emit(self.rev_half().alphabet().compatible(query[j]), out);
+        true
+    }
+
     /// Forward rows of `ivs` whose preceding symbol (`BWT_fwd[row]`) is not in `compat`, in
     /// order: the left-maximal occurrences of a match whose left context `compat` matches.
     fn left_maximal_rows(&self, ivs: &[BidirInterval], compat: SymbolSet) -> Vec<u32> {
@@ -332,8 +359,8 @@ pub(crate) trait BidirSearch {
         let mut next: Vec<BidirInterval> = Vec::new();
 
         for i in 0..n {
-            fanout.right(&[self.search_full_interval()], rev);
-            fanout.emit(rev.alphabet().compatible(query[i]), &mut curr);
+            let full = [self.search_full_interval()];
+            self.right_step(query, (i, i), &full, &mut fanout, &mut curr);
             if curr.is_empty() {
                 continue;
             }
@@ -360,13 +387,15 @@ pub(crate) trait BidirSearch {
                     break;
                 }
                 let compat = rev.alphabet().compatible(query[j]);
-                fanout.right(&curr, rev);
-                fanout.emit(compat, &mut next);
+                let has_children = self.right_step(query, (i, j), &curr, &mut fanout, &mut next);
                 let next_cov = coverage(&next);
                 if next_cov != cov && j - i >= min_len {
                     let left_extendable = if i == 0 { 0 } else { prev - seen[j + 1] };
                     let match_count = (cov - next_cov) - left_extendable;
                     if match_count > 0 {
+                        if !has_children {
+                            fanout.right(&curr, rev);
+                        }
                         let mut dropped = Vec::new();
                         fanout.emit(compat.complement(), &mut dropped);
                         out.push(RawMem {
@@ -562,11 +591,9 @@ pub(crate) trait BidirSearch {
         let mut pivot = 0;
 
         while pivot < n {
-            let mut curr = extend_multi_right(
-                &[self.search_full_interval()],
-                query[pivot],
-                self.rev_half(),
-            );
+            let mut curr = Vec::new();
+            let full = [self.search_full_interval()];
+            self.right_step(query, (pivot, pivot), &full, &mut fanout, &mut curr);
             if curr.is_empty() {
                 pivot += 1;
                 continue;
@@ -581,8 +608,7 @@ pub(crate) trait BidirSearch {
                     ends.push(n);
                     break;
                 }
-                fanout.right(&curr, self.rev_half());
-                fanout.emit(self.rev_half().alphabet().compatible(query[j]), &mut buf);
+                self.right_step(query, (pivot, j), &curr, &mut fanout, &mut buf);
                 let ncov = coverage(&buf);
                 if ncov != cov {
                     sets.push(std::mem::replace(&mut curr, std::mem::take(&mut buf)));
@@ -803,6 +829,93 @@ fn extend_multi_right<H: FmHalf>(ivs: &[BidirInterval], c: u8, rev: &H) -> Vec<B
     }
     result
 }
+
+/// Deepest k-mer a [`ShallowCache`] holds.
+const SHALLOW_MAX_DEPTH: u32 = 8;
+
+/// The interval set of every `{A,C,G,T}` k-mer up to a small depth, exactly as the sweeps'
+/// right extension from the full interval produces it (built by that same extension, so
+/// identical intervals in identical order, wildcard-compatible variants included). Every
+/// SMEM pivot and MEM start begins with these shallow steps, whose intervals are the widest
+/// and costliest to extend.
+///
+/// Size is fixed by the depth (`Σ 4^d` sets, a few MB at depth 8), not by the text; the
+/// depth shrinks for small texts. Derived, never serialized.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ShallowCache {
+    depth: usize,
+    /// First set index of each depth (`level_base[d]`, `d` in `1..=depth`).
+    level_base: Vec<usize>,
+    /// Set `x` is `ivs[offs[x]..offs[x + 1]]`.
+    offs: Vec<u32>,
+    ivs: Vec<BidirInterval>,
+}
+
+impl ShallowCache {
+    /// Build for a text of `text_len` symbols over the half `rev` (right extension).
+    pub(crate) fn build<H: FmHalf>(full: BidirInterval, rev: &H, text_len: u32) -> Self {
+        // About `log4(n)` levels: deeper ones would hold mostly singletons and misses.
+        let depth = (text_len.max(1).ilog2() / 2).min(SHALLOW_MAX_DEPTH) as usize;
+        let mut cache = Self {
+            depth,
+            level_base: vec![0; depth + 1],
+            offs: vec![0],
+            ivs: Vec::new(),
+        };
+        let mut fanout = Fanout::default();
+        let mut parents: Vec<Vec<BidirInterval>> = vec![vec![full]];
+        let mut child = Vec::new();
+        for d in 1..=depth {
+            cache.level_base[d] = cache.offs.len() - 1;
+            let mut children = Vec::with_capacity(parents.len() * 4);
+            // Set index within a level: the k-mer in base 4 (A = 0 .. T = 3), last symbol
+            // least significant, so parent `p`'s children are `4p .. 4p + 4`.
+            for parent in &parents {
+                fanout.right(parent, rev);
+                for c in CORE_CODES {
+                    fanout.emit(rev.alphabet().compatible(c), &mut child);
+                    cache.ivs.extend_from_slice(&child);
+                    cache.offs.push(cache.ivs.len() as u32);
+                    children.push(child.clone());
+                }
+            }
+            parents = children;
+        }
+        cache
+    }
+
+    /// The cached set of `kmer`, if it is short enough and all `{A,C,G,T}`.
+    #[inline]
+    pub(crate) fn get(&self, kmer: &[u8]) -> Option<&[BidirInterval]> {
+        if kmer.is_empty() || kmer.len() > self.depth {
+            return None;
+        }
+        let mut x = 0usize;
+        for &q in kmer {
+            if !(CORE_CODES[0]..=CORE_CODES[3]).contains(&q) {
+                return None;
+            }
+            x = x * 4 + (q - CORE_CODES[0]) as usize;
+        }
+        let x = self.level_base[kmer.len()] + x;
+        Some(&self.ivs[self.offs[x] as usize..self.offs[x + 1] as usize])
+    }
+
+    /// Heap bytes held.
+    pub(crate) fn heap_size_bytes(&self) -> usize {
+        self.offs.len() * 4
+            + self.ivs.len() * std::mem::size_of::<BidirInterval>()
+            + self.level_base.len() * std::mem::size_of::<usize>()
+    }
+}
+
+/// The codes a [`ShallowCache`] enumerates, ascending and contiguous.
+const CORE_CODES: [u8; 4] = [
+    crate::alphabet::A,
+    crate::alphabet::C,
+    crate::alphabet::G,
+    crate::alphabet::T,
+];
 
 /// Every child of every interval of a set, from one rank pass per interval
 /// ([`BidirInterval::children_right`] / [`children_left`](BidirInterval::children_left)),

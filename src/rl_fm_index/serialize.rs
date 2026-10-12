@@ -204,7 +204,7 @@ impl BidirRlFmIndex {
         {
             return Err(corrupt("forward and reverse halves do not match"));
         }
-        Ok(Self { fwd, rev })
+        Ok(Self::from_halves(fwd, rev))
     }
 }
 
@@ -275,10 +275,7 @@ mod tests {
         let a = build(&["ACGTACGTAA", "CCGG"]);
         let b = build(&["AAAAAAAAAA", "TTTT"]);
         assert_eq!(a.fwd.text_len, b.fwd.text_len);
-        let mixed = BidirRlFmIndex {
-            fwd: a.fwd.clone(),
-            rev: b.rev.clone(),
-        };
+        let mixed = BidirRlFmIndex::from_halves(a.fwd.clone(), b.rev.clone());
         assert!(BidirRlFmIndex::from_bytes(&a.to_bytes().unwrap()).is_ok());
         assert!(BidirRlFmIndex::from_bytes(&mixed.to_bytes().unwrap()).is_err());
     }
