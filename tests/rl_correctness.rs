@@ -66,10 +66,10 @@ fn fm_config(rate: u32, enc: OccEncoding) -> FmIndexConfig {
     }
 }
 
-fn rl_config(rate: u32, enc: OccEncoding) -> RlFmIndexConfig {
+/// `_enc` mirrors `fm_config`'s parameter; the run-length layout has no lane encoding.
+fn rl_config(rate: u32, _enc: OccEncoding) -> RlFmIndexConfig {
     RlFmIndexConfig {
         sa_sample_rate: rate,
-        head_encoding: enc,
         ..Default::default()
     }
 }
@@ -266,7 +266,7 @@ fn from_bytes_rejects_malformed_input() {
 
     assert!(RlFmIndex::from_bytes(&[]).is_err());
     let mut wrong_version = bytes.clone();
-    wrong_version[3] = 2;
+    wrong_version[3] = 1; // the retired v1 layout
     assert!(RlFmIndex::from_bytes(&wrong_version).is_err());
     let fm_blob = FmIndex::build_cpu(&s, &fm_config(4, OccEncoding::Bitplane))
         .unwrap()
@@ -315,7 +315,7 @@ fn repetitive_collection_is_smaller_than_the_occ_table() {
         })
         .collect();
     let s = seqs(&texts);
-    let rl = RlBwt::build_cpu(&s, OccEncoding::Bitplane).unwrap();
+    let rl = RlBwt::build_cpu(&s).unwrap();
     let fm = FmIndex::build_cpu(&s, &fm_config(32, OccEncoding::Bitplane)).unwrap();
     let occ_bytes = fm.occ().heap_size_bytes();
     assert!(rl.run_ratio() > 20.0, "n/r = {:.1}", rl.run_ratio());

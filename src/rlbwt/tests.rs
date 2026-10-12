@@ -3,6 +3,8 @@ use rand::{Rng, SeedableRng};
 
 use super::*;
 use crate::alphabet::{A, C, G, N, SENTINEL, T};
+use crate::occ::cpu::build_occ_table;
+use crate::occ::OccEncoding;
 
 /// Strings exercising different run structures (rank works on any string, not only BWTs).
 fn corpus() -> Vec<Vec<u8>> {
@@ -35,7 +37,7 @@ fn corpus() -> Vec<Vec<u8>> {
 
 fn build_both(chars: &[u8], enc: OccEncoding) -> (RlBwt, OccTable, Bwt) {
     let bwt = Bwt::from_unpacked(chars.to_vec());
-    (RlBwt::from_bwt(&bwt, enc), build_occ_table(&bwt, enc), bwt)
+    (RlBwt::from_bwt(&bwt), build_occ_table(&bwt, enc), bwt)
 }
 
 #[test]
@@ -87,6 +89,50 @@ fn every_primitive_matches_the_occ_table() {
     }
 }
 
+/// `extend_ranks` against the occ table on intervals pinned to run boundaries (inside one
+/// run, exactly one run, straddling two, spanning past the scan limit) plus random ones.
+#[test]
+fn extend_ranks_matches_the_occ_table_at_run_boundaries() {
+    let mut rng = StdRng::seed_from_u64(11);
+    for chars in corpus() {
+        let (rl, occ, _) = build_both(&chars, OccEncoding::Bitplane);
+        let n = chars.len() as u32;
+        let starts: Vec<u32> = (0..=rl.num_runs() as usize).map(|k| rl.start(k)).collect();
+        let mut intervals: Vec<(u32, u32)> = vec![(0, 0), (0, n), (n, n)];
+        for w in starts.windows(2) {
+            let (s, e) = (w[0], w[1]);
+            intervals.extend([(s, e), (s, s + 1), (e - 1, e), (s, e.min(n))]);
+            if e - s > 2 {
+                intervals.push((s + 1, e - 1));
+            }
+            if s > 0 {
+                intervals.push((s - 1, (s + 1).min(n)));
+            }
+        }
+        for k in 0..starts.len() {
+            for span in [2usize, MAX_SCAN_RUNS, MAX_SCAN_RUNS + 1, 3 * MAX_SCAN_RUNS] {
+                if k + span < starts.len() {
+                    intervals.push((starts[k], starts[k + span]));
+                }
+            }
+        }
+        for _ in 0..300 {
+            let a = rng.random_range(0..=n);
+            let b = rng.random_range(0..=n);
+            intervals.push((a.min(b), a.max(b)));
+        }
+        for (lo, hi) in intervals {
+            for c in 0..ALPHABET_SIZE as u8 {
+                assert_eq!(
+                    BwtRank::extend_ranks(&rl, c, lo, hi),
+                    BwtRank::extend_ranks(&occ, c, lo, hi),
+                    "extend_ranks({c},{lo},{hi})"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn runs_are_maximal_and_decode_back() {
     for chars in corpus() {
@@ -112,18 +158,15 @@ fn runs_are_maximal_and_decode_back() {
 
 #[test]
 fn from_runs_merges_adjacent_and_skips_empty_runs() {
-    let split = RlBwt::from_runs(
-        [
-            (A, 2),
-            (A, 3),
-            (C, 0),
-            (G, 1),
-            (C, 0),
-            (G, 4),
-            (SENTINEL, 1),
-        ],
-        OccEncoding::Bitplane,
-    );
+    let split = RlBwt::from_runs([
+        (A, 2),
+        (A, 3),
+        (C, 0),
+        (G, 1),
+        (C, 0),
+        (G, 4),
+        (SENTINEL, 1),
+    ]);
     assert_eq!(
         split.runs().collect::<Vec<_>>(),
         vec![(A, 5), (G, 5), (SENTINEL, 1)]
@@ -137,7 +180,7 @@ fn from_runs_merges_adjacent_and_skips_empty_runs() {
 fn from_occ_matches_from_bwt() {
     for chars in corpus() {
         let (rl, occ, _) = build_both(&chars, OccEncoding::OneHot);
-        assert_eq!(RlBwt::from_occ(&occ, OccEncoding::OneHot), rl);
+        assert_eq!(RlBwt::from_occ(&occ), rl);
     }
 }
 
@@ -147,7 +190,7 @@ fn build_cpu_run_length_encodes_the_fm_index_bwt() {
         .iter()
         .map(|s| DnaSequence::from_str(s).unwrap())
         .collect();
-    let rl = RlBwt::build_cpu(&seqs, OccEncoding::Bitplane).unwrap();
+    let rl = RlBwt::build_cpu(&seqs).unwrap();
     let fm = crate::FmIndex::build_cpu(
         &seqs,
         &crate::FmIndexConfig {
@@ -156,8 +199,8 @@ fn build_cpu_run_length_encodes_the_fm_index_bwt() {
         },
     )
     .unwrap();
-    assert_eq!(rl, RlBwt::from_occ(&fm.occ, OccEncoding::Bitplane));
-    assert!(RlBwt::build_cpu(&[], OccEncoding::Bitplane).is_err());
+    assert_eq!(rl, RlBwt::from_occ(&fm.occ));
+    assert!(RlBwt::build_cpu(&[]).is_err());
 }
 
 #[test]
@@ -176,7 +219,7 @@ fn repetitive_text_compresses() {
         text.extend(copy);
     }
     let seq = DnaSequence::from_encoded(text);
-    let rl = RlBwt::build_cpu(&[seq], OccEncoding::Bitplane).unwrap();
+    let rl = RlBwt::build_cpu(&[seq]).unwrap();
     assert!(rl.run_ratio() > 10.0, "n/r = {}", rl.run_ratio());
     // Well under the plain occ table's ~0.6 bytes per row.
     assert!(
@@ -201,34 +244,57 @@ fn bucket_directory_edge_cases() {
     }
 }
 
+/// Bincode of a wire value, for corrupting the on-disk runs.
+fn wire_bytes(len: u32, heads: Vec<u8>, starts: Vec<u32>) -> Vec<u8> {
+    bincode::serialize(&RlBwtWire { len, heads, starts }).unwrap()
+}
+
 #[test]
-fn validate_rejects_corruption() {
+fn serde_round_trips_and_rejects_corruption() {
+    for chars in corpus() {
+        let (rl, _, _) = build_both(&chars, OccEncoding::Bitplane);
+        let bytes = bincode::serialize(&rl).unwrap();
+        let back: RlBwt = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back, rl);
+    }
+
+    // Runs A×5, C×3, $×1, A×2: heads packed two per byte, low nibble first.
+    let good = || {
+        (
+            11u32,
+            vec![C << 4 | A, A << 4 | SENTINEL],
+            vec![0u32, 5, 8, 9],
+        )
+    };
+    let (len, heads, starts) = good();
+    let ok: RlBwt = bincode::deserialize(&wire_bytes(len, heads, starts)).unwrap();
     let chars: Vec<u8> = [vec![A; 5], vec![C; 3], vec![SENTINEL], vec![A; 2]].concat();
-    let (rl, _, _) = build_both(&chars, OccEncoding::Bitplane);
-    let mut ok = rl.clone();
-    assert!(ok.validate_and_rebuild().is_ok());
-    assert_eq!(ok, rl);
+    assert_eq!(ok, build_both(&chars, OccEncoding::Bitplane).0);
 
-    let mut bad = rl.clone();
-    bad.run_starts[1] = bad.run_starts[2];
-    assert!(bad.validate_and_rebuild().is_err());
-
-    let mut bad = rl.clone();
-    bad.run_starts.pop();
-    assert!(bad.validate_and_rebuild().is_err());
-
-    let mut bad = rl.clone();
-    bad.len += 1;
-    assert!(bad.validate_and_rebuild().is_err());
-
-    let mut bad = rl.clone();
-    bad.cum_off[2] += 1;
-    assert!(bad.validate_and_rebuild().is_err());
-
-    let mut bad = rl;
-    let last = bad.cum.len() - 1;
-    bad.cum[last] += 1;
-    assert!(bad.validate_and_rebuild().is_err());
+    let bad_cases: Vec<(u32, Vec<u8>, Vec<u32>)> = vec![
+        // starts not strictly increasing
+        (11, good().1, vec![0, 5, 5, 9]),
+        // first start not 0
+        (11, good().1, vec![1, 5, 8, 9]),
+        // last start at the length
+        (9, good().1, vec![0, 5, 8, 9]),
+        // too few head bytes
+        (11, vec![C << 4 | A], vec![0, 5, 8, 9]),
+        // adjacent equal heads (non-maximal runs)
+        (11, vec![A << 4 | A, A << 4 | SENTINEL], vec![0, 5, 8, 9]),
+        // runs for an empty BWT, and no runs for a non-empty one
+        (0, good().1, vec![0, 5, 8, 9]),
+        (4, vec![], vec![]),
+        // stray high nibble after an odd run count
+        (9, vec![C << 4 | A, A << 4 | SENTINEL], vec![0, 5, 8]),
+    ];
+    for (len, heads, starts) in bad_cases {
+        let bytes = wire_bytes(len, heads.clone(), starts.clone());
+        assert!(
+            bincode::deserialize::<RlBwt>(&bytes).is_err(),
+            "accepted len={len} heads={heads:?} starts={starts:?}"
+        );
+    }
 }
 
 #[test]

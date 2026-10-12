@@ -34,11 +34,14 @@ impl RlFmIndex {
 
     /// Locate every occurrence of `pattern` as absolute offsets into the concatenated text.
     pub fn locate_positions(&self, pattern: &[u8]) -> Vec<u32> {
-        self.backward_search(pattern)
+        let rows: Vec<u32> = self
+            .backward_search(pattern)
             .into_iter()
             .flat_map(|(lo, hi)| lo..hi)
-            .map(|row| self.resolve_row(row))
-            .collect()
+            .collect();
+        let mut positions = Vec::with_capacity(rows.len());
+        self.resolve_rows_batch(&rows, &mut positions);
+        positions
     }
 
     /// Batched [`locate_positions`](Self::locate_positions): one result per pattern, in
@@ -49,12 +52,70 @@ impl RlFmIndex {
 
     /// Locate the suffix-array rows `lo..hi`: `(sequence id, offset)` per row, in row order.
     pub fn locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
-        (lo..hi)
-            .map(|row| {
-                self.map_position(self.resolve_row(row))
+        let rows: Vec<u32> = (lo..hi).collect();
+        self.locate_row_list(&rows)
+    }
+
+    /// Locate each listed suffix-array row: `(sequence id, offset)` per row, in order.
+    pub(crate) fn locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
+        let mut positions = Vec::with_capacity(rows.len());
+        self.resolve_rows_batch(rows, &mut positions);
+        positions
+            .into_iter()
+            .map(|pos| {
+                self.map_position(pos)
                     .expect("resolved SA position must be within text bounds")
             })
             .collect()
+    }
+
+    /// Text positions of SA rows: LF-walk each row until a sampled row (every sequence start
+    /// is sampled, so no walk crosses a sentinel), with the walks in lockstep (as
+    /// `FmIndex::resolve_sa_batch`). A run-length LF step chases two lines (directory
+    /// entry, then run block), so each round prefetches in two stages before any lane
+    /// reads: every lane's sample record and directory entry, then every lane's block.
+    /// Results land in `out` in `rows` order.
+    pub(crate) fn resolve_rows_batch(&self, rows: &[u32], out: &mut Vec<u32>) {
+        let samples = self
+            .sa_samples
+            .as_ref()
+            .expect("locate on a count-only RlFmIndex (built with sa_sample_rate = 0)");
+        out.clear();
+        out.resize(rows.len(), 0);
+        let mut cur: Vec<u32> = rows.to_vec();
+        let mut steps: Vec<u32> = vec![0; rows.len()];
+        let mut active: Vec<u32> = (0..rows.len() as u32).collect();
+        let mut next_active: Vec<u32> = Vec::with_capacity(active.len());
+        while !active.is_empty() {
+            for &lane in &active {
+                let row = cur[lane as usize];
+                samples.prefetch(row);
+                self.bwt.prefetch_bucket(row);
+            }
+            for &lane in &active {
+                self.bwt.prefetch_block(cur[lane as usize]);
+            }
+            next_active.clear();
+            for &lane in &active {
+                let idx = lane as usize;
+                let row = cur[idx];
+                if let Some(sa) = samples.get(row) {
+                    out[idx] = sa + steps[idx];
+                } else {
+                    let (c, rank) = self.bwt.lf_step(row);
+                    cur[idx] = self.c_array.get(c) + rank;
+                    steps[idx] += 1;
+                    // Every LF cycle holds a sampled sequence start; only a corrupted
+                    // sample set could walk longer than the text.
+                    assert!(
+                        steps[idx] <= self.text_len,
+                        "SA samples never reached: corrupted index"
+                    );
+                    next_active.push(lane);
+                }
+            }
+            std::mem::swap(&mut active, &mut next_active);
+        }
     }
 
     /// Map an absolute text offset to `(sequence id, offset within it)`.
@@ -95,29 +156,5 @@ impl RlFmIndex {
             std::mem::swap(&mut intervals, &mut next);
         }
         intervals
-    }
-
-    /// Text position of SA row `row`: LF-walk until a sampled row. Every sequence start is
-    /// sampled, so the walk never crosses a sentinel.
-    pub(crate) fn resolve_row(&self, mut row: u32) -> u32 {
-        let samples = self
-            .sa_samples
-            .as_ref()
-            .expect("locate on a count-only RlFmIndex (built with sa_sample_rate = 0)");
-        let mut steps = 0u32;
-        loop {
-            if let Some(sa) = samples.get(row) {
-                return sa + steps;
-            }
-            let (c, rank) = self.bwt.lf_step(row);
-            row = self.c_array.get(c) + rank;
-            steps += 1;
-            // Every LF cycle holds a sampled sequence start; only a corrupted sample set
-            // could walk longer than the text.
-            assert!(
-                steps <= self.text_len,
-                "SA samples never reached: corrupted index"
-            );
-        }
     }
 }

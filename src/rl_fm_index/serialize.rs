@@ -1,11 +1,11 @@
 //! Serialization of [`RlFmIndex`] / [`BidirRlFmIndex`] via `bincode`.
 //!
-//! [`FORMAT_MAGIC`] (`"HRL\x01"`) followed by the bincode encoding of the index fields; the
+//! [`FORMAT_MAGIC`] (`"HRL\x02"`) followed by the bincode encoding of the index fields; the
 //! run-length BWT's vectors are little-endian byte blobs (`crate::serde_raw`). Derived state
 //! (header map, bucket directory, occ select hints) is rebuilt at load, and the run
 //! structure is validated before any query can touch it.
 //!
-//! [`BIDIR_FORMAT_MAGIC`] (`"HRB\x01"`), a little-endian `u32` byte length of the forward
+//! [`BIDIR_FORMAT_MAGIC`] (`"HRB\x02"`), a little-endian `u32` byte length of the forward
 //! half, then the forward and reverse halves, each a complete `"HRL"` blob.
 
 use super::{BidirRlFmIndex, RlFmIndex};
@@ -20,9 +20,9 @@ use crate::rlbwt::RlBwt;
 use crate::suffix_array::SampledSuffixArray;
 
 /// Leading bytes of a serialized [`RlFmIndex`]: `"HRL"` plus the format version.
-pub const FORMAT_MAGIC: [u8; 4] = *b"HRL\x01";
+pub const FORMAT_MAGIC: [u8; 4] = *b"HRL\x02";
 /// Leading bytes of a serialized [`BidirRlFmIndex`]: `"HRB"` plus the format version.
-pub const BIDIR_FORMAT_MAGIC: [u8; 4] = *b"HRB\x01";
+pub const BIDIR_FORMAT_MAGIC: [u8; 4] = *b"HRB\x02";
 
 /// Write layout. Field order is the wire order.
 #[derive(serde::Serialize)]
@@ -92,11 +92,11 @@ impl RlFmIndex {
     pub fn from_bytes(data: &[u8]) -> Result<Self, FmIndexError> {
         let body = data
             .strip_prefix(&FORMAT_MAGIC)
-            .ok_or_else(|| corrupt("missing \"HRL\\x01\" format marker"))?;
+            .ok_or_else(|| corrupt("missing \"HRL\\x02\" format marker"))?;
         let d: OwnedSerializableRlFmIndex = bincode::deserialize(body).map_err(corrupt)?;
         check_stored_alphabet(&d.alphabet)?;
-        let mut bwt = d.bwt;
-        bwt.validate_and_rebuild().map_err(corrupt)?;
+        // Deserializing the BWT already validated its runs and rebuilt the blocks.
+        let bwt = d.bwt;
         if bwt.len() != d.text_len {
             return Err(corrupt("BWT length differs from the text length"));
         }
@@ -182,7 +182,7 @@ impl BidirRlFmIndex {
     pub fn from_bytes(data: &[u8]) -> Result<Self, FmIndexError> {
         let rest = data
             .strip_prefix(&BIDIR_FORMAT_MAGIC)
-            .ok_or_else(|| corrupt("missing \"HRB\\x01\" format marker"))?;
+            .ok_or_else(|| corrupt("missing \"HRB\\x02\" format marker"))?;
         let (len_bytes, rest) = rest
             .split_first_chunk::<4>()
             .ok_or_else(|| corrupt("truncated bidirectional header"))?;

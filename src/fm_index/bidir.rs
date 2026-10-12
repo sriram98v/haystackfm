@@ -111,9 +111,7 @@ impl BidirInterval {
         // count of characters b < c in the current reverse interval; that count is the
         // offset locating the surviving block inside the forward interval. `None` means `c`
         // never occurs in the text at all.
-        let ((r_lo, below_lo), (r_hi, below_hi)) =
-            rev.bwt_rank()
-                .rank_with_below_pair(c, self.rev_lo, self.rev_hi)?;
+        let (r_lo, r_hi, offset) = rev.bwt_rank().extend_ranks(c, self.rev_lo, self.rev_hi)?;
         let new_rev_lo = c_val + r_lo;
         let new_rev_hi = c_val + r_hi;
 
@@ -121,7 +119,6 @@ impl BidirInterval {
             return None;
         }
 
-        let offset = below_hi - below_lo;
         let new_size = new_rev_hi - new_rev_lo;
 
         Some(Self {
@@ -145,9 +142,7 @@ impl BidirInterval {
     /// Returns `None` if cP does not occur in the text.
     pub fn extend_left<H: FmHalf>(&self, c: u8, fwd: &H) -> Option<Self> {
         let c_val = fwd.c_array().get(c);
-        let ((r_lo, below_lo), (r_hi, below_hi)) =
-            fwd.bwt_rank()
-                .rank_with_below_pair(c, self.fwd_lo, self.fwd_hi)?;
+        let (r_lo, r_hi, offset) = fwd.bwt_rank().extend_ranks(c, self.fwd_lo, self.fwd_hi)?;
         let new_fwd_lo = c_val + r_lo;
         let new_fwd_hi = c_val + r_hi;
 
@@ -155,7 +150,6 @@ impl BidirInterval {
             return None;
         }
 
-        let offset = below_hi - below_lo;
         let new_size = new_fwd_hi - new_fwd_lo;
 
         Some(Self {

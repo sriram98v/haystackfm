@@ -28,6 +28,16 @@ pub trait BwtRank {
     /// `bwt[lo..hi)`. The one-call form of a bidirectional extension step.
     fn rank_with_below_pair(&self, c: u8, lo: u32, hi: u32) -> Option<((u32, u32), (u32, u32))>;
 
+    /// `Some((rank(c, lo), rank(c, hi), below))` where `below` counts symbols `< c` in
+    /// `bwt[lo..hi)`; `None` when `c` does not occur in `bwt[lo..hi)`. Everything one
+    /// bidirectional extension step needs. Only the in-range `below` count is returned, so
+    /// a backend may skip the absolute class ranks.
+    #[inline(always)]
+    fn extend_ranks(&self, c: u8, lo: u32, hi: u32) -> Option<(u32, u32, u32)> {
+        let ((r_lo, below_lo), (r_hi, below_hi)) = self.rank_with_below_pair(c, lo, hi)?;
+        Some((r_lo, r_hi, below_hi - below_lo))
+    }
+
     /// `(rank_set(set, lo), rank_set(set, hi))`: occurrences of any member of `set`.
     fn rank_set_pair(&self, set: SymbolSet, lo: u32, hi: u32) -> (u32, u32);
 

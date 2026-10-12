@@ -2,63 +2,119 @@
 //!
 //! A BWT of length `n` over a repetitive text consists of few maximal runs `r ≪ n` of equal
 //! symbols. [`RlBwt`] stores those runs and answers the FM-index primitives ([`BwtRank`]) in
-//! `O(r)` space, following Mäkinen & Navarro's run-length FM-index:
+//! `O(r)` space, in the spirit of Mäkinen & Navarro's run-length FM-index, laid out so a
+//! rank costs two cache lines instead of a chain of four lookups:
 //!
-//! - `H`, the run-head string (`H[k]` = symbol of run `k`, length `r`), with an [`OccTable`]
-//!   over it for rank/access;
-//! - the run start rows (`r + 1` values, the last one `n`), with a bucket directory for
-//!   predecessor search;
-//! - per symbol, prefix sums of the lengths of that symbol's runs.
+//! - **run blocks**: the runs in groups of [`RUNS_PER_BLOCK`], one 64-byte-aligned block
+//!   each (two when more than [`INLINE_LANES`] symbols occur) holding the group's run start
+//!   rows, its run-head symbols (nibbles) and, per symbol present in the BWT, its rank at
+//!   the group's first row;
+//! - **bucket directory**: for every `2^bucket_shift` rows, the run holding the bucket's
+//!   first row, narrowing the predecessor search to a few runs.
 //!
 //! ```text
-//! k      = run containing row i                       (predecessor over run starts)
-//! j      = rank_H(c, k)                               (c-runs before run k)
-//! rank_c = cum_c[j] + (H[k] == c ? i − start[k] : 0)
+//! k      = run containing row i               (directory + search over block starts)
+//! b, t   = k / 8, k % 8
+//! rank_c = sample_c[b] + Σ_{u<t, H[u]=c} len(u) + (H[t] == c ? i − start[t] : 0)
 //! ```
+//!
+//! Every quantity a rank, an LF step or a bidirectional extension needs sits in the block
+//! of `k` (and, for an interval, the next blocks). Only the runs are serialized; blocks and
+//! directory are rebuilt and validated at load.
 //!
 //! This is the representation the move structure and its bidirectional variant (b-move)
 //! build on: both index the same runs, adding per-run LF/φ tables.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::alphabet::{DnaSequence, SymbolSet, ALPHABET_SIZE};
 use crate::bwt::cpu::build_bwt;
 use crate::bwt::Bwt;
 use crate::error::FmIndexError;
-use crate::occ::cpu::build_occ_table;
-use crate::occ::{BwtRank, OccEncoding, OccTable};
+use crate::occ::{BwtRank, OccTable};
 
 /// Average runs per bucket of the predecessor directory: a bucket costs 4 bytes, and the
-/// binary search inside one touches the same cache line or two of `run_starts`.
+/// search inside one touches one or two run blocks.
 const RUNS_PER_BUCKET: u64 = 4;
 
+/// Runs per block. A block's starts and heads fill words `0..=8`.
+pub(crate) const RUNS_PER_BLOCK: usize = 8;
+
+/// Present symbols whose rank samples fit in a single 64-byte block (words `9..16`). With
+/// more, every block takes two lines.
+const INLINE_LANES: usize = 7;
+
+/// Word of the first rank sample in a block.
+const SAMPLE_WORD: usize = RUNS_PER_BLOCK + 1;
+
+/// Runs [`BwtRank::extend_ranks`] walks before switching to two independent ranks.
+const MAX_SCAN_RUNS: usize = 8;
+
+/// No lane: the symbol does not occur.
+const NO_LANE: u8 = u8::MAX;
+
+/// One cache line of a run block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C, align(64))]
+struct Line([u32; 16]);
+
 /// Run-length encoded BWT with rank/access support. See the [module docs](self).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RlBwt {
     /// Number of BWT rows `n`.
     len: u32,
-    /// Rank/access over the run-head string `H` (one symbol per run).
-    heads: OccTable,
-    /// Start row of every run, plus `len` as a final sentinel entry (`r + 1` values,
-    /// strictly increasing, first `0`).
-    #[serde(with = "crate::serde_raw::u32s")]
-    run_starts: Vec<u32>,
-    /// Per-symbol run-length prefix sums, concatenated: `cum[cum_off[c] + j]` is the total
-    /// length of the first `j` runs of symbol `c`. Symbol `c` owns `runs_c + 1` entries.
-    #[serde(with = "crate::serde_raw::u32s")]
-    cum: Vec<u32>,
-    /// Section offsets into `cum`; `cum_off[ALPHABET_SIZE] == cum.len()`.
-    cum_off: [u32; ALPHABET_SIZE + 1],
-    /// log2 of the rows covered by one `buckets` entry. Derived.
-    #[serde(skip)]
-    bucket_shift: u32,
-    /// `buckets[b]` = run containing row `min(b << bucket_shift, len − 1)`. Derived from
-    /// `run_starts`, so skipped on disk and rebuilt by [`rebuild_derived`](Self::rebuild_derived).
-    #[serde(skip)]
-    buckets: Vec<u32>,
-    /// Symbols with at least one run. Derived from `cum_off`.
-    #[serde(skip)]
+    /// Number of maximal runs `r`.
+    num_runs: u32,
+    /// Run blocks, `lines_per_block` lines each: `⌊r / 8⌋ + 1` blocks, so the start of run
+    /// `r` (= `len`) is always stored. Starts past the last run are `len`, their heads 0.
+    blocks: Vec<Line>,
+    /// 1, or 2 when more than [`INLINE_LANES`] symbols occur.
+    lines_per_block: usize,
+    /// Rank-sample lane of each symbol, [`NO_LANE`] when absent.
+    lane_of: [u8; ALPHABET_SIZE],
+    /// Occurrences of each symbol in the whole BWT.
+    totals: [u32; ALPHABET_SIZE],
+    /// Symbols with at least one run.
     present: SymbolSet,
+    /// log2 of the rows covered by one `buckets` entry.
+    bucket_shift: u32,
+    /// `buckets[b]` = run containing row `min(b << bucket_shift, len − 1)`.
+    buckets: Vec<u32>,
+}
+
+/// On-disk form: the runs only. Run `k` has head `heads[k / 2] >> (4 * (k % 2)) & 15` and
+/// covers rows `starts[k]..starts[k + 1]` (`len` for the last).
+#[derive(Serialize, Deserialize)]
+struct RlBwtWire {
+    len: u32,
+    #[serde(with = "crate::serde_raw::bytes")]
+    heads: Vec<u8>,
+    #[serde(with = "crate::serde_raw::u32s")]
+    starts: Vec<u32>,
+}
+
+impl Serialize for RlBwt {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let r = self.num_runs as usize;
+        let mut heads = vec![0u8; r.div_ceil(2)];
+        for k in 0..r {
+            heads[k / 2] |= self.head(k) << (4 * (k % 2));
+        }
+        let starts = (0..r).map(|k| self.start(k)).collect();
+        RlBwtWire {
+            len: self.len,
+            heads,
+            starts,
+        }
+        .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for RlBwt {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let wire = RlBwtWire::deserialize(d)?;
+        Self::from_wire(wire).map_err(serde::de::Error::custom)
+    }
 }
 
 impl RlBwt {
@@ -66,17 +122,14 @@ impl RlBwt {
     /// merged and zero-length runs skipped, so any split of the BWT into runs is accepted —
     /// including one run per row.
     ///
-    /// `head_encoding` selects the [`OccEncoding`] of the run-head rank table.
-    ///
     /// # Panics
     /// If a symbol is `>= ALPHABET_SIZE` or the total length exceeds `u32::MAX`.
-    pub fn from_runs<I>(runs: I, head_encoding: OccEncoding) -> Self
+    pub fn from_runs<I>(runs: I) -> Self
     where
         I: IntoIterator<Item = (u8, u32)>,
     {
         let mut heads: Vec<u8> = Vec::new();
-        let mut run_starts: Vec<u32> = Vec::new();
-        let mut lengths: Vec<u32> = Vec::new();
+        let mut starts: Vec<u32> = Vec::new();
         let mut len: u32 = 0;
         for (sym, run_len) in runs {
             assert!(
@@ -86,77 +139,134 @@ impl RlBwt {
             if run_len == 0 {
                 continue;
             }
-            match heads.last() {
-                Some(&last) if last == sym => *lengths.last_mut().unwrap() += run_len,
-                _ => {
-                    heads.push(sym);
-                    run_starts.push(len);
-                    lengths.push(run_len);
-                }
+            if heads.last() != Some(&sym) {
+                heads.push(sym);
+                starts.push(len);
             }
             len = len
                 .checked_add(run_len)
                 .expect("RlBwt: total length exceeds u32::MAX");
         }
-        run_starts.push(len);
+        Self::from_maximal_runs(len, &heads, &starts)
+    }
 
-        // Per-symbol prefix sums of run lengths, in run order.
-        let mut per_symbol: [Vec<u32>; ALPHABET_SIZE] = std::array::from_fn(|_| vec![0]);
-        for (&sym, &run_len) in heads.iter().zip(&lengths) {
-            let section = &mut per_symbol[sym as usize];
-            let total = *section.last().unwrap();
-            section.push(total + run_len);
+    /// Lay out maximal runs (`heads[k]` covering `starts[k]..starts[k + 1]`, the last ending
+    /// at `len`), already validated: starts strictly increasing from 0 and below `len`,
+    /// adjacent heads distinct, symbols in range.
+    fn from_maximal_runs(len: u32, heads: &[u8], starts: &[u32]) -> Self {
+        let r = heads.len();
+        let mut totals = [0u32; ALPHABET_SIZE];
+        for (k, &h) in heads.iter().enumerate() {
+            let end = starts.get(k + 1).copied().unwrap_or(len);
+            totals[h as usize] += end - starts[k];
         }
-        let mut cum_off = [0u32; ALPHABET_SIZE + 1];
-        let mut cum = Vec::with_capacity(heads.len() + ALPHABET_SIZE);
-        for (c, section) in per_symbol.iter().enumerate() {
-            cum_off[c] = u32::try_from(cum.len()).expect("RlBwt: too many runs");
-            cum.extend_from_slice(section);
+        let present: SymbolSet = (0..ALPHABET_SIZE as u8)
+            .filter(|&c| totals[c as usize] > 0)
+            .collect();
+        let mut lane_of = [NO_LANE; ALPHABET_SIZE];
+        for (lane, c) in present.iter().enumerate() {
+            lane_of[c as usize] = lane as u8;
         }
-        cum_off[ALPHABET_SIZE] = u32::try_from(cum.len()).expect("RlBwt: too many runs");
+        let lines_per_block = if present.len() as usize <= INLINE_LANES {
+            1
+        } else {
+            2
+        };
 
-        let heads = build_occ_table(&Bwt::from_unpacked(heads), head_encoding);
+        let num_blocks = r / RUNS_PER_BLOCK + 1;
+        let mut blocks = vec![Line([0; 16]); num_blocks * lines_per_block];
+        let mut running = [0u32; ALPHABET_SIZE];
+        for b in 0..num_blocks {
+            let base = b * lines_per_block;
+            for (c, lane) in lane_of.iter().enumerate() {
+                if *lane != NO_LANE {
+                    let w = SAMPLE_WORD + *lane as usize;
+                    blocks[base + w / 16].0[w % 16] = running[c];
+                }
+            }
+            let mut nibbles = 0u32;
+            for t in 0..RUNS_PER_BLOCK {
+                let k = b * RUNS_PER_BLOCK + t;
+                let (start, head) = if k < r {
+                    let end = starts.get(k + 1).copied().unwrap_or(len);
+                    running[heads[k] as usize] += end - starts[k];
+                    (starts[k], heads[k])
+                } else {
+                    (len, 0)
+                };
+                blocks[base].0[t] = start;
+                nibbles |= (head as u32) << (4 * t);
+            }
+            blocks[base].0[RUNS_PER_BLOCK] = nibbles;
+        }
+
         let mut rl = Self {
             len,
-            heads,
-            run_starts,
-            cum,
-            cum_off,
+            num_runs: r as u32,
+            blocks,
+            lines_per_block,
+            lane_of,
+            totals,
+            present,
             bucket_shift: 0,
             buckets: Vec::new(),
-            present: SymbolSet::EMPTY,
         };
-        rl.rebuild_derived();
+        rl.build_directory();
         rl
     }
 
+    /// Check the on-disk runs and lay them out. Returns a description of the first
+    /// violation.
+    fn from_wire(w: RlBwtWire) -> Result<Self, String> {
+        let r = w.starts.len();
+        if w.heads.len() != r.div_ceil(2) {
+            return Err(format!("{} head bytes for {r} runs", w.heads.len()));
+        }
+        if r % 2 == 1 && w.heads[r / 2] >> 4 != 0 {
+            return Err("unused head nibble is not zero".into());
+        }
+        if (r == 0) != (w.len == 0) {
+            return Err(format!("{r} runs for {} rows", w.len));
+        }
+        if r > 0 && w.starts[0] != 0 {
+            return Err("first run does not start at row 0".into());
+        }
+        if w.starts.windows(2).any(|p| p[0] >= p[1]) {
+            return Err("run starts are not strictly increasing".into());
+        }
+        if w.starts.last().is_some_and(|&s| s >= w.len) {
+            return Err("last run starts at or past the BWT length".into());
+        }
+        let heads: Vec<u8> = (0..r)
+            .map(|k| (w.heads[k / 2] >> (4 * (k % 2))) & 15)
+            .collect();
+        if heads.windows(2).any(|p| p[0] == p[1]) {
+            return Err("adjacent runs share a symbol (runs are not maximal)".into());
+        }
+        Ok(Self::from_maximal_runs(w.len, &heads, &w.starts))
+    }
+
     /// Run-length encode a packed [`Bwt`].
-    pub fn from_bwt(bwt: &Bwt, head_encoding: OccEncoding) -> Self {
-        Self::from_runs(bwt.runs(), head_encoding)
+    pub fn from_bwt(bwt: &Bwt) -> Self {
+        Self::from_runs(bwt.runs())
     }
 
     /// Run-length encode the BWT held by an [`OccTable`] (e.g. an existing
     /// [`FmIndex`](crate::FmIndex)'s), without rebuilding the suffix array.
-    pub fn from_occ(occ: &OccTable, head_encoding: OccEncoding) -> Self {
-        Self::from_runs(
-            (0..occ.text_len).map(|i| (occ.symbol_at(i), 1)),
-            head_encoding,
-        )
+    pub fn from_occ(occ: &OccTable) -> Self {
+        Self::from_runs((0..occ.text_len).map(|i| (occ.symbol_at(i), 1)))
     }
 
     /// Build the run-length BWT of a set of references on the CPU: concatenate them with
     /// sentinels (as [`FmIndex`](crate::FmIndex) does), build the suffix array and BWT, and
     /// run-length encode it.
-    pub fn build_cpu(
-        sequences: &[DnaSequence],
-        head_encoding: OccEncoding,
-    ) -> Result<Self, FmIndexError> {
+    pub fn build_cpu(sequences: &[DnaSequence]) -> Result<Self, FmIndexError> {
         if sequences.is_empty() {
             return Err(FmIndexError::EmptySequence);
         }
         let prepared = crate::fm_index::prepare::prepare_cpu(sequences)?;
         let bwt = build_bwt(&prepared.text, &prepared.sa);
-        Ok(Self::from_bwt(&bwt, head_encoding))
+        Ok(Self::from_bwt(&bwt))
     }
 
     /// Number of BWT rows `n`.
@@ -171,24 +281,21 @@ impl RlBwt {
 
     /// Number of maximal runs `r`.
     pub fn num_runs(&self) -> u32 {
-        self.heads.text_len
+        self.num_runs
     }
 
     /// `n / r`: average run length, the compression lever of every run-length structure.
     pub fn run_ratio(&self) -> f64 {
-        if self.num_runs() == 0 {
+        if self.num_runs == 0 {
             0.0
         } else {
-            self.len as f64 / self.num_runs() as f64
+            self.len as f64 / self.num_runs as f64
         }
     }
 
     /// The maximal runs as `(symbol, length)`, in BWT order.
     pub fn runs(&self) -> impl Iterator<Item = (u8, u32)> + '_ {
-        self.run_starts
-            .windows(2)
-            .enumerate()
-            .map(|(k, w)| (self.heads.symbol_at(k as u32), w[1] - w[0]))
+        (0..self.num_runs as usize).map(|k| (self.head(k), self.start(k + 1) - self.start(k)))
     }
 
     /// Symbol at row `i`.
@@ -216,24 +323,17 @@ impl RlBwt {
 
     /// Occurrences of `c` in the whole BWT.
     pub fn symbol_count(&self, c: u8) -> u32 {
-        self.cum_at(c, self.symbol_runs(c))
+        self.totals.get(c as usize).copied().unwrap_or(0)
     }
 
-    /// Heap bytes held by this structure (run heads, run starts, prefix sums, buckets).
+    /// Heap bytes held by this structure (run blocks and bucket directory).
     pub fn heap_size_bytes(&self) -> usize {
-        self.heads.heap_size_bytes()
-            + self.run_starts.len() * 4
-            + self.cum.len() * 4
-            + self.buckets.len() * 4
+        self.blocks.len() * std::mem::size_of::<Line>() + self.buckets.len() * 4
     }
 
-    /// Recompute the bucket directory from `run_starts`. Called on construction and after
-    /// deserialization.
-    pub(crate) fn rebuild_derived(&mut self) {
-        self.present = (0..ALPHABET_SIZE as u8)
-            .filter(|&c| self.symbol_runs(c) > 0)
-            .collect();
-        let r = self.num_runs();
+    /// Recompute the bucket directory from the run starts.
+    fn build_directory(&mut self) {
+        let r = self.num_runs;
         self.bucket_shift = if r == 0 {
             0
         } else {
@@ -254,130 +354,196 @@ impl RlBwt {
         let mut k = 0usize;
         for b in 0..num_buckets {
             let row = ((b as u64) << self.bucket_shift).min(last_row as u64) as u32;
-            while self.run_starts[k + 1] <= row {
+            while self.start(k + 1) <= row {
                 k += 1;
             }
             self.buckets.push(k as u32);
         }
     }
 
-    /// Check the invariants a deserialized value must satisfy before any query touches it,
-    /// then rebuild the derived state. Returns a description of the first violation.
-    pub(crate) fn validate_and_rebuild(&mut self) -> Result<(), String> {
-        // The head table must be structurally sound before any read, then exactly the
-        // table its own symbols rebuild to (so its counts can be trusted as indexes).
-        self.heads.validate_structure()?;
-        let r = self.heads.text_len as usize;
-        let decoded: Vec<u8> = (0..r as u32).map(|k| self.heads.symbol_at(k)).collect();
-        let rebuilt = build_occ_table(&Bwt::from_unpacked(decoded), self.heads.encoding());
-        self.heads.rebuild_derived();
-        if rebuilt != self.heads {
-            return Err("run-head table is not the table of its own symbols".into());
-        }
-        if self.run_starts.len() != r + 1 {
-            return Err(format!("{} run starts for {r} runs", self.run_starts.len()));
-        }
-        if self.run_starts[0] != 0 && r > 0 {
-            return Err("first run does not start at row 0".into());
-        }
-        if self.run_starts[r] != self.len {
-            return Err("run starts do not end at the BWT length".into());
-        }
-        if self.run_starts.windows(2).any(|w| w[0] >= w[1]) {
-            return Err("run starts are not strictly increasing".into());
-        }
-        if self.cum_off[0] != 0 || self.cum_off[ALPHABET_SIZE] as usize != self.cum.len() {
-            return Err("prefix-sum offsets do not cover the prefix sums".into());
-        }
-        let mut total = 0u64;
-        for c in 0..ALPHABET_SIZE {
-            let (lo, hi) = (self.cum_off[c] as usize, self.cum_off[c + 1] as usize);
-            let runs_c = self.heads.rank(c as u8, r as u32) as usize;
-            if hi < lo || hi - lo != runs_c + 1 {
-                return Err(format!("symbol {c}: prefix sums disagree with run heads"));
-            }
-            let section = &self.cum[lo..hi];
-            if section[0] != 0 || section.windows(2).any(|w| w[0] >= w[1]) {
-                return Err(format!("symbol {c}: prefix sums not strictly increasing"));
-            }
-            total += *section.last().unwrap() as u64;
-        }
-        if total != self.len as u64 {
-            return Err("run lengths do not sum to the BWT length".into());
-        }
-        self.rebuild_derived();
-        Ok(())
+    /// Start row of run `k` (`len` for `k >= r`, up to the last block's end).
+    #[inline(always)]
+    fn start(&self, k: usize) -> u32 {
+        self.blocks[(k / RUNS_PER_BLOCK) * self.lines_per_block].0[k % RUNS_PER_BLOCK]
     }
 
-    /// Number of runs of symbol `c`.
-    #[inline]
-    fn symbol_runs(&self, c: u8) -> u32 {
-        self.cum_off[c as usize + 1] - self.cum_off[c as usize] - 1
+    /// Head symbol of run `k`.
+    #[inline(always)]
+    fn head(&self, k: usize) -> u8 {
+        let nibbles = self.blocks[(k / RUNS_PER_BLOCK) * self.lines_per_block].0[RUNS_PER_BLOCK];
+        ((nibbles >> (4 * (k % RUNS_PER_BLOCK))) & 15) as u8
     }
 
-    /// Total length of the first `j` runs of symbol `c`.
-    #[inline]
-    fn cum_at(&self, c: u8, j: u32) -> u32 {
-        self.cum[(self.cum_off[c as usize] + j) as usize]
+    /// Rank of the symbol of `lane` at the first row of block `b`.
+    #[inline(always)]
+    fn sample(&self, b: usize, lane: u8) -> u32 {
+        let w = SAMPLE_WORD + lane as usize;
+        self.blocks[b * self.lines_per_block + w / 16].0[w % 16]
+    }
+
+    /// Prefetch the directory entry for row `i`: stage one of a batched LF walk.
+    #[inline(always)]
+    pub(crate) fn prefetch_bucket(&self, i: u32) {
+        if let Some(entry) = self.buckets.get((i >> self.bucket_shift) as usize) {
+            crate::prefetch::prefetch_read(entry);
+        }
+    }
+
+    /// Prefetch the run block the directory points row `i` to: stage two, once the entry
+    /// [`prefetch_bucket`](Self::prefetch_bucket) requested has arrived.
+    #[inline(always)]
+    pub(crate) fn prefetch_block(&self, i: u32) {
+        if let Some(&k) = self.buckets.get((i >> self.bucket_shift) as usize) {
+            let line = (k as usize / RUNS_PER_BLOCK) * self.lines_per_block;
+            if let Some(block) = self.blocks.get(line) {
+                crate::prefetch::prefetch_read(block);
+            }
+        }
+    }
+
+    /// Rows of `lo..hi` whose BWT symbol is not in `set`, in row order: one predecessor
+    /// search, then whole runs.
+    pub(crate) fn rows_not_in(&self, set: SymbolSet, lo: u32, hi: u32, out: &mut Vec<u32>) {
+        if lo >= hi {
+            return;
+        }
+        let mut k = self.run_of(lo);
+        while self.start(k) < hi {
+            if !set.contains(self.head(k)) {
+                out.extend(self.start(k).max(lo)..self.start(k + 1).min(hi));
+            }
+            k += 1;
+        }
     }
 
     /// Index of the run containing row `i`, or `r` for `i == len`.
-    #[inline]
+    #[inline(always)]
     fn run_of(&self, i: u32) -> usize {
         if i >= self.len {
-            return self.num_runs() as usize;
+            return self.num_runs as usize;
         }
         let b = (i >> self.bucket_shift) as usize;
-        let lo = self.buckets[b] as usize;
-        let hi = self.buckets[b + 1] as usize;
-        // The run holding `i` lies in `[lo, hi]`: count the starts in `(lo, hi]` that are <= i.
-        lo + self.run_starts[lo + 1..=hi].partition_point(|&s| s <= i)
-    }
-
-    /// `rank(c, i)` given `k = run_of(i)`.
-    #[inline]
-    fn rank_in_run(&self, c: u8, i: u32, k: usize) -> u32 {
-        if k < self.num_runs() as usize {
-            let (head, j) = self.heads.lf_step(k as u32);
-            if head == c {
-                return self.cum_at(c, j) + (i - self.run_starts[k]);
+        let mut base = self.buckets[b] as usize;
+        // The run holding `i` is the last of `[base, base + n]` starting at or before `i`.
+        let mut n = self.buckets[b + 1] as usize - base;
+        while n > 0 {
+            let half = n / 2;
+            let mid = base + half + 1;
+            if self.start(mid) <= i {
+                base = mid;
+                n -= half + 1;
+            } else {
+                n = half;
             }
         }
-        self.cum_at(c, self.heads.rank(c, k as u32))
+        base
     }
 
-    /// Occurrences of members of `set` in `bwt[0..i)`, given `k = run_of(i)`: one head-table
-    /// `rank_all` plus one prefix-sum read per present member.
-    #[inline]
-    fn rank_set_in_run(&self, set: SymbolSet, i: u32, k: usize) -> u32 {
-        let set = set & self.present;
-        if set.is_empty() {
-            return 0;
+    /// `rank(c, i)` for a present symbol `c` (lane `lane`) given `k = run_of(i)`: the block
+    /// sample plus the `c`-runs of the block before `k`, plus the part of run `k` before `i`.
+    #[inline(always)]
+    fn rank_at(&self, c: u8, lane: u8, i: u32, k: usize) -> u32 {
+        let b = k / RUNS_PER_BLOCK;
+        let t = k % RUNS_PER_BLOCK;
+        let line = &self.blocks[b * self.lines_per_block].0;
+        let nibbles = line[RUNS_PER_BLOCK];
+        let mut rank = self.sample(b, lane);
+        for u in 0..t {
+            if (nibbles >> (4 * u)) & 15 == c as u32 {
+                rank += line[u + 1] - line[u];
+            }
         }
-        let runs_before = self.heads.rank_all(k as u32);
-        let mut total: u32 = set
+        if (nibbles >> (4 * t)) & 15 == c as u32 {
+            rank += i - line[t];
+        }
+        rank
+    }
+
+    /// Occurrences of members of `set` (all present) in `bwt[0..i)` given `k = run_of(i)`.
+    #[inline(always)]
+    fn rank_set_at(&self, set: SymbolSet, i: u32, k: usize) -> u32 {
+        let b = k / RUNS_PER_BLOCK;
+        let t = k % RUNS_PER_BLOCK;
+        let line = &self.blocks[b * self.lines_per_block].0;
+        let nibbles = line[RUNS_PER_BLOCK];
+        let mut rank: u32 = set
             .iter()
-            .map(|c| self.cum_at(c, runs_before[c as usize]))
+            .map(|c| self.sample(b, self.lane_of[c as usize]))
             .sum();
-        if k < self.num_runs() as usize && set.contains(self.heads.symbol_at(k as u32)) {
-            total += i - self.run_starts[k];
+        for u in 0..t {
+            if set.contains(((nibbles >> (4 * u)) & 15) as u8) {
+                rank += line[u + 1] - line[u];
+            }
         }
-        total
+        if set.contains(((nibbles >> (4 * t)) & 15) as u8) {
+            rank += i - line[t];
+        }
+        rank
     }
 
     /// `rank_all(i)` given `k = run_of(i)`.
-    #[inline]
-    fn rank_all_in_run(&self, i: u32, k: usize) -> [u32; ALPHABET_SIZE] {
-        let runs_before = self.heads.rank_all(k as u32);
+    fn rank_all_at(&self, i: u32, k: usize) -> [u32; ALPHABET_SIZE] {
+        let b = k / RUNS_PER_BLOCK;
+        let t = k % RUNS_PER_BLOCK;
+        let line = &self.blocks[b * self.lines_per_block].0;
+        let nibbles = line[RUNS_PER_BLOCK];
         let mut out = [0u32; ALPHABET_SIZE];
-        for c in 0..ALPHABET_SIZE {
-            out[c] = self.cum_at(c as u8, runs_before[c]);
+        for c in self.present.iter() {
+            out[c as usize] = self.sample(b, self.lane_of[c as usize]);
         }
-        if k < self.num_runs() as usize {
-            let head = self.heads.symbol_at(k as u32);
-            out[head as usize] += i - self.run_starts[k];
+        for u in 0..t {
+            out[((nibbles >> (4 * u)) & 15) as usize] += line[u + 1] - line[u];
+        }
+        if k < self.num_runs as usize {
+            out[((nibbles >> (4 * t)) & 15) as usize] += i - line[t];
         }
         out
+    }
+
+    /// Occurrences of members of `set` in `bwt[lo..hi)`. A narrow range is summed off its
+    /// runs; a wide one takes two class ranks.
+    pub(crate) fn count_set_in(&self, set: SymbolSet, lo: u32, hi: u32) -> u32 {
+        let set = set & self.present;
+        if set.is_empty() || lo >= hi {
+            return 0;
+        }
+        let k_lo = self.run_of(lo);
+        let mut k = k_lo;
+        let mut count = 0u32;
+        while self.start(k) < hi {
+            if k - k_lo == MAX_SCAN_RUNS {
+                let k_hi = self.run_of(hi);
+                return self.rank_set_at(set, hi, k_hi) - self.rank_set_at(set, lo, k_lo);
+            }
+            if set.contains(self.head(k)) {
+                count += self.start(k + 1).min(hi) - self.start(k).max(lo);
+            }
+            k += 1;
+        }
+        count
+    }
+
+    /// [`BwtRank::extend_ranks`] for an interval spanning more than [`MAX_SCAN_RUNS`] runs,
+    /// given `k_lo = run_of(lo)`: two ranks and two class ranks.
+    #[cold]
+    fn extend_ranks_wide(
+        &self,
+        c: u8,
+        lane: u8,
+        lo: u32,
+        hi: u32,
+        k_lo: usize,
+    ) -> Option<(u32, u32, u32)> {
+        let k_hi = self.run_of(hi);
+        let r_lo = self.rank_at(c, lane, lo, k_lo);
+        let r_hi = self.rank_at(c, lane, hi, k_hi);
+        if r_lo >= r_hi {
+            return None;
+        }
+        let below = SymbolSet::below(c) & self.present;
+        let b_lo = self.rank_set_at(below, lo, k_lo);
+        let b_hi = self.rank_set_at(below, hi, k_hi);
+        Some((r_lo, r_hi, b_hi - b_lo))
     }
 }
 
@@ -389,54 +555,106 @@ impl BwtRank for RlBwt {
 
     #[inline]
     fn rank(&self, c: u8, i: u32) -> u32 {
-        self.rank_in_run(c, i, self.run_of(i))
+        // Absent symbols (most IUPAC codes in a fan-out) cost nothing, as for the occ table.
+        match self.lane_of.get(c as usize) {
+            Some(&lane) if lane != NO_LANE => self.rank_at(c, lane, i, self.run_of(i)),
+            _ => 0,
+        }
     }
 
     #[inline]
     fn rank_pair(&self, c: u8, lo: u32, hi: u32) -> (u32, u32) {
-        (self.rank(c, lo), self.rank(c, hi))
+        match self.lane_of.get(c as usize) {
+            Some(&lane) if lane != NO_LANE => (
+                self.rank_at(c, lane, lo, self.run_of(lo)),
+                self.rank_at(c, lane, hi, self.run_of(hi)),
+            ),
+            _ => (0, 0),
+        }
     }
 
     fn rank_with_below_pair(&self, c: u8, lo: u32, hi: u32) -> Option<((u32, u32), (u32, u32))> {
+        let lane = *self.lane_of.get(c as usize)?;
+        if lane == NO_LANE {
+            return None;
+        }
         let (k_lo, k_hi) = (self.run_of(lo), self.run_of(hi));
-        let r_lo = self.rank_in_run(c, lo, k_lo);
-        let r_hi = self.rank_in_run(c, hi, k_hi);
+        let r_lo = self.rank_at(c, lane, lo, k_lo);
+        let r_hi = self.rank_at(c, lane, hi, k_hi);
         if r_lo >= r_hi {
             return None;
         }
-        let below = SymbolSet::below(c);
+        let below = SymbolSet::below(c) & self.present;
         Some((
-            (r_lo, self.rank_set_in_run(below, lo, k_lo)),
-            (r_hi, self.rank_set_in_run(below, hi, k_hi)),
+            (r_lo, self.rank_set_at(below, lo, k_lo)),
+            (r_hi, self.rank_set_at(below, hi, k_hi)),
         ))
     }
 
+    fn extend_ranks(&self, c: u8, lo: u32, hi: u32) -> Option<(u32, u32, u32)> {
+        let lane = *self.lane_of.get(c as usize)?;
+        if lane == NO_LANE || lo >= hi {
+            return None;
+        }
+        let k_lo = self.run_of(lo);
+        // Narrow intervals (the bulk of a deep search) span a few runs, all in the block of
+        // `k_lo` or the next: walk them once, summing the overlap of `c`-runs and of runs
+        // below `c`. No second predecessor search and no class ranks.
+        let mut k = k_lo;
+        let mut count = 0u32;
+        let mut below = 0u32;
+        while self.start(k) < hi {
+            if k - k_lo == MAX_SCAN_RUNS {
+                return self.extend_ranks_wide(c, lane, lo, hi, k_lo);
+            }
+            let head = self.head(k);
+            if head <= c {
+                let overlap = self.start(k + 1).min(hi) - self.start(k).max(lo);
+                if head == c {
+                    count += overlap;
+                } else {
+                    below += overlap;
+                }
+            }
+            k += 1;
+        }
+        if count == 0 {
+            return None;
+        }
+        let r_lo = self.rank_at(c, lane, lo, k_lo);
+        Some((r_lo, r_lo + count, below))
+    }
+
     fn rank_set_pair(&self, set: SymbolSet, lo: u32, hi: u32) -> (u32, u32) {
+        let set = set & self.present;
+        if set.is_empty() {
+            return (0, 0);
+        }
         (
-            self.rank_set_in_run(set, lo, self.run_of(lo)),
-            self.rank_set_in_run(set, hi, self.run_of(hi)),
+            self.rank_set_at(set, lo, self.run_of(lo)),
+            self.rank_set_at(set, hi, self.run_of(hi)),
         )
     }
 
     fn rank_all_pair(&self, lo: u32, hi: u32) -> ([u32; ALPHABET_SIZE], [u32; ALPHABET_SIZE]) {
         (
-            self.rank_all_in_run(lo, self.run_of(lo)),
-            self.rank_all_in_run(hi, self.run_of(hi)),
+            self.rank_all_at(lo, self.run_of(lo)),
+            self.rank_all_at(hi, self.run_of(hi)),
         )
     }
 
     #[inline]
     fn symbol_at(&self, i: u32) -> u8 {
-        debug_assert!(i < self.len, "symbol_at row {i} >= len {}", self.len);
-        self.heads.symbol_at(self.run_of(i) as u32)
+        assert!(i < self.len, "symbol_at row {i} >= len {}", self.len);
+        self.head(self.run_of(i))
     }
 
     #[inline]
     fn lf_step(&self, i: u32) -> (u8, u32) {
-        debug_assert!(i < self.len, "lf_step row {i} >= len {}", self.len);
+        assert!(i < self.len, "lf_step row {i} >= len {}", self.len);
         let k = self.run_of(i);
-        let (head, j) = self.heads.lf_step(k as u32);
-        (head, self.cum_at(head, j) + (i - self.run_starts[k]))
+        let head = self.head(k);
+        (head, self.rank_at(head, self.lane_of[head as usize], i, k))
     }
 }
 

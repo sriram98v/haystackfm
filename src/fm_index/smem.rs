@@ -1,3 +1,4 @@
+use crate::alphabet::SymbolSet;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::BidirFmIndex;
 use crate::fm_index::half::FmHalf;
@@ -135,19 +136,76 @@ pub(crate) trait BidirSearch {
     /// `(sequence id, offset)` of each listed forward SA row, in order.
     fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)>;
 
+    /// Forward rows of `ivs` whose preceding symbol (`BWT_fwd[row]`) is not in `compat`, in
+    /// order: the left-maximal occurrences of a match whose left context `compat` matches.
+    fn left_maximal_rows(&self, ivs: &[BidirInterval], compat: SymbolSet) -> Vec<u32> {
+        let fwd = self.fwd_half();
+        ivs.iter()
+            .flat_map(|iv| iv.fwd_lo..iv.fwd_hi)
+            .filter(|&row| !compat.contains(fwd.bwt_rank().symbol_at(row)))
+            .collect()
+    }
+
+    /// Occurrences in `ivs` preceded by a symbol compatible with `c`: the coverage of
+    /// `extend_multi_left(ivs, c)`, whose results are disjoint.
+    fn left_extendable(&self, ivs: &[BidirInterval], c: u8) -> u32 {
+        coverage(&extend_multi_left(ivs, c, self.fwd_half()))
+    }
+
     /// SMEMs of `query`; see [`BidirFmIndex::find_smems`].
     fn smems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
-        self.smem_raws(query, min_len)
-            .into_iter()
-            .map(|raw| self.locate_raw(raw, locate))
-            .collect()
+        self.locate_all(self.smem_raws(query, min_len), locate)
     }
 
     /// MEMs of `query`; see [`BidirFmIndex::find_mems`].
     fn mems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
-        self.mem_raws(query, min_len)
-            .into_iter()
+        self.locate_all(self.mem_raws(query, min_len), locate)
+    }
+
+    /// Resolve every [`RawMem`] of one query, in order (see [`locate_raw`](Self::locate_raw)).
+    fn locate_all(&self, raws: Vec<RawMem>, locate: bool) -> Vec<Mem> {
+        raws.into_iter()
             .map(|raw| self.locate_raw(raw, locate))
+            .collect()
+    }
+
+    /// [`locate_all`](Self::locate_all) with one [`search_locate_row_list`] call for the
+    /// rows of every match, so a backend that interleaves LF walks gets the whole query's
+    /// rows at once instead of a few per match. Same results, same order.
+    ///
+    /// [`search_locate_row_list`]: Self::search_locate_row_list
+    fn locate_all_batched(&self, raws: Vec<RawMem>, locate: bool) -> Vec<Mem> {
+        if !locate {
+            return raws
+                .into_iter()
+                .map(|raw| self.locate_raw(raw, false))
+                .collect();
+        }
+        let mut rows: Vec<u32> = Vec::new();
+        let mut ends: Vec<usize> = Vec::with_capacity(raws.len());
+        for raw in &raws {
+            if let Some(c) = raw.left_ctx {
+                let compat = self.fwd_half().alphabet().compatible(c);
+                rows.extend(self.left_maximal_rows(&raw.ivs, compat));
+            } else {
+                rows.extend(raw.ivs.iter().flat_map(|iv| iv.fwd_lo..iv.fwd_hi));
+            }
+            ends.push(rows.len());
+        }
+        let mut located = self.search_locate_row_list(&rows).into_iter();
+        let mut start = 0;
+        raws.into_iter()
+            .zip(ends)
+            .map(|(raw, end)| {
+                let positions = located.by_ref().take(end - start).collect();
+                start = end;
+                Mem {
+                    query_start: raw.query_start,
+                    query_end: raw.query_end,
+                    match_count: raw.match_count,
+                    positions,
+                }
+            })
             .collect()
     }
 
@@ -248,6 +306,62 @@ pub(crate) trait BidirSearch {
         out
     }
 
+    /// [`collect_mem_candidates`](Self::collect_mem_candidates) with the work whose output
+    /// is always discarded skipped. Returns the same candidates in the same order.
+    ///
+    /// - `drop_set` only runs once `j - i >= min_len`: shorter drops are rejected by
+    ///   [`push_mem_candidate`](Self::push_mem_candidate) anyway.
+    /// - Start `i` stops at the first end `j` where every occurrence of `query[i..j)` is
+    ///   preceded by a symbol compatible with `query[i-1]`. Occurrences of `query[i-1..j)`
+    ///   at `p` are exactly the occurrences of `query[i..j)` at `p+1` with such a
+    ///   predecessor, so this holds iff `cov(i-1, j) == cov(i, j)`. It then holds for every
+    ///   longer end too (each occurrence of `query[i..j')` extends one of `query[i..j)` at
+    ///   the same place), so every later candidate of start `i` has `match_count == 0`.
+    ///   `seen[j]` holds `cov(i', j)` for the latest start `i' < i` that reached `j`, a lower
+    ///   bound on `cov(i-1, j)` (occurrence counts only shrink as a pattern grows left), so
+    ///   equality with it is equality with `cov(i-1, j)`.
+    fn collect_mem_candidates_pruned(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
+        let n = query.len();
+        let mut out: Vec<RawMem> = Vec::new();
+        // `seen[j]` = coverage of the latest start that reached end `j`; 0 = none yet.
+        let mut seen = vec![0u32; n + 1];
+        let mut next: Vec<BidirInterval> = Vec::new();
+
+        for i in 0..n {
+            let mut curr =
+                extend_multi_right(&[self.search_full_interval()], query[i], self.rev_half());
+            if curr.is_empty() {
+                continue;
+            }
+            let mut cov = coverage(&curr);
+            let mut j = i + 1;
+            loop {
+                if i > 0 && seen[j] == cov {
+                    break;
+                }
+                seen[j] = cov;
+                if j == n {
+                    self.push_mem_candidate(&mut out, query, i, n, curr, min_len);
+                    break;
+                }
+                extend_multi_right_into(&curr, query[j], self.rev_half(), &mut next);
+                let next_cov = coverage(&next);
+                if next_cov != cov && j - i >= min_len {
+                    let dropped = self.drop_set(&curr, query[j]);
+                    self.push_mem_candidate(&mut out, query, i, j, dropped, min_len);
+                }
+                if next.is_empty() {
+                    break;
+                }
+                std::mem::swap(&mut curr, &mut next);
+                cov = next_cov;
+                j += 1;
+            }
+        }
+
+        out
+    }
+
     /// The occurrences in `ivs` that canNOT be extended right by `c`.
     ///
     /// Extends by every symbol *incompatible* with `c`. The results are disjoint (distinct
@@ -291,7 +405,7 @@ pub(crate) trait BidirSearch {
         };
         let match_count = match left_ctx {
             None => coverage(&ivs),
-            Some(c) => coverage(&ivs) - coverage(&extend_multi_left(&ivs, c, self.fwd_half())),
+            Some(c) => coverage(&ivs) - self.left_extendable(&ivs, c),
         };
         if match_count == 0 {
             return;
@@ -394,6 +508,152 @@ pub(crate) trait BidirSearch {
         out
     }
 
+    /// [`collect_smem_candidates`](Self::collect_smem_candidates) with the backward phase
+    /// run on all of a pivot's prefixes in lockstep. Returns the same candidates in the same
+    /// order: only work whose result is always rejected is skipped.
+    ///
+    /// Let prefixes `e_0 < e_1 < …` be the recorded right-maximal ends of a pivot `p`.
+    /// Coverage does not drop strictly between `e_i` and `e_{i+1}`, so every occurrence of
+    /// `query[p..e_i+1)` extends to `query[p..e_{i+1})`, and the same holds for any start
+    /// `s <= p`: `|occ(query[s..e_i+1))| = |occ(query[s..e_{i+1}))|`. Hence:
+    ///
+    /// - **Right-maximality without extending.** `[s_i, e_i)` (`s_i` where prefix `i` stops
+    ///   extending left) is right-maximal iff prefix `i+1` is already empty at `s_i`, i.e.
+    ///   it stopped at a strictly larger start. The longest prefix is right-maximal by
+    ///   construction (its forward extension died, or it reached the query end).
+    /// - **Equal-coverage pruning.** Once prefix `i` and its next-longer neighbour have the
+    ///   same coverage, every occurrence of the shorter extends to the longer and stays so
+    ///   for every smaller start: the two stop together and prefix `i` can never be
+    ///   right-maximal. It is dropped, and its shorter neighbour now compares against the
+    ///   longer one (they stop at the same step, so its verdict is unchanged).
+    fn collect_smem_candidates_lockstep(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
+        let n = query.len();
+        let mut out: Vec<RawMem> = Vec::new();
+        let mut buf: Vec<BidirInterval> = Vec::new();
+        let mut pivot = 0;
+
+        while pivot < n {
+            let mut curr = extend_multi_right(
+                &[self.search_full_interval()],
+                query[pivot],
+                self.rev_half(),
+            );
+            if curr.is_empty() {
+                pivot += 1;
+                continue;
+            }
+            let mut cov = coverage(&curr);
+            let mut sets: Vec<Vec<BidirInterval>> = Vec::new();
+            let mut ends: Vec<usize> = Vec::new();
+            let mut j = pivot + 1;
+            loop {
+                if j == n {
+                    sets.push(curr);
+                    ends.push(n);
+                    break;
+                }
+                extend_multi_right_into(&curr, query[j], self.rev_half(), &mut buf);
+                let ncov = coverage(&buf);
+                if ncov != cov {
+                    sets.push(std::mem::replace(&mut curr, std::mem::take(&mut buf)));
+                    ends.push(j);
+                } else {
+                    std::mem::swap(&mut curr, &mut buf);
+                }
+                if curr.is_empty() {
+                    break;
+                }
+                cov = ncov;
+                j += 1;
+            }
+            let reach = *ends.last().unwrap_or(&(pivot + 1));
+            self.extend_prefixes_left(query, pivot, min_len, sets, &ends, &mut buf, &mut out);
+            pivot = reach.max(pivot + 1);
+        }
+
+        out
+    }
+
+    /// The backward phase of
+    /// [`collect_smem_candidates_lockstep`](Self::collect_smem_candidates_lockstep): extend
+    /// the prefixes `query[pivot..ends[i])` (interval sets `sets[i]`, ends ascending) left
+    /// together, and push each one that ends right-maximal and long enough, in prefix order.
+    #[allow(clippy::too_many_arguments)]
+    fn extend_prefixes_left(
+        &self,
+        query: &[u8],
+        pivot: usize,
+        min_len: usize,
+        mut sets: Vec<Vec<BidirInterval>>,
+        ends: &[usize],
+        buf: &mut Vec<BidirInterval>,
+        out: &mut Vec<RawMem>,
+    ) {
+        let m = sets.len();
+        // `chain`: prefixes still compared with a neighbour, ascending end; dropped ones
+        // leave it. `stop[i]`: start where prefix `i` stopped extending (`usize::MAX` while
+        // live). `covs[i]`: its current coverage.
+        let mut chain: Vec<usize> = (0..m).collect();
+        let mut stop = vec![usize::MAX; m];
+        let mut covs: Vec<u32> = sets.iter().map(|s| coverage(s)).collect();
+        let mut found: Vec<Option<RawMem>> = (0..m).map(|_| None).collect();
+        let mut s = pivot;
+        let mut live = m;
+        while live > 0 {
+            // Longest first, so a neighbour stopping at this same start is already marked.
+            for pos in (0..chain.len()).rev() {
+                let i = chain[pos];
+                if stop[i] != usize::MAX {
+                    continue;
+                }
+                if s > 0 {
+                    extend_multi_left_into(&sets[i], query[s - 1], self.fwd_half(), buf);
+                    if !buf.is_empty() {
+                        std::mem::swap(&mut sets[i], buf);
+                        covs[i] = coverage(&sets[i]);
+                        continue;
+                    }
+                }
+                stop[i] = s;
+                live -= 1;
+                let neighbour_stopped_earlier = chain
+                    .get(pos + 1)
+                    .is_none_or(|&longer| stop[longer] != usize::MAX && stop[longer] > s);
+                if neighbour_stopped_earlier && ends[i] - s >= min_len {
+                    let ivs = std::mem::take(&mut sets[i]);
+                    found[i] = Some(RawMem {
+                        query_start: s,
+                        query_end: ends[i],
+                        match_count: covs[i],
+                        ivs,
+                        // No occurrence extends further left.
+                        left_ctx: None,
+                    });
+                }
+            }
+            if live == 0 || s == 0 {
+                break;
+            }
+            // Drop live prefixes whose coverage equals their live longer neighbour's.
+            let mut pos = chain.len() - 1;
+            while pos > 0 {
+                let (shorter, longer) = (chain[pos - 1], chain[pos]);
+                if stop[shorter] == usize::MAX
+                    && stop[longer] == usize::MAX
+                    && covs[shorter] == covs[longer]
+                {
+                    chain.remove(pos - 1);
+                    sets[shorter] = Vec::new();
+                    stop[shorter] = s;
+                    live -= 1;
+                }
+                pos -= 1;
+            }
+            s -= 1;
+        }
+        out.extend(found.into_iter().flatten());
+    }
+
     /// Extend an interval set as far left as possible from left boundary `from`, returning the
     /// widened set and the resulting start position. Stops when the next left extension is
     /// empty (left-maximal) or the query start is reached.
@@ -426,14 +686,8 @@ pub(crate) trait BidirSearch {
         let positions = if !locate {
             Vec::new()
         } else if let Some(c) = raw.left_ctx {
-            let fwd = self.fwd_half();
-            let compat = fwd.alphabet().compatible(c);
-            let rows: Vec<u32> = raw
-                .ivs
-                .iter()
-                .flat_map(|iv| iv.fwd_lo..iv.fwd_hi)
-                .filter(|&row| !compat.contains(fwd.bwt_rank().symbol_at(row)))
-                .collect();
+            let compat = self.fwd_half().alphabet().compatible(c);
+            let rows = self.left_maximal_rows(&raw.ivs, compat);
             self.search_locate_row_list(&rows)
         } else {
             raw.ivs
@@ -516,6 +770,40 @@ fn extend_multi_right<H: FmHalf>(ivs: &[BidirInterval], c: u8, rev: &H) -> Vec<B
         }
     }
     result
+}
+
+/// [`extend_multi_right`] into a reused buffer (cleared first).
+fn extend_multi_right_into<H: FmHalf>(
+    ivs: &[BidirInterval],
+    c: u8,
+    rev: &H,
+    out: &mut Vec<BidirInterval>,
+) {
+    out.clear();
+    for base in rev.alphabet().compatible(c).iter() {
+        for iv in ivs {
+            if let Some(ext) = iv.extend_right(base, rev) {
+                out.push(ext);
+            }
+        }
+    }
+}
+
+/// [`extend_multi_left`] into a reused buffer (cleared first).
+fn extend_multi_left_into<H: FmHalf>(
+    ivs: &[BidirInterval],
+    c: u8,
+    fwd: &H,
+    out: &mut Vec<BidirInterval>,
+) {
+    out.clear();
+    for base in fwd.alphabet().compatible(c).iter() {
+        for iv in ivs {
+            if let Some(ext) = iv.extend_left(base, fwd) {
+                out.push(ext);
+            }
+        }
+    }
 }
 
 /// Extend each interval in `ivs` left by `c`, using the index's alphabet compatibility.

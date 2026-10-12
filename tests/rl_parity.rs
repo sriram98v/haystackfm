@@ -319,3 +319,55 @@ fn converting_a_reverse_half_terminates_without_extraction() {
         assert_eq!(fwd.sequence(SeqId::new(2)), Some(encode(&texts[2])));
     }
 }
+
+/// Benchmark-shaped parity: a strain collection (near-copies with SNPs and N runs, so
+/// n/r is small and many occurrences share contexts), 150 bp reads with substitutions and
+/// the occasional ambiguity code, `min_len` 19, both locate modes. Exercises the run-length
+/// fast paths (narrow intervals inside one run, wide ones past the scan limit) and the
+/// pruned MEM sweep at the depths the small proptest cases never reach.
+#[test]
+fn mems_match_on_a_strain_collection_with_long_reads() {
+    let mut rng = StdRng::seed_from_u64(0x57a1);
+    let base: Vec<u8> = (0..6000).map(|_| b"ACGT"[rng.random_range(0..4)]).collect();
+    let texts: Vec<String> = (0..12)
+        .map(|_| {
+            let mut s = base.clone();
+            for _ in 0..30 {
+                let at = rng.random_range(0..s.len());
+                s[at] = b"ACGT"[rng.random_range(0..4)];
+            }
+            if rng.random_bool(0.5) {
+                let at = rng.random_range(0..s.len() - 40);
+                s[at..at + rng.random_range(1..40)].fill(b'N');
+            }
+            String::from_utf8(s).unwrap()
+        })
+        .collect();
+    let refs = seqs(&texts);
+    let fm = BidirFmIndex::build_cpu(&refs, &fm_config(32, 0)).unwrap();
+    let rl = BidirRlFmIndex::from_bidir_fm_index(&fm);
+    for read_no in 0..60 {
+        let src = texts[rng.random_range(0..texts.len())].as_bytes();
+        let start = rng.random_range(0..src.len() - 150);
+        let mut read = src[start..start + 150].to_vec();
+        for _ in 0..rng.random_range(0..4) {
+            let at = rng.random_range(0..150);
+            read[at] = b"ACGTACGTN"[rng.random_range(0..9)];
+        }
+        let query = encode(std::str::from_utf8(&read).unwrap());
+        for locate in [false, true] {
+            for min_len in [5, 19] {
+                assert_eq!(
+                    normalized(fm.find_smems(&query, min_len, locate)),
+                    normalized(rl.find_smems(&query, min_len, locate)),
+                    "smems read {read_no} min_len={min_len} locate={locate}"
+                );
+                assert_eq!(
+                    normalized(fm.find_mems(&query, min_len, locate)),
+                    normalized(rl.find_mems(&query, min_len, locate)),
+                    "mems read {read_no} min_len={min_len} locate={locate}"
+                );
+            }
+        }
+    }
+}

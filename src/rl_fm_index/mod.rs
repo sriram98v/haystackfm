@@ -35,7 +35,7 @@ use crate::fm_index::lookup::LookupTable;
 use crate::fm_index::prepare::{in_build_pool, prepare_cpu, Prepared};
 use crate::fm_index::seq_id::{HeaderIndex, SeqId};
 use crate::fm_index::FmIndex;
-use crate::occ::{BwtRank, OccEncoding};
+use crate::occ::BwtRank;
 use crate::rlbwt::RlBwt;
 use crate::suffix_array::SampledSuffixArray;
 
@@ -50,8 +50,6 @@ pub struct RlFmIndexConfig {
     pub sa_sample_rate: u32,
     /// Worker threads for construction (native targets). Default: 1.
     pub build_threads: u16,
-    /// Lane encoding of the run-head rank table (see [`OccEncoding`]). Default: `Bitplane`.
-    pub head_encoding: OccEncoding,
     /// Depth of the k-mer lookup table that seeds backward search, as
     /// [`FmIndexConfig::lookup_depth`](crate::FmIndexConfig::lookup_depth). Its size does
     /// not shrink with the run count. `0` disables it. Default: 0.
@@ -71,7 +69,7 @@ impl RlFmIndexConfig {
             use_gpu: true,
             lookup_depth: self.lookup_depth,
             build_threads: self.build_threads,
-            occ_encoding: self.head_encoding,
+            occ_encoding: crate::occ::OccEncoding::Bitplane,
             build_lcp: false,
         }
     }
@@ -82,7 +80,6 @@ impl Default for RlFmIndexConfig {
         Self {
             sa_sample_rate: 32,
             build_threads: 1,
-            head_encoding: OccEncoding::Bitplane,
             lookup_depth: 0,
         }
     }
@@ -157,7 +154,7 @@ impl RlFmIndex {
         let bwt = build_bwt(&p.text, &p.sa);
         drop(p.sa);
         drop(p.text);
-        let bwt = RlBwt::from_bwt(&bwt, config.head_encoding);
+        let bwt = RlBwt::from_bwt(&bwt);
         let lookup = (config.lookup_depth > 0).then(|| {
             LookupTable::build(
                 config.lookup_depth,
@@ -216,7 +213,7 @@ impl RlFmIndex {
     }
 
     /// Convert an existing [`FmIndex`] without rebuilding its suffix array: its BWT is
-    /// run-length encoded (head table in the same [`OccEncoding`]) and its SA samples,
+    /// run-length encoded and its SA samples,
     /// metadata, alphabet and lookup table are copied. LCP and text are not carried over;
     /// [`sequence`](Self::sequence) extracts from the BWT instead.
     pub fn from_fm_index(fm: &FmIndex) -> Self {
@@ -238,7 +235,7 @@ impl RlFmIndex {
     fn convert_with_rows(fm: &FmIndex, seq_end_rows: Vec<u32>) -> Self {
         Self {
             c_array: fm.c_array.clone(),
-            bwt: RlBwt::from_occ(&fm.occ, fm.occ.encoding()),
+            bwt: RlBwt::from_occ(&fm.occ),
             sa_samples: Some(fm.sa_samples.clone()),
             text_len: fm.text_len,
             num_sequences: fm.num_sequences,
