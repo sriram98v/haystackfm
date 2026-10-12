@@ -8,6 +8,28 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-12
+
+### Changed
+- **Breaking (run-length files):** `RlBwt` is laid out as 64-byte blocks of 8 runs (run
+  starts, head nibbles and per-symbol rank samples on one cache line) behind a row→run
+  bucket directory: a rank, LF step or extension reads two lines instead of a four-deep
+  chain. Only the runs are serialized, as `"HRL\x02"` / `"HRB\x02"`; blocks and directory are
+  rebuilt and the runs validated at load. `"\x01"` run-length files no longer load.
+- `RlBwt::from_runs` / `from_bwt` / `from_occ` / `build_cpu` drop their `OccEncoding`
+  argument and `RlFmIndexConfig::head_encoding` is removed (there is no run-head table).
+- Run-length SMEM/MEM finding: MEM starts stop as soon as every occurrence is
+  left-extendable and skip drop sets below `min_len`; SMEM prefixes are extended left in
+  lockstep, reading right-maximality off the next-longer prefix and pruning equal-coverage
+  prefixes; locate is batched per query with interleaved, prefetched LF walks. Results are
+  identical to `BidirFmIndex`'s.
+
+### Added
+- `BwtRank::extend_ranks(c, lo, hi)`: one bidirectional extension step (both ranks and the
+  in-range count of smaller symbols). The default keeps the occ table's behaviour; `RlBwt`
+  walks the few runs of a narrow interval with one predecessor search and skips symbols
+  absent from the BWT.
+
 ## [0.6.2] - 2026-10-12
 
 ### Added
