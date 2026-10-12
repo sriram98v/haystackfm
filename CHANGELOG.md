@@ -8,6 +8,8 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-12
+
 ### Added
 - Run-length indexes for repetitive collections, the substrate for the move / b-move
   structures:
