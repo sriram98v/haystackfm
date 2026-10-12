@@ -8,6 +8,14 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-10-12
+
+### Added
+- `BidirRlFmIndex` derives a k-mer interval cache (every ACGT k-mer up to depth
+  `min(8, log4 n)`, built by the sweeps' own extension so results are identical) that seeds
+  the first, widest steps of each SMEM pivot and MEM start. Rebuilt at load, never
+  serialized.
+
 ## [0.6.6] - 2026-10-12
 
 ### Changed
