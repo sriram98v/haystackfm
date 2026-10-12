@@ -8,6 +8,15 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-10-12
+
+### Fixed
+- `RlFmIndex::from_bytes` rejects a zero-length first sequence and sequence end rows at or
+  past the text length (a crafted file could panic during load), and
+  `BidirRlFmIndex::from_bytes` rejects halves with different C arrays.
+- Run-length locate caps each LF walk at the sample rate (was the text length) and checks
+  the position addition for overflow.
+
 ## [0.6.4] - 2026-10-12
 
 ### Changed
