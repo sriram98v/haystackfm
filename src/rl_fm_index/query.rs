@@ -80,6 +80,9 @@ impl RlFmIndex {
             .sa_samples
             .as_ref()
             .expect("locate on a count-only RlFmIndex (built with sa_sample_rate = 0)");
+        // A sample sits within `sample_rate` text positions of every row (sequence starts
+        // are forced), so a longer walk means a corrupted sample set.
+        let max_steps = samples.sample_rate.clamp(1, self.text_len.max(1));
         out.clear();
         out.resize(rows.len(), 0);
         let mut cur: Vec<u32> = rows.to_vec();
@@ -100,15 +103,15 @@ impl RlFmIndex {
                 let idx = lane as usize;
                 let row = cur[idx];
                 if let Some(sa) = samples.get(row) {
-                    out[idx] = sa + steps[idx];
+                    out[idx] = sa
+                        .checked_add(steps[idx])
+                        .expect("SA sample out of range: corrupted index");
                 } else {
                     let (c, rank) = self.bwt.lf_step(row);
                     cur[idx] = self.c_array.get(c) + rank;
                     steps[idx] += 1;
-                    // Every LF cycle holds a sampled sequence start; only a corrupted
-                    // sample set could walk longer than the text.
                     assert!(
-                        steps[idx] <= self.text_len,
+                        steps[idx] < max_steps,
                         "SA samples never reached: corrupted index"
                     );
                     next_active.push(lane);

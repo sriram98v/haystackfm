@@ -119,6 +119,8 @@ impl RlFmIndex {
             || d.seq_headers.len() != d.num_sequences as usize
             || d.seq_boundaries.last().copied().unwrap_or(0) != d.text_len
             || d.seq_boundaries.windows(2).any(|w| w[0] >= w[1])
+            // Every sequence holds at least its sentinel.
+            || d.seq_boundaries.first() == Some(&0)
         {
             return Err(corrupt("sequence metadata disagrees with the text"));
         }
@@ -136,6 +138,7 @@ impl RlFmIndex {
                 let start = k.checked_sub(1).map_or(0, |j| d.seq_boundaries[j]);
                 let empty = d.seq_boundaries.get(k).is_some_and(|&end| end - start == 1);
                 if row >= d.num_sequences
+                    || row >= d.text_len
                     || std::mem::replace(&mut seen[row as usize], true)
                     || (bwt.symbol_at(row) == crate::alphabet::SENTINEL) != empty
                 {
@@ -193,7 +196,12 @@ impl BidirRlFmIndex {
         let (fwd, rev) = rest.split_at(fwd_len);
         let fwd = RlFmIndex::from_bytes(fwd)?;
         let rev = RlFmIndex::from_bytes(rev)?;
-        if fwd.text_len != rev.text_len || fwd.alphabet_fns != rev.alphabet_fns {
+        // Both halves index the same symbols: equal C arrays catch swapped or mixed halves,
+        // which would otherwise answer queries with silently wrong intervals.
+        if fwd.text_len != rev.text_len
+            || fwd.alphabet_fns != rev.alphabet_fns
+            || fwd.c_array != rev.c_array
+        {
             return Err(corrupt("forward and reverse halves do not match"));
         }
         Ok(Self { fwd, rev })
@@ -247,6 +255,32 @@ mod tests {
         let mut short = good.clone();
         short.seq_end_rows.pop();
         assert!(rejects(&short), "wrong count");
+
+        // A sequence without even its sentinel would let a row reach the BWT length.
+        let mut empty_first = good.clone();
+        empty_first.seq_boundaries[0] = 0;
+        assert!(rejects(&empty_first), "zero-length first sequence");
+    }
+
+    #[test]
+    fn bidir_rejects_halves_of_different_indexes() {
+        use crate::rl_fm_index::BidirRlFmIndex;
+        let build = |texts: &[&str]| {
+            let seqs: Vec<DnaSequence> = texts
+                .iter()
+                .map(|s| DnaSequence::from_str(s).unwrap())
+                .collect();
+            BidirRlFmIndex::build_cpu(&seqs, &RlFmIndexConfig::default()).unwrap()
+        };
+        let a = build(&["ACGTACGTAA", "CCGG"]);
+        let b = build(&["AAAAAAAAAA", "TTTT"]);
+        assert_eq!(a.fwd.text_len, b.fwd.text_len);
+        let mixed = BidirRlFmIndex {
+            fwd: a.fwd.clone(),
+            rev: b.rev.clone(),
+        };
+        assert!(BidirRlFmIndex::from_bytes(&a.to_bytes().unwrap()).is_ok());
+        assert!(BidirRlFmIndex::from_bytes(&mixed.to_bytes().unwrap()).is_err());
     }
 
     #[test]

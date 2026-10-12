@@ -1538,4 +1538,71 @@ mod tests {
             );
         }
     }
+
+    /// The pruned/lockstep sweeps against the original algorithms they replace, compared
+    /// as raw candidates (bounds, counts, intervals in order, left context) before any
+    /// filtering or locating: on `BidirFmIndex` (which runs the originals by default) and on
+    /// the run-length index's overrides. Strain-like texts with N runs and reads with
+    /// substitutions and ambiguity codes, so the early stop, the equal-coverage pruning and
+    /// the drop arithmetic all fire.
+    #[test]
+    fn rewritten_sweeps_match_the_original_candidates() {
+        use crate::rl_fm_index::BidirRlFmIndex;
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        type Key = (usize, usize, u32, Vec<BidirInterval>, Option<u8>);
+        fn keys(raws: Vec<RawMem>) -> Vec<Key> {
+            raws.into_iter()
+                .map(|r| (r.query_start, r.query_end, r.match_count, r.ivs, r.left_ctx))
+                .collect()
+        }
+
+        let mut rng = StdRng::seed_from_u64(0x0a11);
+        for round in 0..6 {
+            let base: Vec<u8> = (0..800).map(|_| b"ACGT"[rng.random_range(0..4)]).collect();
+            let texts: Vec<String> = (0..1 + round)
+                .map(|_| {
+                    let mut t = base.clone();
+                    for _ in 0..8 {
+                        let at = rng.random_range(0..t.len());
+                        t[at] = b"ACGTN"[rng.random_range(0..5)];
+                    }
+                    String::from_utf8(t).unwrap()
+                })
+                .collect();
+            let seqs: Vec<DnaSequence> = texts
+                .iter()
+                .map(|t| DnaSequence::from_str(t).unwrap())
+                .collect();
+            let config = FmIndexConfig {
+                sa_sample_rate: 4,
+                use_gpu: false,
+                ..Default::default()
+            };
+            let fm = BidirFmIndex::build_cpu(&seqs, &config).unwrap();
+            let rl = BidirRlFmIndex::from_bidir_fm_index(&fm);
+            for _ in 0..25 {
+                let src = texts[rng.random_range(0..texts.len())].as_bytes();
+                let start = rng.random_range(0..src.len() - 120);
+                let mut read = src[start..start + 120].to_vec();
+                for _ in 0..rng.random_range(0..4) {
+                    let at = rng.random_range(0..read.len());
+                    read[at] = b"ACGTACGTNR"[rng.random_range(0..10)];
+                }
+                let q = encode(std::str::from_utf8(&read).unwrap());
+                for min_len in [1, 6, 19] {
+                    let smems = keys(fm.collect_smem_candidates(&q, min_len));
+                    let mems = keys(fm.collect_mem_candidates(&q, min_len));
+                    assert_eq!(
+                        keys(fm.collect_smem_candidates_lockstep(&q, min_len)),
+                        smems
+                    );
+                    assert_eq!(keys(rl.collect_smem_candidates(&q, min_len)), smems);
+                    assert_eq!(keys(fm.collect_mem_candidates_pruned(&q, min_len)), mems);
+                    assert_eq!(keys(rl.collect_mem_candidates(&q, min_len)), mems);
+                }
+            }
+        }
+    }
 }
