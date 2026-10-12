@@ -374,7 +374,12 @@ pub(crate) trait BidirSearch {
                 }
                 seen[j] = cov;
                 if j == n {
-                    let match_count = if i == 0 { cov } else { cov - prev };
+                    // Underflow only on mismatched halves (a corrupted file): no candidate.
+                    let match_count = if i == 0 {
+                        cov
+                    } else {
+                        cov.saturating_sub(prev)
+                    };
                     if n - i >= min_len && match_count > 0 {
                         out.push(RawMem {
                             query_start: i,
@@ -390,8 +395,15 @@ pub(crate) trait BidirSearch {
                 let has_children = self.right_step(query, (i, j), &curr, &mut fanout, &mut next);
                 let next_cov = coverage(&next);
                 if next_cov != cov && j - i >= min_len {
-                    let left_extendable = if i == 0 { 0 } else { prev - seen[j + 1] };
-                    let match_count = (cov - next_cov) - left_extendable;
+                    let left_extendable = if i == 0 {
+                        Some(0)
+                    } else {
+                        prev.checked_sub(seen[j + 1])
+                    };
+                    // `None` only on mismatched halves (a corrupted file): no candidate.
+                    let match_count = left_extendable
+                        .and_then(|l| (cov - next_cov).checked_sub(l))
+                        .unwrap_or(0);
                     if match_count > 0 {
                         if !has_children {
                             fanout.right(&curr, rev);
@@ -833,14 +845,19 @@ fn extend_multi_right<H: FmHalf>(ivs: &[BidirInterval], c: u8, rev: &H) -> Vec<B
 /// Deepest k-mer a [`ShallowCache`] holds.
 const SHALLOW_MAX_DEPTH: u32 = 8;
 
+/// Most intervals a [`ShallowCache`] holds (~40 MB). Wildcard fan-out makes a level's size
+/// depend on the text (a reference dense in ambiguity codes multiplies the variants per
+/// k-mer), so the depth stops at the last level that fits.
+const SHALLOW_MAX_IVS: usize = 1 << 21;
+
 /// The interval set of every `{A,C,G,T}` k-mer up to a small depth, exactly as the sweeps'
 /// right extension from the full interval produces it (built by that same extension, so
 /// identical intervals in identical order, wildcard-compatible variants included). Every
 /// SMEM pivot and MEM start begins with these shallow steps, whose intervals are the widest
 /// and costliest to extend.
 ///
-/// Size is fixed by the depth (`Σ 4^d` sets, a few MB at depth 8), not by the text; the
-/// depth shrinks for small texts. Derived, never serialized.
+/// At most [`SHALLOW_MAX_IVS`] intervals: the depth shrinks for small texts and for texts
+/// whose wildcard variants would overflow that budget. Derived, never serialized.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ShallowCache {
     depth: usize,
@@ -874,8 +891,19 @@ impl ShallowCache {
                 fanout.right(parent, rev);
                 for c in CORE_CODES {
                     fanout.emit(rev.alphabet().compatible(c), &mut child);
+                    if cache.ivs.len() + child.len() > SHALLOW_MAX_IVS {
+                        // Over budget: keep only the complete levels before this one.
+                        let keep = cache.level_base[d];
+                        cache.ivs.truncate(cache.offs[keep] as usize);
+                        cache.offs.truncate(keep + 1);
+                        cache.level_base.truncate(d);
+                        cache.depth = d - 1;
+                        return cache;
+                    }
                     cache.ivs.extend_from_slice(&child);
-                    cache.offs.push(cache.ivs.len() as u32);
+                    cache
+                        .offs
+                        .push(u32::try_from(cache.ivs.len()).expect("bounded by the budget"));
                     children.push(child.clone());
                 }
             }
@@ -1716,6 +1744,48 @@ mod tests {
                     assert_eq!(keys(rl.collect_mem_candidates(&q, min_len)), mems);
                 }
             }
+        }
+    }
+
+    /// A reference dense in ambiguity codes multiplies every k-mer's wildcard variants:
+    /// the shallow cache must stop at its budget (shallower, never larger), and the sweeps
+    /// must still match the uncompressed index exactly.
+    #[test]
+    fn shallow_cache_respects_its_budget_on_iupac_dense_text() {
+        use crate::rl_fm_index::BidirRlFmIndex;
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(0xb0d9);
+        let text: String = (0..70_000)
+            .map(|_| ['A', 'C', 'G', 'T', 'N', 'B', 'D', 'H', 'V'][rng.random_range(0..9)])
+            .collect();
+        let seqs = vec![DnaSequence::from_str(&text).unwrap()];
+        let config = FmIndexConfig {
+            sa_sample_rate: 8,
+            use_gpu: false,
+            ..Default::default()
+        };
+        let fm = BidirFmIndex::build_cpu(&seqs, &config).unwrap();
+        let rl = BidirRlFmIndex::from_bidir_fm_index(&fm);
+        assert!(rl.shallow.ivs.len() <= SHALLOW_MAX_IVS);
+        assert!(
+            rl.shallow.depth < SHALLOW_MAX_DEPTH as usize,
+            "budget never hit"
+        );
+        // Few, short reads: every query position fans out over the wildcard variants.
+        for _ in 0..3 {
+            let at = rng.random_range(0..text.len() - 30);
+            let q = encode(&text[at..at + 30]);
+            let min_len = 8;
+            assert_eq!(
+                rl.find_smems(&q, min_len, true),
+                fm.find_smems(&q, min_len, true)
+            );
+            assert_eq!(
+                rl.find_mems(&q, min_len, true),
+                fm.find_mems(&q, min_len, true)
+            );
         }
     }
 }

@@ -217,7 +217,7 @@ Same SA intervals and IUPAC semantics as `FmIndex` / `BidirFmIndex`; the rank st
 ~9.6 bytes per BWT run instead of ~0.6 bytes per base. See `docs/src/guide/run-length.md`.
 
 ```rust
-let rlbwt = RlBwt::build_cpu(sequences, OccEncoding::Bitplane)?;  // or from_bwt / from_occ / from_runs
+let rlbwt = RlBwt::build_cpu(sequences)?;  // or from_bwt / from_occ / from_runs
 rlbwt.num_runs() / rlbwt.run_ratio()            // r, n/r
 
 let rl = RlFmIndex::build_cpu(sequences, &RlFmIndexConfig::default())?;
@@ -226,7 +226,7 @@ rl.count(pattern) / rl.locate(pattern)          // sampled-SA locate; sa_sample_
 
 let bidir = BidirRlFmIndex::build_cpu(sequences, &RlFmIndexConfig::default())?;
 bidir.extend_right(iv, code) / children_right(&iv) / count_right_in(&iv, set) / locate_interval(&iv)
-RlFmIndex::from_bytes(&rl.to_bytes()?)?         // "HRL\x01"; BidirRlFmIndex uses "HRB\x01"
+RlFmIndex::from_bytes(&rl.to_bytes()?)?         // "HRL\x02"; BidirRlFmIndex uses "HRB\x02"
 ```
 
 Not yet: lookup table, LCP contraction, SMEM/MEM, GPU/WASM.
@@ -365,7 +365,7 @@ GPU MEM/SMEM pipeline  (3 passes)
 |------|------|
 | `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic |
 | `src/move_table/`, `src/move_index/` | `MoveTable` (generic move structure, optional balancing), `MoveFmIndex` (r-index on move tables), `BMoveIndex` / `BMoveCursor` (b-move) |
-| `src/rlbwt/`, `src/rl_fm_index/` | `RlBwt` (run heads + run starts + per-symbol run-length sums), `RlFmIndex`, `BidirRlFmIndex`; `BwtRank` (`src/occ/rank.rs`) and `FmHalf` (`src/fm_index/half.rs`) let the cursor run on either rank backend |
+| `src/rlbwt/`, `src/rl_fm_index/` | `RlBwt` (cache-line run blocks: starts, heads, rank samples), `RlFmIndex`, `BidirRlFmIndex`; `BwtRank` (`src/occ/rank.rs`) and `FmHalf` (`src/fm_index/half.rs`) let the cursor run on either rank backend |
 | `src/fm_index/lookup.rs` | `LookupTable` — depth-k prefix table seeding `backward_search` in O(1) for core-symbol k-mers; each entry lists the exact interval and the wildcard variants the alphabet admits |
 | `src/alphabet.rs` | IUPAC encoding, `compatible_symbols`, `DnaSequence`, `Alphabet` trait (`IupacDna`, `ExactDna`) |
 | `src/gpu/` | WebGPU pipeline setup, buffer management, `GpuContext` |

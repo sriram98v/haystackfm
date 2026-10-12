@@ -51,13 +51,22 @@ impl RlFmIndex {
     }
 
     /// Locate the suffix-array rows `lo..hi`: `(sequence id, offset)` per row, in row order.
+    ///
+    /// # Panics
+    /// If `lo..hi` is not within `0..text_len` (or on a count-only index).
     pub fn locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
+        assert!(
+            lo <= hi && hi <= self.text_len,
+            "locate_rows: rows {lo}..{hi} outside 0..{}",
+            self.text_len
+        );
         let rows: Vec<u32> = (lo..hi).collect();
         self.locate_row_list(&rows)
     }
 
     /// Locate each listed suffix-array row: `(sequence id, offset)` per row, in order.
     pub(crate) fn locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
+        debug_assert!(rows.iter().all(|&row| row < self.text_len));
         let mut positions = Vec::with_capacity(rows.len());
         self.resolve_rows_batch(rows, &mut positions);
         positions
