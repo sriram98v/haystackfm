@@ -8,22 +8,9 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-10-12
+## [0.6.1] - 2026-10-12
 
 ### Added
-- Run-length indexes for repetitive collections, the substrate for the move / b-move
-  structures:
-  - `RlBwt` (`haystackfm::rlbwt`): a run-length BWT (run-head occ table, run starts with a
-    bucket directory, per-symbol run-length prefix sums; ~9.6 bytes per run). Produced by
-    `RlBwt::from_runs`, `from_bwt`, `from_occ` (convert an existing index) and `build_cpu`;
-    inspected by `runs`, `num_runs`, `run_ratio`, `get`, `to_bwt`, `heap_size_bytes`.
-  - `RlFmIndex` / `RlFmIndexConfig` (`haystackfm::rl_fm_index`): `count`, `locate`,
-    `locate_positions`, `locate_rows`, `map_position`, header accessors; locate LF-walks to
-    the sampled SA. `sa_sample_rate = 0` builds a count-only index. `From<&FmIndex>`.
-  - `BidirRlFmIndex`: the `BidirInterval` cursor (`extend_*`, `children_*`, `count_*_in`,
-    `count_wild_*`, `*_compatible`), `count`, `locate_interval`. `From<&BidirFmIndex>`.
-  - Serialization under their own magics, `"HRL\x01"` and `"HRB\x01"`, validated in full at
-    load (run structure, head table, C array, SA samples).
 - Move-structure indexes (`haystackfm::move_index`, `haystackfm::move_table`):
   - `MoveTable`: a permutation of `[0, n)` stored as 16-byte rows (start, image, image row,
     payload). `step` is one row read plus a short fast-forward. Optional Nishimoto–Tabei
@@ -41,6 +28,23 @@ Before 1.0, a breaking change bumps the **minor** version.
     - `BMoveCursor::interval()` gives the equivalent `BidirInterval`.
   - Serialization under `"HMV\x01"` / `"HBM\x01"`. Every table is validated on load.
   - `benches/move_query.rs` compares plain, run-length and move-structure indexes.
+
+## [0.6.0] - 2026-10-12
+
+### Added
+- Run-length indexes for repetitive collections, the substrate for the move / b-move
+  structures:
+  - `RlBwt` (`haystackfm::rlbwt`): a run-length BWT (run-head occ table, run starts with a
+    bucket directory, per-symbol run-length prefix sums; ~9.6 bytes per run). Produced by
+    `RlBwt::from_runs`, `from_bwt`, `from_occ` (convert an existing index) and `build_cpu`;
+    inspected by `runs`, `num_runs`, `run_ratio`, `get`, `to_bwt`, `heap_size_bytes`.
+  - `RlFmIndex` / `RlFmIndexConfig` (`haystackfm::rl_fm_index`): `count`, `locate`,
+    `locate_positions`, `locate_rows`, `map_position`, header accessors; locate LF-walks to
+    the sampled SA. `sa_sample_rate = 0` builds a count-only index. `From<&FmIndex>`.
+  - `BidirRlFmIndex`: the `BidirInterval` cursor (`extend_*`, `children_*`, `count_*_in`,
+    `count_wild_*`, `*_compatible`), `count`, `locate_interval`. `From<&BidirFmIndex>`.
+  - Serialization under their own magics, `"HRL\x01"` and `"HRB\x01"`, validated in full at
+    load (run structure, head table, C array, SA samples).
 - `BwtRank`: the rank/access trait the query code needs, implemented by `OccTable` and
   `RlBwt`. `FmHalf` (sealed): one half of a bidirectional index, as seen by the cursor.
 - `Bwt::runs`, `FmIndex::occ`, `OccTable::encoding`, `OccTable::heap_size_bytes`,
