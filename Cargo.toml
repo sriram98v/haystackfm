@@ -1,6 +1,6 @@
 [package]
 name = "haystackfm"
-version = "0.5.0"
+version = "0.6.8"
 edition = "2021"
 rust-version = "1.87"
 description = "GPU-accelerated FM-index construction for DNA sequences via WebGPU"
@@ -87,4 +87,12 @@ required-features = ["gpu"]
 
 [[bench]]
 name = "serialize"
+harness = false
+
+[[bench]]
+name = "rl_query"
+harness = false
+
+[[bench]]
+name = "move_query"
 harness = false

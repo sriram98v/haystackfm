@@ -19,7 +19,7 @@
 
 use crate::alphabet::{AlphabetFns, SymbolSet};
 use crate::c_array::CArray;
-use crate::occ::OccTable;
+use crate::occ::{BwtRank, OccTable};
 
 /// Upper bound on the wildcard-variant intervals stored per k-mer entry. Entries that would
 /// exceed it are marked incomplete and backward search falls back to a full search.
@@ -76,7 +76,7 @@ impl LookupTable {
         depth: u32,
         text_len: u32,
         c_array: &CArray,
-        occ: &OccTable,
+        occ: &impl BwtRank,
         fns: &AlphabetFns,
     ) -> Self {
         assert!(depth > 0, "lookup depth must be ≥ 1");
@@ -195,6 +195,43 @@ impl LookupTable {
         })
     }
 
+    /// Heap bytes of the CSR offsets and intervals.
+    pub fn heap_size_bytes(&self) -> usize {
+        self.offsets.len() * 4 + self.intervals.len() * 8
+    }
+
+    /// Check a deserialized table against the index it belongs to: CSR shape for the
+    /// stored depth, the alphabet's core symbols, and every interval inside the text. Shape
+    /// only, so lookups cannot panic; the intervals themselves are not re-derived from
+    /// the BWT.
+    pub(crate) fn validate(&self, text_len: u32, fns: &AlphabetFns) -> Result<(), String> {
+        if self.depth == 0 || self.core != fns.core() {
+            return Err("lookup table depth or core symbols disagree with the index".into());
+        }
+        let entries = (self.core.len() as u64)
+            .checked_pow(self.depth)
+            .filter(|&e| e < u32::MAX as u64)
+            .ok_or("lookup table depth overflows")? as usize;
+        let masked = |o: &u32| (o & OFFSET_MASK) as usize;
+        if self.offsets.len() != entries + 1
+            || self
+                .offsets
+                .windows(2)
+                .any(|w| masked(&w[0]) > masked(&w[1]))
+            || self.offsets.last().map(masked) != Some(self.intervals.len())
+        {
+            return Err("lookup table offsets are malformed".into());
+        }
+        if self
+            .intervals
+            .iter()
+            .any(|&(lo, hi)| lo > hi || hi > text_len)
+        {
+            return Err("lookup table interval outside the text".into());
+        }
+        Ok(())
+    }
+
     /// Number of stored intervals (exact slots and variants) across all entries.
     pub fn num_intervals(&self) -> usize {
         self.intervals.len()
@@ -268,6 +305,31 @@ impl LookupTableV1 {
             intervals,
         }
     }
+}
+
+/// Seed backward search for `pattern` from `lut`: `Some((intervals, rest))` when the
+/// table answers the last `depth` symbols, where `rest` is the number of leading pattern
+/// symbols still to search and an empty `intervals` means no match. `None` when there is
+/// no table, the pattern is shorter than its depth, or the entry is incomplete (dropped
+/// wildcard variants), so the caller searches the whole pattern.
+pub(crate) fn seed_backward_search(
+    lut: Option<&LookupTable>,
+    pattern: &[u8],
+) -> Option<(Vec<(u32, u32)>, usize)> {
+    let lut = lut?;
+    let depth = lut.depth as usize;
+    let rest = pattern.len().checked_sub(depth)?;
+    let hit = lut.get(&pattern[rest..]).filter(|hit| hit.complete)?;
+    let mut seed: Vec<(u32, u32)> = hit
+        .intervals
+        .iter()
+        .copied()
+        .filter(|&(lo, hi)| lo < hi)
+        .collect();
+    if seed.len() > 1 {
+        crate::fm_index::query::merge_intervals_inplace(&mut seed);
+    }
+    Some((seed, rest))
 }
 
 #[cfg(test)]

@@ -8,6 +8,152 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-10-12
+
+### Fixed
+- The run-length k-mer interval cache holds at most 2^21 intervals and stops at the last
+  depth that fits: on a reference dense in ambiguity codes (or a crafted file, since loading
+  builds the cache) it could otherwise allocate gigabytes.
+- `RlFmIndex::locate_rows` panics on rows outside the text instead of reading SA samples out
+  of bounds; corrupted bidirectional halves yield no MEM rather than a wrapped count.
+
+### Performance
+- On a 200 Mbp strain collection (n/r 4.3, 2000 × 150 bp reads, `min_len` 19, -O3) the
+  run-length bidirectional index finds SMEMs 1.6× and MEMs 5.3× faster than
+  `BidirFmIndex` (3.5× with locate), with a 2.42 B/base serialized index vs 3.66.
+
+## [0.6.7] - 2026-10-12
+
+### Added
+- `BidirRlFmIndex` derives a k-mer interval cache (every ACGT k-mer up to depth
+  `min(8, log4 n)`, built by the sweeps' own extension so results are identical) that seeds
+  the first, widest steps of each SMEM pivot and MEM start. Rebuilt at load, never
+  serialized.
+
+## [0.6.6] - 2026-10-12
+
+### Changed
+- Run-length blocks store the next block's first run start in-line, so run searches and
+  scans stay on one cache line; rank samples hold up to six symbols in one line.
+
+## [0.6.5] - 2026-10-12
+
+### Fixed
+- `RlFmIndex::from_bytes` rejects a zero-length first sequence and sequence end rows at or
+  past the text length (a crafted file could panic during load), and
+  `BidirRlFmIndex::from_bytes` rejects halves with different C arrays.
+- Run-length locate caps each LF walk at the sample rate (was the text length) and checks
+  the position addition for overflow.
+
+## [0.6.4] - 2026-10-12
+
+### Changed
+- Run-length `rank_all_pair` reads a narrow range's ranks off one predecessor search, so
+  `BidirInterval::children_*` cost one rank pass; the run-length sweeps take each step's
+  compatible extension and drop set from it.
+- The run-length MEM sweep computes each drop's left-maximal occurrence count from
+  coverages instead of left-extending, and builds a drop set only for accepted candidates.
+
+## [0.6.3] - 2026-10-12
+
+### Changed
+- **Breaking (run-length files):** `RlBwt` is laid out as 64-byte blocks of 8 runs (run
+  starts, head nibbles and per-symbol rank samples on one cache line) behind a row→run
+  bucket directory: a rank, LF step or extension reads two lines instead of a four-deep
+  chain. Only the runs are serialized, as `"HRL\x02"` / `"HRB\x02"`; blocks and directory are
+  rebuilt and the runs validated at load. `"\x01"` run-length files no longer load.
+- `RlBwt::from_runs` / `from_bwt` / `from_occ` / `build_cpu` drop their `OccEncoding`
+  argument and `RlFmIndexConfig::head_encoding` is removed (there is no run-head table).
+- Run-length SMEM/MEM finding: MEM starts stop as soon as every occurrence is
+  left-extendable and skip drop sets below `min_len`; SMEM prefixes are extended left in
+  lockstep, reading right-maximality off the next-longer prefix and pruning equal-coverage
+  prefixes; locate is batched per query with interleaved, prefetched LF walks. Results are
+  identical to `BidirFmIndex`'s.
+
+### Added
+- `BwtRank::extend_ranks(c, lo, hi)`: one bidirectional extension step (both ranks and the
+  in-range count of smaller symbols). The default keeps the occ table's behaviour; `RlBwt`
+  walks the few runs of a narrow interval with one predecessor search and skips symbols
+  absent from the BWT.
+
+## [0.6.2] - 2026-10-12
+
+### Added
+- `BidirRlFmIndex::find_smems` / `find_mems`: SMEM and MEM finding on the run-length index,
+  identical to `BidirFmIndex`'s. The sweep is shared through a crate-private trait over both
+  index types; per-occurrence left-maximality now reads the forward BWT instead of the
+  retained text.
+- `RlFmIndex::sequence` / `sequence_by_header`: extraction by LF-walk from one stored
+  sentinel row per sequence (the text is not retained).
+- k-mer lookup table on `RlFmIndex` (`RlFmIndexConfig::lookup_depth`) seeding backward
+  search; `BidirRlFmIndex::lookup_interval` / `lookup_depth`.
+- `RlFmIndex::locate_positions_many`; `BidirRlFmIndex::extend_left_fwd`, `locate_fwd`,
+  `count_interval`; `FwdInterval::extend_left` generic over `FmHalf`.
+- GPU `RlFmIndex::build` / `BidirRlFmIndex::build` (feature `gpu`): an uncompressed GPU
+  build, then converted.
+- `examples/size_compare.rs`: uncompressed vs run-length size, SMEM/MEM and extraction
+  parity and timings on a FASTA.
+
+### Changed
+- `"HRL\x01"` / `"HRB\x01"` files also carry the sequence end rows and the lookup table.
+
+## [0.6.1] - 2026-10-12
+
+### Added
+- Move-structure indexes (`haystackfm::move_index`, `haystackfm::move_table`):
+  - `MoveTable`: a permutation of `[0, n)` stored as 16-byte rows (start, image, image row,
+    payload). `step` is one row read plus a short fast-forward. Optional Nishimoto–Tabei
+    balancing bounds the fast-forward.
+  - `MoveFmIndex` / `MoveFmIndexConfig`: an r-index on move tables.
+    - `count`, `locate`, `locate_positions`.
+    - Locate runs in `O(r)` space. SA samples at run boundaries give a toehold during
+      search. Balanced `φ` / `φ⁻¹` move tables with permuted-LCP samples enumerate the
+      interval from a toehold anywhere inside it.
+    - `locate: false` builds a count-only index.
+  - `BMoveIndex` / `BMoveCursor` (b-move): forward and reverse LF move tables driving a
+    cursor that carries both intervals, their rows and a toehold.
+    - Operations: `extend_*`, `children_*`, `count_*_in`, `count_wild_*`, `*_compatible`,
+      `locate(&cursor)`, `count`.
+    - `BMoveCursor::interval()` gives the equivalent `BidirInterval`.
+  - Serialization under `"HMV\x01"` / `"HBM\x01"`. Every table is validated on load.
+  - `benches/move_query.rs` compares plain, run-length and move-structure indexes.
+
+## [0.6.0] - 2026-10-12
+
+### Added
+- Run-length indexes for repetitive collections, the substrate for the move / b-move
+  structures:
+  - `RlBwt` (`haystackfm::rlbwt`): a run-length BWT (run-head occ table, run starts with a
+    bucket directory, per-symbol run-length prefix sums; ~9.6 bytes per run). Produced by
+    `RlBwt::from_runs`, `from_bwt`, `from_occ` (convert an existing index) and `build_cpu`;
+    inspected by `runs`, `num_runs`, `run_ratio`, `get`, `to_bwt`, `heap_size_bytes`.
+  - `RlFmIndex` / `RlFmIndexConfig` (`haystackfm::rl_fm_index`): `count`, `locate`,
+    `locate_positions`, `locate_rows`, `map_position`, header accessors; locate LF-walks to
+    the sampled SA. `sa_sample_rate = 0` builds a count-only index. `From<&FmIndex>`.
+  - `BidirRlFmIndex`: the `BidirInterval` cursor (`extend_*`, `children_*`, `count_*_in`,
+    `count_wild_*`, `*_compatible`), `count`, `locate_interval`. `From<&BidirFmIndex>`.
+  - Serialization under their own magics, `"HRL\x01"` and `"HRB\x01"`, validated in full at
+    load (run structure, head table, C array, SA samples).
+- `BwtRank`: the rank/access trait the query code needs, implemented by `OccTable` and
+  `RlBwt`. `FmHalf` (sealed): one half of a bidirectional index, as seen by the cursor.
+- `Bwt::runs`, `FmIndex::occ`, `OccTable::encoding`, `OccTable::heap_size_bytes`,
+  `SampledSuffixArray::heap_size_bytes`.
+- `benches/rl_query.rs`: run-length vs plain `count` / `locate` / `extend_right` on seeded
+  random and repetitive inputs.
+
+### Changed
+- `BidirInterval::extend_*`, `children_*`, `count_*_in`, `count_wild_*` and
+  `extend_*_compatible` are generic over `FmHalf` (source-compatible: `&FmIndex` still
+  works). Contraction still takes `&FmIndex`.
+
+### Fixed
+- `FmIndex::from_bytes` (and so `BidirFmIndex::from_bytes`) now checks the occ table's and
+  SA samples' buffers against their declared lengths before returning. Their record reads
+  are unchecked, so a corrupted or hand-crafted blob could previously read out of bounds
+  on the first query; it is now a `DeserializeError`.
+- The `BidirInterval` docs had the extension formulae's directions swapped (right extension
+  runs on the reverse index).
+
 ## [0.5.0] - 2026-09-25
 
 ### Added
@@ -277,6 +423,7 @@ name, and its earlier history is not carried over here.
 - Licensed under Apache-2.0.
 
 [Unreleased]: https://github.com/sriram98v/haystackfm/commits/main
+[0.6.8]: https://crates.io/crates/haystackfm/0.6.8
 [0.5.0]: https://crates.io/crates/haystackfm/0.5.0
 [0.4.0]: https://crates.io/crates/haystackfm/0.4.0
 [0.1.0]: https://crates.io/crates/haystackfm/0.1.0

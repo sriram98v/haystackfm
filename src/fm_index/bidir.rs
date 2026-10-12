@@ -1,7 +1,9 @@
 use crate::alphabet::{SymbolSet, ALPHABET_SIZE};
 use crate::error::FmIndexError;
+use crate::fm_index::half::FmHalf;
 use crate::fm_index::FmIndex;
 use crate::lcp::LCP_CAP;
+use crate::occ::BwtRank;
 
 /// A paired SA interval for bidirectional FM-index search.
 ///
@@ -13,23 +15,28 @@ use crate::lcp::LCP_CAP;
 ///
 /// ## Extension formulae (Lam et al. 2009, Lemma 3)
 ///
-/// **Extend right by c** (P → Pc), using the forward Occ table:
+/// **Extend right by c** (P → Pc), using the reverse index (prepending c to P^R):
 /// ```text
-/// new_fwd_lo = C[c] + Occ_fwd(c, fwd_lo)
-/// new_fwd_hi = C[c] + Occ_fwd(c, fwd_hi)
+/// new_rev_lo = C_rev[c] + Occ_rev(c, rev_lo)
+/// new_rev_hi = C_rev[c] + Occ_rev(c, rev_hi)
+/// offset     = Σ_{b < c} (Occ_rev(b, rev_hi) − Occ_rev(b, rev_lo))
+/// new_fwd_lo = fwd_lo + offset
+/// new_fwd_hi = fwd_lo + offset + (new_rev_hi − new_rev_lo)
+/// ```
+///
+/// **Extend left by c** (P → cP), using the forward index (a backward-search step):
+/// ```text
+/// new_fwd_lo = C_fwd[c] + Occ_fwd(c, fwd_lo)
+/// new_fwd_hi = C_fwd[c] + Occ_fwd(c, fwd_hi)
 /// offset     = Σ_{b < c} (Occ_fwd(b, fwd_hi) − Occ_fwd(b, fwd_lo))
 /// new_rev_lo = rev_lo + offset
 /// new_rev_hi = rev_lo + offset + (new_fwd_hi − new_fwd_lo)
 /// ```
 ///
-/// **Extend left by c** (P → cP), using the reverse Occ table:
-/// ```text
-/// new_rev_lo = C[c] + Occ_rev(c, rev_lo)
-/// new_rev_hi = C[c] + Occ_rev(c, rev_hi)
-/// offset     = Σ_{b < c} (Occ_rev(b, rev_hi) − Occ_rev(b, rev_lo))
-/// new_fwd_lo = fwd_lo + offset
-/// new_fwd_hi = fwd_lo + offset + (new_rev_hi − new_rev_lo)
-/// ```
+/// The extension, class-count, children and fan-out methods are generic over [`FmHalf`],
+/// so they run on both [`BidirFmIndex`](crate::BidirFmIndex) and
+/// [`BidirRlFmIndex`](crate::rl_fm_index::BidirRlFmIndex) halves. Contraction needs the
+/// LCP array and `select`, so it takes a concrete [`FmIndex`].
 ///
 /// The `offset` in each case counts how many occurrences of characters
 /// lexicographically smaller than c appear in the current interval, thereby
@@ -98,14 +105,13 @@ impl BidirInterval {
     ///   appear in the current reverse interval.
     ///
     /// Returns `None` if Pc does not occur in the text.
-    pub fn extend_right(&self, c: u8, rev: &FmIndex) -> Option<Self> {
-        let c_val = rev.c_array.get(c);
+    pub fn extend_right<H: FmHalf>(&self, c: u8, rev: &H) -> Option<Self> {
+        let c_val = rev.c_array().get(c);
         // One block-record touch per border yields both the LF step (rank of `c`) and the
         // count of characters b < c in the current reverse interval; that count is the
         // offset locating the surviving block inside the forward interval. `None` means `c`
         // never occurs in the text at all.
-        let ((r_lo, below_lo), (r_hi, below_hi)) =
-            rev.occ.rank_with_below_pair(c, self.rev_lo, self.rev_hi)?;
+        let (r_lo, r_hi, offset) = rev.bwt_rank().extend_ranks(c, self.rev_lo, self.rev_hi)?;
         let new_rev_lo = c_val + r_lo;
         let new_rev_hi = c_val + r_hi;
 
@@ -113,7 +119,6 @@ impl BidirInterval {
             return None;
         }
 
-        let offset = below_hi - below_lo;
         let new_size = new_rev_hi - new_rev_lo;
 
         Some(Self {
@@ -135,10 +140,9 @@ impl BidirInterval {
     ///   appear in the current forward interval.
     ///
     /// Returns `None` if cP does not occur in the text.
-    pub fn extend_left(&self, c: u8, fwd: &FmIndex) -> Option<Self> {
-        let c_val = fwd.c_array.get(c);
-        let ((r_lo, below_lo), (r_hi, below_hi)) =
-            fwd.occ.rank_with_below_pair(c, self.fwd_lo, self.fwd_hi)?;
+    pub fn extend_left<H: FmHalf>(&self, c: u8, fwd: &H) -> Option<Self> {
+        let c_val = fwd.c_array().get(c);
+        let (r_lo, r_hi, offset) = fwd.bwt_rank().extend_ranks(c, self.fwd_lo, self.fwd_hi)?;
         let new_fwd_lo = c_val + r_lo;
         let new_fwd_hi = c_val + r_hi;
 
@@ -146,7 +150,6 @@ impl BidirInterval {
             return None;
         }
 
-        let offset = below_hi - below_lo;
         let new_size = new_fwd_hi - new_fwd_lo;
 
         Some(Self {
@@ -258,11 +261,11 @@ impl BidirInterval {
     /// half even though it carries no text.
     ///
     /// Equals `Σ_{x ∈ set} extend_right(x).size()`, without materialising the children.
-    pub fn count_right_in(&self, set: SymbolSet, rev: &FmIndex) -> u32 {
+    pub fn count_right_in<H: FmHalf>(&self, set: SymbolSet, rev: &H) -> u32 {
         if self.is_empty() {
             return 0;
         }
-        let (r_lo, r_hi) = rev.occ.rank_set_pair(set, self.rev_lo, self.rev_hi);
+        let (r_lo, r_hi) = rev.bwt_rank().rank_set_pair(set, self.rev_lo, self.rev_hi);
         r_hi - r_lo
     }
 
@@ -271,11 +274,11 @@ impl BidirInterval {
     ///
     /// Asked of the **forward** index (`BWT_fwd[fwd_lo..fwd_hi)`). Same cost model as
     /// [`count_right_in`](Self::count_right_in).
-    pub fn count_left_in(&self, set: SymbolSet, fwd: &FmIndex) -> u32 {
+    pub fn count_left_in<H: FmHalf>(&self, set: SymbolSet, fwd: &H) -> u32 {
         if self.is_empty() {
             return 0;
         }
-        let (r_lo, r_hi) = fwd.occ.rank_set_pair(set, self.fwd_lo, self.fwd_hi);
+        let (r_lo, r_hi) = fwd.bwt_rank().rank_set_pair(set, self.fwd_lo, self.fwd_hi);
         r_hi - r_lo
     }
 
@@ -285,13 +288,13 @@ impl BidirInterval {
     ///
     /// O(1) rank work independent of how many wildcard codes exist: a cursor walk can ask
     /// this at every step and only fan out over wildcard codes when it is non-zero.
-    pub fn count_wild_right(&self, rev: &FmIndex) -> u32 {
+    pub fn count_wild_right<H: FmHalf>(&self, rev: &H) -> u32 {
         self.count_right_in(SymbolSet::WILDCARDS, rev)
     }
 
     /// Number of occurrences preceded by an ambiguity code (codes 5..=15) in the reference.
     /// See [`count_wild_right`](Self::count_wild_right).
-    pub fn count_wild_left(&self, fwd: &FmIndex) -> u32 {
+    pub fn count_wild_left<H: FmHalf>(&self, fwd: &H) -> u32 {
         self.count_left_in(SymbolSet::WILDCARDS, fwd)
     }
 
@@ -305,17 +308,17 @@ impl BidirInterval {
     /// `extend_right` rather than sixteen. Slot 0 is the sentinel child — occurrences of P
     /// sitting at the very end of a reference; it is a valid interval but extending it
     /// further would cross a sequence boundary. Child sizes sum to `self.size()`.
-    pub fn children_right(&self, rev: &FmIndex) -> [Option<Self>; ALPHABET_SIZE] {
+    pub fn children_right<H: FmHalf>(&self, rev: &H) -> [Option<Self>; ALPHABET_SIZE] {
         let mut out = [None; ALPHABET_SIZE];
         if self.is_empty() {
             return out;
         }
-        let (lo, hi) = rev.occ.rank_all_pair(self.rev_lo, self.rev_hi);
+        let (lo, hi) = rev.bwt_rank().rank_all_pair(self.rev_lo, self.rev_hi);
         let mut offset = 0u32;
         for c in 0..ALPHABET_SIZE {
             let n = hi[c] - lo[c];
             if n > 0 {
-                let c_val = rev.c_array.get(c as u8);
+                let c_val = rev.c_array().get(c as u8);
                 out[c] = Some(Self {
                     fwd_lo: self.fwd_lo + offset,
                     fwd_hi: self.fwd_lo + offset + n,
@@ -332,17 +335,17 @@ impl BidirInterval {
     /// The child interval for every code at once: `children_left(fwd)[c] ==
     /// extend_left(c, fwd)` for all `c`. Slot 0 is the sentinel child — occurrences of P
     /// at the very start of a reference. See [`children_right`](Self::children_right).
-    pub fn children_left(&self, fwd: &FmIndex) -> [Option<Self>; ALPHABET_SIZE] {
+    pub fn children_left<H: FmHalf>(&self, fwd: &H) -> [Option<Self>; ALPHABET_SIZE] {
         let mut out = [None; ALPHABET_SIZE];
         if self.is_empty() {
             return out;
         }
-        let (lo, hi) = fwd.occ.rank_all_pair(self.fwd_lo, self.fwd_hi);
+        let (lo, hi) = fwd.bwt_rank().rank_all_pair(self.fwd_lo, self.fwd_hi);
         let mut offset = 0u32;
         for c in 0..ALPHABET_SIZE {
             let n = hi[c] - lo[c];
             if n > 0 {
-                let c_val = fwd.c_array.get(c as u8);
+                let c_val = fwd.c_array().get(c as u8);
                 out[c] = Some(Self {
                     fwd_lo: c_val + lo[c],
                     fwd_hi: c_val + hi[c],
@@ -365,13 +368,13 @@ impl BidirInterval {
     /// Costs one `extend_right` per compatible code; to first ask cheaply whether any such
     /// child exists, use [`count_right_in`](Self::count_right_in) with the same set
     /// (`rev.alphabet_fns.compatible_set(q)`).
-    pub fn extend_right_compatible<'a>(
+    pub fn extend_right_compatible<'a, H: FmHalf>(
         &self,
         q: u8,
-        rev: &'a FmIndex,
+        rev: &'a H,
     ) -> impl Iterator<Item = Self> + 'a {
         let iv = *self;
-        rev.alphabet_fns
+        rev.alphabet()
             .compatible(q)
             .iter()
             .filter_map(move |c| iv.extend_right(c, rev))
@@ -379,13 +382,13 @@ impl BidirInterval {
 
     /// Extend left by every reference code the query code `q` matches under the index's
     /// alphabet. See [`extend_right_compatible`](Self::extend_right_compatible).
-    pub fn extend_left_compatible<'a>(
+    pub fn extend_left_compatible<'a, H: FmHalf>(
         &self,
         q: u8,
-        fwd: &'a FmIndex,
+        fwd: &'a H,
     ) -> impl Iterator<Item = Self> + 'a {
         let iv = *self;
-        fwd.alphabet_fns
+        fwd.alphabet()
             .compatible(q)
             .iter()
             .filter_map(move |c| iv.extend_left(c, fwd))

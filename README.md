@@ -210,6 +210,44 @@ bidir.find_smems_gpu(queries, min_len, ref_boundaries, max_hits_per_mem).await? 
 bidir.find_mems_gpu(queries,  min_len, ref_boundaries, max_hits_per_mem).await?  // Vec<Vec<MemHit>>
 ```
 
+### `RlFmIndex` / `BidirRlFmIndex` (run-length)
+
+For repetitive collections (many genomes of one species), where the BWT has few runs `r ≪ n`.
+Same SA intervals and IUPAC semantics as `FmIndex` / `BidirFmIndex`; the rank structure costs
+~9.6 bytes per BWT run instead of ~0.6 bytes per base. See `docs/src/guide/run-length.md`.
+
+```rust
+let rlbwt = RlBwt::build_cpu(sequences)?;  // or from_bwt / from_occ / from_runs
+rlbwt.num_runs() / rlbwt.run_ratio()            // r, n/r
+
+let rl = RlFmIndex::build_cpu(sequences, &RlFmIndexConfig::default())?;
+let rl = RlFmIndex::from(&fm_index);            // convert without rebuilding the SA
+rl.count(pattern) / rl.locate(pattern)          // sampled-SA locate; sa_sample_rate = 0 → count-only
+
+let bidir = BidirRlFmIndex::build_cpu(sequences, &RlFmIndexConfig::default())?;
+bidir.extend_right(iv, code) / children_right(&iv) / count_right_in(&iv, set) / locate_interval(&iv)
+RlFmIndex::from_bytes(&rl.to_bytes()?)?         // "HRL\x02"; BidirRlFmIndex uses "HRB\x02"
+```
+
+Not yet: lookup table, LCP contraction, SMEM/MEM, GPU/WASM.
+
+### `MoveFmIndex` / `BMoveIndex` (move structure, b-move)
+
+LF as a move-table step, and r-index locate in `O(r)` space: toeholds plus `φ`/`φ⁻¹` move
+tables with permuted-LCP samples. On a 40-genome collection, locate is ~6× faster than
+`FmIndex`. See `docs/src/guide/move.md`.
+
+```rust
+let mv = MoveFmIndex::build_cpu(sequences, &MoveFmIndexConfig::default())?;  // locate: false → count-only
+mv.count(pattern) / mv.locate(pattern)
+
+let bm = BMoveIndex::build_cpu(sequences, &MoveFmIndexConfig::default())?;
+let cur = bm.extend_right(&bm.full_cursor(), code)?;   // BMoveCursor: intervals + rows + toehold
+bm.extend_left(&cur, code) / children_right(&cur) / count_right_in(&cur, set) / locate(&cur)
+cur.interval()                                  // → BidirInterval (identical to BidirFmIndex's)
+MoveFmIndex::from_bytes(&mv.to_bytes()?)?       // "HMV\x01"; BMoveIndex uses "HBM\x01"
+```
+
 ### `SeqId`
 
 ```rust
@@ -326,6 +364,8 @@ GPU MEM/SMEM pipeline  (3 passes)
 | Path | Role |
 |------|------|
 | `src/fm_index/` | `FmIndex`, `BidirFmIndex`, backward search, SMEM/MEM logic |
+| `src/move_table/`, `src/move_index/` | `MoveTable` (generic move structure, optional balancing), `MoveFmIndex` (r-index on move tables), `BMoveIndex` / `BMoveCursor` (b-move) |
+| `src/rlbwt/`, `src/rl_fm_index/` | `RlBwt` (cache-line run blocks: starts, heads, rank samples), `RlFmIndex`, `BidirRlFmIndex`; `BwtRank` (`src/occ/rank.rs`) and `FmHalf` (`src/fm_index/half.rs`) let the cursor run on either rank backend |
 | `src/fm_index/lookup.rs` | `LookupTable` — depth-k prefix table seeding `backward_search` in O(1) for core-symbol k-mers; each entry lists the exact interval and the wildcard variants the alphabet admits |
 | `src/alphabet.rs` | IUPAC encoding, `compatible_symbols`, `DnaSequence`, `Alphabet` trait (`IupacDna`, `ExactDna`) |
 | `src/gpu/` | WebGPU pipeline setup, buffer management, `GpuContext` |

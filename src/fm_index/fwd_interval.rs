@@ -4,9 +4,11 @@
 
 use crate::error::FmIndexError;
 use crate::fm_index::bidir::BidirInterval;
+use crate::fm_index::half::FmHalf;
 use crate::fm_index::seq_id::SeqId;
 use crate::fm_index::FmIndex;
 use crate::lcp::LCP_CAP;
+use crate::occ::BwtRank;
 
 /// A range of suffix-array rows of the forward index, all sharing a `len`-symbol prefix.
 ///
@@ -48,12 +50,12 @@ impl FwdInterval {
     /// LF step: the rows of `c·X` for every suffix `X` in this range (P → cP on the
     /// forward index only). Two rank queries; `None` if no suffix in the range is preceded
     /// by `c`. Valid on any row range, not just full intervals, since rank is monotone.
-    pub fn extend_left(&self, c: u8, fwd: &FmIndex) -> Option<Self> {
+    pub fn extend_left<H: FmHalf>(&self, c: u8, fwd: &H) -> Option<Self> {
         if self.is_empty() {
             return None;
         }
-        let c_val = fwd.c_array.get(c);
-        let (r_lo, r_hi) = fwd.occ.rank_pair(c, self.lo, self.hi);
+        let c_val = fwd.c_array().get(c);
+        let (r_lo, r_hi) = fwd.bwt_rank().rank_pair(c, self.lo, self.hi);
         if r_lo >= r_hi {
             return None;
         }

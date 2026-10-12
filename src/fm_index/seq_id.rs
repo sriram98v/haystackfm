@@ -62,6 +62,21 @@ impl From<SeqId> for usize {
     }
 }
 
+/// Map an absolute offset in the concatenated text to `(sequence id, offset within it)`,
+/// given each sequence's end (its trailing sentinel included). `None` past the text end.
+pub(crate) fn map_text_position(seq_boundaries: &[u32], text_pos: u32) -> Option<(SeqId, u32)> {
+    let seq_idx = seq_boundaries.partition_point(|&boundary| boundary <= text_pos);
+    if seq_idx >= seq_boundaries.len() {
+        return None;
+    }
+    let seq_start = if seq_idx == 0 {
+        0
+    } else {
+        seq_boundaries[seq_idx - 1]
+    };
+    Some((SeqId::new(seq_idx as u32), text_pos - seq_start))
+}
+
 /// O(1) header -> [`SeqId`] lookup, built alongside the index's header list.
 ///
 /// Not serialized: it is a pure function of `seq_headers`, so it is rebuilt on

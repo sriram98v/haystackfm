@@ -89,27 +89,23 @@ impl FmIndex {
         }
         let (deserialized, old_lookup) = decode(data)?;
         let alphabet_fns = deserialized.alphabet;
-        if alphabet_fns.tag() < 128 {
-            match alphabet_fns_from_tag(alphabet_fns.tag()) {
-                Some(builtin) if builtin == alphabet_fns => {}
-                Some(_) => {
-                    return Err(FmIndexError::DeserializeError(format!(
-                        "serialized FM-index carries built-in alphabet tag {} with tables \
-                         that do not match that alphabet",
-                        alphabet_fns.tag()
-                    )));
-                }
-                None => {
-                    return Err(FmIndexError::DeserializeError(format!(
-                        "reserved alphabet tag {} in serialized FM-index (custom alphabets \
-                         use tags >= 128)",
-                        alphabet_fns.tag()
-                    )));
-                }
-            }
-        }
+        check_stored_alphabet(&alphabet_fns)?;
         let header_index = HeaderIndex::build(&deserialized.seq_headers)?;
         let mut occ = deserialized.occ;
+        // Rank and SA-sample reads are unchecked: a blob whose buffers disagree with its
+        // lengths must be rejected here, not discovered as an out-of-bounds read later.
+        let invalid =
+            |e: String| FmIndexError::DeserializeError(format!("serialized FM-index: {e}"));
+        occ.validate_structure().map_err(invalid)?;
+        if occ.text_len != deserialized.text_len {
+            return Err(invalid(
+                "occ table length differs from the text length".into(),
+            ));
+        }
+        deserialized
+            .sa_samples
+            .validate(deserialized.text_len)
+            .map_err(invalid)?;
         occ.rebuild_derived();
         // A version-1/2 table is upgraded only once the occ table can answer ranks again.
         let lookup = match (deserialized.lookup, old_lookup) {
@@ -208,6 +204,27 @@ fn decode(data: &[u8]) -> Result<(OwnedSerializableFmIndex, Option<LookupTableV1
             },
             legacy.lookup,
         ))
+    }
+}
+
+/// A stored alphabet with a built-in tag (`< 128`) must carry exactly that built-in's
+/// tables; tags without a built-in below 128 are reserved.
+pub(crate) fn check_stored_alphabet(alphabet_fns: &AlphabetFns) -> Result<(), FmIndexError> {
+    if alphabet_fns.tag() >= 128 {
+        return Ok(());
+    }
+    match alphabet_fns_from_tag(alphabet_fns.tag()) {
+        Some(builtin) if builtin == *alphabet_fns => Ok(()),
+        Some(_) => Err(FmIndexError::DeserializeError(format!(
+            "serialized FM-index carries built-in alphabet tag {} with tables \
+             that do not match that alphabet",
+            alphabet_fns.tag()
+        ))),
+        None => Err(FmIndexError::DeserializeError(format!(
+            "reserved alphabet tag {} in serialized FM-index (custom alphabets \
+             use tags >= 128)",
+            alphabet_fns.tag()
+        ))),
     }
 }
 
