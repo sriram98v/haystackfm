@@ -8,6 +8,20 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-10-12
+
+### Fixed
+- The run-length k-mer interval cache holds at most 2^21 intervals and stops at the last
+  depth that fits: on a reference dense in ambiguity codes (or a crafted file, since loading
+  builds the cache) it could otherwise allocate gigabytes.
+- `RlFmIndex::locate_rows` panics on rows outside the text instead of reading SA samples out
+  of bounds; corrupted bidirectional halves yield no MEM rather than a wrapped count.
+
+### Performance
+- On a 200 Mbp strain collection (n/r 4.3, 2000 × 150 bp reads, `min_len` 19, -O3) the
+  run-length bidirectional index finds SMEMs 1.6× and MEMs 5.3× faster than
+  `BidirFmIndex` (3.5× with locate), with a 2.42 B/base serialized index vs 3.66.
+
 ## [0.6.7] - 2026-10-12
 
 ### Added
@@ -409,6 +423,7 @@ name, and its earlier history is not carried over here.
 - Licensed under Apache-2.0.
 
 [Unreleased]: https://github.com/sriram98v/haystackfm/commits/main
+[0.6.8]: https://crates.io/crates/haystackfm/0.6.8
 [0.5.0]: https://crates.io/crates/haystackfm/0.5.0
 [0.4.0]: https://crates.io/crates/haystackfm/0.4.0
 [0.1.0]: https://crates.io/crates/haystackfm/0.1.0
