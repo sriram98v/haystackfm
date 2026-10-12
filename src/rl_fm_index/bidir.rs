@@ -338,13 +338,6 @@ impl BidirSearch for BidirRlFmIndex {
         self.collect_mem_candidates_pruned(query, min_len)
     }
 
-    fn left_extendable(&self, ivs: &[BidirInterval], c: u8) -> u32 {
-        let set = self.fwd.alphabet_fns.compatible(c);
-        ivs.iter()
-            .map(|iv| self.fwd.bwt.count_set_in(set, iv.fwd_lo, iv.fwd_hi))
-            .sum()
-    }
-
     fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
         self.fwd.locate_row_list(rows)
     }

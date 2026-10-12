@@ -500,29 +500,6 @@ impl RlBwt {
         out
     }
 
-    /// Occurrences of members of `set` in `bwt[lo..hi)`. A narrow range is summed off its
-    /// runs; a wide one takes two class ranks.
-    pub(crate) fn count_set_in(&self, set: SymbolSet, lo: u32, hi: u32) -> u32 {
-        let set = set & self.present;
-        if set.is_empty() || lo >= hi {
-            return 0;
-        }
-        let k_lo = self.run_of(lo);
-        let mut k = k_lo;
-        let mut count = 0u32;
-        while self.start(k) < hi {
-            if k - k_lo == MAX_SCAN_RUNS {
-                let k_hi = self.run_of(hi);
-                return self.rank_set_at(set, hi, k_hi) - self.rank_set_at(set, lo, k_lo);
-            }
-            if set.contains(self.head(k)) {
-                count += self.start(k + 1).min(hi) - self.start(k).max(lo);
-            }
-            k += 1;
-        }
-        count
-    }
-
     /// [`BwtRank::extend_ranks`] for an interval spanning more than [`MAX_SCAN_RUNS`] runs,
     /// given `k_lo = run_of(lo)`: two ranks and two class ranks.
     #[cold]
@@ -637,10 +614,20 @@ impl BwtRank for RlBwt {
     }
 
     fn rank_all_pair(&self, lo: u32, hi: u32) -> ([u32; ALPHABET_SIZE], [u32; ALPHABET_SIZE]) {
-        (
-            self.rank_all_at(lo, self.run_of(lo)),
-            self.rank_all_at(hi, self.run_of(hi)),
-        )
+        let k_lo = self.run_of(lo);
+        let at_lo = self.rank_all_at(lo, k_lo);
+        // A narrow range: `hi`'s ranks are `lo`'s plus the per-symbol overlap of the few runs
+        // in between, read off the same blocks (the fused children step of a sweep).
+        let mut at_hi = at_lo;
+        let mut k = k_lo;
+        while self.start(k) < hi {
+            if k - k_lo == MAX_SCAN_RUNS {
+                return (at_lo, self.rank_all_at(hi, self.run_of(hi)));
+            }
+            at_hi[self.head(k) as usize] += self.start(k + 1).min(hi) - self.start(k).max(lo);
+            k += 1;
+        }
+        (at_lo, at_hi)
     }
 
     #[inline]

@@ -4,7 +4,7 @@
 
 use haystackfm::alphabet::encode_char;
 use haystackfm::{
-    BidirFmIndex, BidirRlFmIndex, DnaSequence, FmIndex, FmIndexConfig, FwdInterval, Mem, RlFmIndex,
+    BidirFmIndex, BidirRlFmIndex, DnaSequence, FmIndex, FmIndexConfig, FwdInterval, RlFmIndex,
     RlFmIndexConfig, SeqId,
 };
 use proptest::prelude::*;
@@ -101,24 +101,26 @@ fn rl_config(rate: u32, lookup_depth: u32) -> RlFmIndexConfig {
 }
 
 /// MEMs with positions sorted, for comparison independent of locate order.
-fn normalized(mut mems: Vec<Mem>) -> Vec<Mem> {
+#[cfg(feature = "gpu")]
+fn normalized(mut mems: Vec<haystackfm::Mem>) -> Vec<haystackfm::Mem> {
     for m in &mut mems {
         m.positions.sort();
     }
     mems
 }
 
+/// Identical results, positions in the same order (both locate in row order).
 fn assert_mem_parity(fm: &BidirFmIndex, rl: &BidirRlFmIndex, query: &[u8]) {
-    for min_len in [1, 4, 12] {
+    for min_len in [1, 4, 12, 19] {
         for locate in [false, true] {
             assert_eq!(
-                normalized(fm.find_smems(query, min_len, locate)),
-                normalized(rl.find_smems(query, min_len, locate)),
+                fm.find_smems(query, min_len, locate),
+                rl.find_smems(query, min_len, locate),
                 "smems min_len={min_len} locate={locate}"
             );
             assert_eq!(
-                normalized(fm.find_mems(query, min_len, locate)),
-                normalized(rl.find_mems(query, min_len, locate)),
+                fm.find_mems(query, min_len, locate),
+                rl.find_mems(query, min_len, locate),
                 "mems min_len={min_len} locate={locate}"
             );
         }
@@ -358,13 +360,13 @@ fn mems_match_on_a_strain_collection_with_long_reads() {
         for locate in [false, true] {
             for min_len in [5, 19] {
                 assert_eq!(
-                    normalized(fm.find_smems(&query, min_len, locate)),
-                    normalized(rl.find_smems(&query, min_len, locate)),
+                    fm.find_smems(&query, min_len, locate),
+                    rl.find_smems(&query, min_len, locate),
                     "smems read {read_no} min_len={min_len} locate={locate}"
                 );
                 assert_eq!(
-                    normalized(fm.find_mems(&query, min_len, locate)),
-                    normalized(rl.find_mems(&query, min_len, locate)),
+                    fm.find_mems(&query, min_len, locate),
+                    rl.find_mems(&query, min_len, locate),
                     "mems read {read_no} min_len={min_len} locate={locate}"
                 );
             }

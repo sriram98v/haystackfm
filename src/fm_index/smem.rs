@@ -1,4 +1,4 @@
-use crate::alphabet::SymbolSet;
+use crate::alphabet::{SymbolSet, ALPHABET_SIZE};
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::BidirFmIndex;
 use crate::fm_index::half::FmHalf;
@@ -144,12 +144,6 @@ pub(crate) trait BidirSearch {
             .flat_map(|iv| iv.fwd_lo..iv.fwd_hi)
             .filter(|&row| !compat.contains(fwd.bwt_rank().symbol_at(row)))
             .collect()
-    }
-
-    /// Occurrences in `ivs` preceded by a symbol compatible with `c`: the coverage of
-    /// `extend_multi_left(ivs, c)`, whose results are disjoint.
-    fn left_extendable(&self, ivs: &[BidirInterval], c: u8) -> u32 {
-        coverage(&extend_multi_left(ivs, c, self.fwd_half()))
     }
 
     /// SMEMs of `query`; see [`BidirFmIndex::find_smems`].
@@ -309,46 +303,80 @@ pub(crate) trait BidirSearch {
     /// [`collect_mem_candidates`](Self::collect_mem_candidates) with the work whose output
     /// is always discarded skipped. Returns the same candidates in the same order.
     ///
-    /// - `drop_set` only runs once `j - i >= min_len`: shorter drops are rejected by
-    ///   [`push_mem_candidate`](Self::push_mem_candidate) anyway.
-    /// - Start `i` stops at the first end `j` where every occurrence of `query[i..j)` is
-    ///   preceded by a symbol compatible with `query[i-1]`. Occurrences of `query[i-1..j)`
-    ///   at `p` are exactly the occurrences of `query[i..j)` at `p+1` with such a
-    ///   predecessor, so this holds iff `cov(i-1, j) == cov(i, j)`. It then holds for every
-    ///   longer end too (each occurrence of `query[i..j')` extends one of `query[i..j)` at
-    ///   the same place), so every later candidate of start `i` has `match_count == 0`.
-    ///   `seen[j]` holds `cov(i', j)` for the latest start `i' < i` that reached `j`, a lower
-    ///   bound on `cov(i-1, j)` (occurrence counts only shrink as a pattern grows left), so
-    ///   equality with it is equality with `cov(i-1, j)`.
+    /// With `cov(i, j) = |occ(query[i..j))|`, occurrences of `query[i-1..j)` at `p` are exactly
+    /// the occurrences of `query[i..j)` at `p+1` preceded by a symbol compatible with
+    /// `query[i-1]` (a sentinel never is), and one extends right iff the other does. So:
+    ///
+    /// - **Counts by arithmetic.** The left-maximal occurrences dropping at `j` number
+    ///   `(cov(i,j) − cov(i,j+1)) − (cov(i−1,j) − cov(i−1,j+1))` (`cov(i,n) − cov(i−1,n)` at
+    ///   the query end): no left extension, and no drop set unless that count is positive
+    ///   and `j − i >= min_len`.
+    /// - **Early stop.** Once `cov(i−1,j) == cov(i,j)`, every occurrence of `query[i..j)` and
+    ///   of each longer match is left-extendable: start `i` has no more candidates.
+    ///
+    /// `seen[j]` holds `cov(i−1, j)` exactly when start `i` reaches `j`: start `i−1` wrote it,
+    /// or stopped early at some `j0 <= j` where `cov(i−2, ·) == cov(i−1, ·)` from `j0` on
+    /// (so `seen[j]`, by induction `cov(i−2, j)`, is still right), or died before `j`, in
+    /// which case `cov(i−1, j) = 0` and no earlier start (whose coverage is no larger) wrote
+    /// `seen[j]` either.
+    ///
+    /// Each step takes all of an interval's children from one rank pass ([`Fanout`]): the
+    /// compatible ones continue, the rest form the drop set.
     fn collect_mem_candidates_pruned(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
         let n = query.len();
+        let rev = self.rev_half();
         let mut out: Vec<RawMem> = Vec::new();
-        // `seen[j]` = coverage of the latest start that reached end `j`; 0 = none yet.
         let mut seen = vec![0u32; n + 1];
+        let mut fanout = Fanout::default();
+        let mut curr: Vec<BidirInterval> = Vec::new();
         let mut next: Vec<BidirInterval> = Vec::new();
 
         for i in 0..n {
-            let mut curr =
-                extend_multi_right(&[self.search_full_interval()], query[i], self.rev_half());
+            fanout.right(&[self.search_full_interval()], rev);
+            fanout.emit(rev.alphabet().compatible(query[i]), &mut curr);
             if curr.is_empty() {
                 continue;
             }
+            let left_ctx = (i > 0).then(|| query[i - 1]);
             let mut cov = coverage(&curr);
             let mut j = i + 1;
             loop {
-                if i > 0 && seen[j] == cov {
+                let prev = seen[j];
+                if i > 0 && prev == cov {
                     break;
                 }
                 seen[j] = cov;
                 if j == n {
-                    self.push_mem_candidate(&mut out, query, i, n, curr, min_len);
+                    let match_count = if i == 0 { cov } else { cov - prev };
+                    if n - i >= min_len && match_count > 0 {
+                        out.push(RawMem {
+                            query_start: i,
+                            query_end: n,
+                            match_count,
+                            ivs: std::mem::take(&mut curr),
+                            left_ctx,
+                        });
+                    }
                     break;
                 }
-                extend_multi_right_into(&curr, query[j], self.rev_half(), &mut next);
+                let compat = rev.alphabet().compatible(query[j]);
+                fanout.right(&curr, rev);
+                fanout.emit(compat, &mut next);
                 let next_cov = coverage(&next);
                 if next_cov != cov && j - i >= min_len {
-                    let dropped = self.drop_set(&curr, query[j]);
-                    self.push_mem_candidate(&mut out, query, i, j, dropped, min_len);
+                    let left_extendable = if i == 0 { 0 } else { prev - seen[j + 1] };
+                    let match_count = (cov - next_cov) - left_extendable;
+                    if match_count > 0 {
+                        let mut dropped = Vec::new();
+                        fanout.emit(compat.complement(), &mut dropped);
+                        out.push(RawMem {
+                            query_start: i,
+                            query_end: j,
+                            match_count,
+                            ivs: dropped,
+                            left_ctx,
+                        });
+                    }
                 }
                 if next.is_empty() {
                     break;
@@ -405,7 +433,7 @@ pub(crate) trait BidirSearch {
         };
         let match_count = match left_ctx {
             None => coverage(&ivs),
-            Some(c) => coverage(&ivs) - self.left_extendable(&ivs, c),
+            Some(c) => coverage(&ivs) - coverage(&extend_multi_left(&ivs, c, self.fwd_half())),
         };
         if match_count == 0 {
             return;
@@ -530,6 +558,7 @@ pub(crate) trait BidirSearch {
         let n = query.len();
         let mut out: Vec<RawMem> = Vec::new();
         let mut buf: Vec<BidirInterval> = Vec::new();
+        let mut fanout = Fanout::default();
         let mut pivot = 0;
 
         while pivot < n {
@@ -552,7 +581,8 @@ pub(crate) trait BidirSearch {
                     ends.push(n);
                     break;
                 }
-                extend_multi_right_into(&curr, query[j], self.rev_half(), &mut buf);
+                fanout.right(&curr, self.rev_half());
+                fanout.emit(self.rev_half().alphabet().compatible(query[j]), &mut buf);
                 let ncov = coverage(&buf);
                 if ncov != cov {
                     sets.push(std::mem::replace(&mut curr, std::mem::take(&mut buf)));
@@ -567,7 +597,8 @@ pub(crate) trait BidirSearch {
                 j += 1;
             }
             let reach = *ends.last().unwrap_or(&(pivot + 1));
-            self.extend_prefixes_left(query, pivot, min_len, sets, &ends, &mut buf, &mut out);
+            let scratch = (&mut fanout, &mut buf);
+            self.extend_prefixes_left(query, pivot, min_len, sets, &ends, scratch, &mut out);
             pivot = reach.max(pivot + 1);
         }
 
@@ -586,7 +617,7 @@ pub(crate) trait BidirSearch {
         min_len: usize,
         mut sets: Vec<Vec<BidirInterval>>,
         ends: &[usize],
-        buf: &mut Vec<BidirInterval>,
+        (fanout, buf): (&mut Fanout, &mut Vec<BidirInterval>),
         out: &mut Vec<RawMem>,
     ) {
         let m = sets.len();
@@ -607,7 +638,8 @@ pub(crate) trait BidirSearch {
                     continue;
                 }
                 if s > 0 {
-                    extend_multi_left_into(&sets[i], query[s - 1], self.fwd_half(), buf);
+                    fanout.left(&sets[i], self.fwd_half());
+                    fanout.emit(self.fwd_half().alphabet().compatible(query[s - 1]), buf);
                     if !buf.is_empty() {
                         std::mem::swap(&mut sets[i], buf);
                         covs[i] = coverage(&sets[i]);
@@ -772,36 +804,36 @@ fn extend_multi_right<H: FmHalf>(ivs: &[BidirInterval], c: u8, rev: &H) -> Vec<B
     result
 }
 
-/// [`extend_multi_right`] into a reused buffer (cleared first).
-fn extend_multi_right_into<H: FmHalf>(
-    ivs: &[BidirInterval],
-    c: u8,
-    rev: &H,
-    out: &mut Vec<BidirInterval>,
-) {
-    out.clear();
-    for base in rev.alphabet().compatible(c).iter() {
-        for iv in ivs {
-            if let Some(ext) = iv.extend_right(base, rev) {
-                out.push(ext);
-            }
-        }
-    }
+/// Every child of every interval of a set, from one rank pass per interval
+/// ([`BidirInterval::children_right`] / [`children_left`](BidirInterval::children_left)),
+/// then emitted for any symbol subset in the order [`extend_multi_right`] /
+/// [`extend_multi_left`] produce: symbols ascending, intervals in input order. A sweep step
+/// takes its compatible extension and its drop set from the same pass.
+#[derive(Default)]
+pub(crate) struct Fanout {
+    children: Vec<[Option<BidirInterval>; ALPHABET_SIZE]>,
 }
 
-/// [`extend_multi_left`] into a reused buffer (cleared first).
-fn extend_multi_left_into<H: FmHalf>(
-    ivs: &[BidirInterval],
-    c: u8,
-    fwd: &H,
-    out: &mut Vec<BidirInterval>,
-) {
-    out.clear();
-    for base in fwd.alphabet().compatible(c).iter() {
-        for iv in ivs {
-            if let Some(ext) = iv.extend_left(base, fwd) {
-                out.push(ext);
-            }
+impl Fanout {
+    /// Children of `ivs` extended right (the pattern grows at its end).
+    fn right<H: FmHalf>(&mut self, ivs: &[BidirInterval], rev: &H) {
+        self.children.clear();
+        self.children
+            .extend(ivs.iter().map(|iv| iv.children_right(rev)));
+    }
+
+    /// Children of `ivs` extended left (the pattern grows at its start).
+    fn left<H: FmHalf>(&mut self, ivs: &[BidirInterval], fwd: &H) {
+        self.children.clear();
+        self.children
+            .extend(ivs.iter().map(|iv| iv.children_left(fwd)));
+    }
+
+    /// The children by members of `set`, into `out` (cleared first).
+    fn emit(&self, set: SymbolSet, out: &mut Vec<BidirInterval>) {
+        out.clear();
+        for c in set.iter() {
+            out.extend(self.children.iter().filter_map(|ch| ch[c as usize]));
         }
     }
 }
