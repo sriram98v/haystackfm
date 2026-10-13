@@ -2,14 +2,15 @@
 //! [`BidirInterval`] cursor.
 
 use super::{RlFmIndex, RlFmIndexConfig};
-use crate::alphabet::{Alphabet, DnaSequence, IupacDna, SymbolSet, ALPHABET_SIZE};
+use crate::alphabet::{Alphabet, AlphabetFns, DnaSequence, IupacDna, SymbolSet, ALPHABET_SIZE};
 use crate::error::FmIndexError;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::{reverse_as_sequence, BidirFmIndex};
 use crate::fm_index::fwd_interval::FwdInterval;
+use crate::fm_index::half::FmHalf;
 use crate::fm_index::prepare::{in_build_pool, prepare_cpu};
 use crate::fm_index::seq_id::SeqId;
-use crate::fm_index::smem::{BidirSearch, Mem, ShallowCache};
+use crate::fm_index::smem::{BidirSearch, Mem, RawMem, RowLocate, ShallowCache};
 
 /// Bidirectional run-length FM-index: [`RlFmIndex`] halves over the text `T` (`fwd`) and
 /// its reversal `T^R` (`rev`), the run-length counterpart of [`BidirFmIndex`].
@@ -313,29 +314,47 @@ impl BidirRlFmIndex {
 }
 
 impl BidirSearch for BidirRlFmIndex {
-    type Half = RlFmIndex;
+    type Cursor = BidirInterval;
 
-    fn fwd_half(&self) -> &RlFmIndex {
-        &self.fwd
+    fn search_alphabet(&self) -> &AlphabetFns {
+        self.fwd.alphabet()
     }
 
-    fn rev_half(&self) -> &RlFmIndex {
-        &self.rev
-    }
-
-    fn search_full_interval(&self) -> BidirInterval {
+    fn search_full_cursor(&self) -> BidirInterval {
         self.full_interval()
     }
 
-    fn search_locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
-        self.fwd.locate_rows(lo, hi)
+    #[inline]
+    fn search_extend_right(&self, cur: &BidirInterval, c: u8) -> Option<BidirInterval> {
+        cur.extend_right(c, &self.rev)
+    }
+
+    #[inline]
+    fn search_extend_left(&self, cur: &BidirInterval, c: u8) -> Option<BidirInterval> {
+        cur.extend_left(c, &self.fwd)
+    }
+
+    #[inline]
+    fn search_children_right(&self, cur: &BidirInterval) -> [Option<BidirInterval>; ALPHABET_SIZE] {
+        cur.children_right(&self.rev)
+    }
+
+    #[inline]
+    fn search_children_left(&self, cur: &BidirInterval) -> [Option<BidirInterval>; ALPHABET_SIZE] {
+        cur.children_left(&self.fwd)
     }
 
     fn shallow(&self, kmer: &[u8]) -> Option<&[BidirInterval]> {
         self.shallow.get(kmer)
     }
 
-    fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
+    fn search_locate(&self, raws: Vec<RawMem>) -> Vec<Mem> {
+        self.locate_by_rows(raws)
+    }
+}
+
+impl RowLocate for BidirRlFmIndex {
+    fn locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
         self.fwd.locate_row_list(rows)
     }
 

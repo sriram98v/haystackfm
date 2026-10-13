@@ -1,4 +1,5 @@
-use super::fanout::{SHALLOW_MAX_DEPTH, SHALLOW_MAX_IVS};
+use super::fanout::SHALLOW_MAX_DEPTH;
+use super::oracle;
 use super::*;
 use crate::alphabet::{encode_char, DnaSequence};
 use crate::fm_index::{FmIndex, FmIndexConfig};
@@ -737,8 +738,8 @@ fn rewritten_sweeps_match_the_original_candidates() {
             }
             let q = encode(std::str::from_utf8(&read).unwrap());
             for min_len in [1, 6, 19] {
-                let smems = keys(fm.collect_smem_candidates_reference(&q, min_len));
-                let mems = keys(fm.collect_mem_candidates_reference(&q, min_len));
+                let smems = keys(oracle::collect_smem_candidates_reference(&fm, &q, min_len));
+                let mems = keys(oracle::collect_mem_candidates_reference(&fm, &q, min_len));
                 assert_eq!(keys(fm.collect_smem_candidates(&q, min_len)), smems);
                 assert_eq!(keys(rl.collect_smem_candidates(&q, min_len)), smems);
                 assert_eq!(keys(fm.collect_mem_candidates(&q, min_len)), mems);
@@ -769,7 +770,7 @@ fn shallow_cache_respects_its_budget_on_iupac_dense_text() {
     };
     let fm = BidirFmIndex::build_cpu(&seqs, &config).unwrap();
     let rl = BidirRlFmIndex::from_bidir_fm_index(&fm);
-    assert!(rl.shallow.ivs.len() <= SHALLOW_MAX_IVS);
+    assert!(rl.shallow.ivs.len() <= ShallowCache::<BidirInterval>::MAX_ENTRIES);
     assert!(
         rl.shallow.depth < SHALLOW_MAX_DEPTH as usize,
         "budget never hit"
