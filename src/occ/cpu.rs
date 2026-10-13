@@ -571,6 +571,34 @@ mod tests {
         }
     }
 
+    /// The single-block path of `extend_ranks` against the two-border one, over every
+    /// narrow interval (all within-block and block-straddling pairs up to 70 wide).
+    #[test]
+    fn extend_ranks_matches_rank_with_below_pair() {
+        use crate::occ::rank::BwtRank;
+        for text in fused_rank_texts() {
+            let bwt = build_bwt_for(&text);
+            let n = bwt.len() as u32;
+            for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+                let occ = build_occ_table(&bwt, enc);
+                for c in 0..ALPHABET_SIZE as u8 {
+                    for lo in 0..=n {
+                        for hi in (lo..=n.min(lo + 70)).chain([n]) {
+                            let expected = occ
+                                .rank_with_below_pair(c, lo, hi)
+                                .map(|((r_lo, b_lo), (r_hi, b_hi))| (r_lo, r_hi, b_hi - b_lo));
+                            assert_eq!(
+                                BwtRank::extend_ranks(&occ, c, lo, hi),
+                                expected,
+                                "extend_ranks({c}, {lo}, {hi}) mismatch ({enc:?})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn rank_all_pair_matches_rank_all() {
         for text in fused_rank_texts() {

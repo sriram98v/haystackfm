@@ -73,6 +73,11 @@ impl BwtRank for OccTable {
     }
 
     #[inline]
+    fn extend_ranks(&self, c: u8, lo: u32, hi: u32) -> Option<(u32, u32, u32)> {
+        OccTable::extend_ranks(self, c, lo, hi)
+    }
+
+    #[inline]
     fn rank_set_pair(&self, set: SymbolSet, lo: u32, hi: u32) -> (u32, u32) {
         OccTable::rank_set_pair(self, set, lo, hi)
     }

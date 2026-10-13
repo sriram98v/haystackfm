@@ -818,6 +818,64 @@ impl OccTable {
         Some(((r_lo, b_lo), (r_hi, b_hi)))
     }
 
+    /// [`BwtRank::extend_ranks`](crate::occ::rank::BwtRank::extend_ranks):
+    /// `Some((rank(c, lo), rank(c, hi), below))`, `below` counting symbols `< c` in
+    /// `bwt[lo..hi)`; `None` when `c` does not occur there.
+    ///
+    /// When `bwt[lo..hi)` lies in one block (the narrow intervals of a deep search), that
+    /// block's record answers everything: `rank(c, lo)` from its counts plus the bits
+    /// before `lo`, and the in-range counts by masked popcounts, with no second border.
+    /// Otherwise the two-border [`rank_with_below_pair`](Self::rank_with_below_pair).
+    #[inline]
+    pub(crate) fn extend_ranks(&self, c: u8, lo: u32, hi: u32) -> Option<(u32, u32, u32)> {
+        let lane = self.symbol_to_lane[c as usize];
+        if lane == NO_LANE || lo >= hi {
+            return None;
+        }
+        let block = lo / BLOCK_SIZE;
+        if (hi - 1) / BLOCK_SIZE != block {
+            let ((r_lo, b_lo), (r_hi, b_hi)) = self.rank_with_below_pair(c, lo, hi)?;
+            return Some((r_lo, r_hi, b_hi - b_lo));
+        }
+        let lane = lane as usize;
+        let base = self.block_base(block as usize);
+        let words = self.load_words(base);
+        // Bits of the block before `lo`, and of `lo..hi`.
+        let before = (1u64 << (lo % BLOCK_SIZE)) - 1;
+        let range = Self::rank_window((hi - 1) % BLOCK_SIZE) & !before;
+        let mask = self.lane_mask_from_words(&words, lane);
+        let count = (mask & range).count_ones();
+        if count == 0 {
+            return None;
+        }
+        let r_lo =
+            self.sb_count_at(base, lane) + self.delta_at(base, lane) + (mask & before).count_ones();
+        // Symbols below `c` in range: count whichever of the class and its complement has
+        // fewer lanes (the lanes partition the range).
+        let lanes = self.below_lanes[c as usize];
+        let complement = self.all_lanes() & !lanes;
+        let below = if complement.count_ones() < lanes.count_ones() {
+            (hi - lo) - self.count_lanes_in(&words, range, complement)
+        } else {
+            self.count_lanes_in(&words, range, lanes)
+        };
+        Some((r_lo, r_lo + count, below))
+    }
+
+    /// Positions of `range` (a bitmask within the block whose Level-3 `words` are loaded)
+    /// holding a symbol of any lane in `lanes`.
+    #[inline(always)]
+    fn count_lanes_in(&self, words: &[u64; ALPHABET_SIZE], range: u64, lanes: u16) -> u32 {
+        let mut sum = 0u32;
+        let mut bits = lanes;
+        while bits != 0 {
+            let lane = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            sum += (self.lane_mask_from_words(words, lane) & range).count_ones();
+        }
+        sum
+    }
+
     /// Class rank: number of positions in `bwt[0..i)` whose symbol is a member of `set`.
     ///
     /// Equals `Σ_{c ∈ set} rank(c, i)` but costs one block-record touch regardless of how
