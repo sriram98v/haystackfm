@@ -121,6 +121,13 @@ impl BidirFmIndex {
 pub(crate) trait BidirSearch {
     type Half: FmHalf;
 
+    /// Whether a sweep step takes all of an interval's children from one rank pass
+    /// ([`Fanout`]) rather than extending by each compatible symbol. The pass ranks every
+    /// code at both borders, which the run-length scan does almost for free but the occ
+    /// table pays per lane; per-symbol extension ranks only the compatible codes, and the
+    /// MEM sweep then builds a drop set's children only when it keeps one.
+    const FANOUT_STEPS: bool = true;
+
     /// Forward half (index of `T`); cursor `fwd_*` rows refer to its SA.
     fn fwd_half(&self) -> &Self::Half;
 
@@ -158,9 +165,34 @@ pub(crate) trait BidirSearch {
             out.extend_from_slice(set);
             return false;
         }
-        fanout.right(curr, self.rev_half());
-        fanout.emit(self.rev_half().alphabet().compatible(query[j]), out);
+        let rev = self.rev_half();
+        let compat = rev.alphabet().compatible(query[j]);
+        if !Self::FANOUT_STEPS {
+            extend_set(curr, compat, out, |iv, c| iv.extend_right(c, rev));
+            return false;
+        }
+        fanout.right(curr, rev);
+        fanout.emit(compat, out);
         true
+    }
+
+    /// Into `out`: the intervals of `ivs` extended left by every symbol compatible with
+    /// `c`, in [`Fanout::emit`] order.
+    fn left_step(
+        &self,
+        ivs: &[BidirInterval],
+        c: u8,
+        fanout: &mut Fanout,
+        out: &mut Vec<BidirInterval>,
+    ) {
+        let fwd = self.fwd_half();
+        let compat = fwd.alphabet().compatible(c);
+        if Self::FANOUT_STEPS {
+            fanout.left(ivs, fwd);
+            fanout.emit(compat, out);
+        } else {
+            extend_set(ivs, compat, out, |iv, c| iv.extend_left(c, fwd));
+        }
     }
 
     /// Forward rows of `ivs` whose preceding symbol (`BWT_fwd[row]`) is not in `compat`, in
@@ -690,8 +722,7 @@ pub(crate) trait BidirSearch {
                     continue;
                 }
                 if s > 0 {
-                    fanout.left(&sets[i], self.fwd_half());
-                    fanout.emit(self.fwd_half().alphabet().compatible(query[s - 1]), buf);
+                    self.left_step(&sets[i], query[s - 1], fanout, buf);
                     if !buf.is_empty() {
                         std::mem::swap(&mut sets[i], buf);
                         covs[i] = coverage(&sets[i]);
@@ -791,6 +822,8 @@ pub(crate) trait BidirSearch {
 
 impl BidirSearch for BidirFmIndex {
     type Half = FmIndex;
+
+    const FANOUT_STEPS: bool = false;
 
     fn fwd_half(&self) -> &FmIndex {
         &self.fwd
@@ -996,6 +1029,21 @@ impl Fanout {
         for c in set.iter() {
             out.extend(self.children.iter().filter_map(|ch| ch[c as usize]));
         }
+    }
+}
+
+/// Into `out` (cleared first): `extend(iv, c)` for every member `c` of `set` and interval
+/// `iv`, symbols ascending, intervals in input order (the order [`Fanout::emit`] uses).
+#[inline]
+fn extend_set(
+    ivs: &[BidirInterval],
+    set: SymbolSet,
+    out: &mut Vec<BidirInterval>,
+    extend: impl Fn(&BidirInterval, u8) -> Option<BidirInterval>,
+) {
+    out.clear();
+    for c in set.iter() {
+        out.extend(ivs.iter().filter_map(|iv| extend(iv, c)));
     }
 }
 
