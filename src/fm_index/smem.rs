@@ -845,6 +845,16 @@ impl BidirSearch for BidirFmIndex {
         self.shallow.get(kmer)
     }
 
+    fn left_maximal_rows(&self, ivs: &[BidirInterval], compat: SymbolSet) -> Vec<u32> {
+        let mut rows = Vec::new();
+        for iv in ivs {
+            self.fwd
+                .occ
+                .rows_not_in(compat, iv.fwd_lo, iv.fwd_hi, &mut rows);
+        }
+        rows
+    }
+
     fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
         let mut text_positions = Vec::with_capacity(rows.len());
         self.fwd.resolve_sa_batch(rows, &mut text_positions);

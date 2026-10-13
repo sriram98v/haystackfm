@@ -862,6 +862,44 @@ impl OccTable {
         Some((r_lo, r_lo + count, below))
     }
 
+    /// Rows of `lo..hi` whose BWT symbol is not in `set`, in row order, into `out`: per
+    /// block, the positions of the lanes outside `set` (or the complement of those inside
+    /// it, whichever has fewer lanes) as one bitmask, then its set bits.
+    pub(crate) fn rows_not_in(&self, set: SymbolSet, lo: u32, hi: u32, out: &mut Vec<u32>) {
+        if lo >= hi {
+            return;
+        }
+        let inside = self.set_lanes(set);
+        let outside = self.all_lanes() & !inside;
+        if outside == 0 {
+            return;
+        }
+        let (lanes, keep_matches) = if outside.count_ones() <= inside.count_ones() {
+            (outside, true)
+        } else {
+            (inside, false)
+        };
+        for block in lo / BLOCK_SIZE..=(hi - 1) / BLOCK_SIZE {
+            let start = block * BLOCK_SIZE;
+            let first = lo.max(start) - start;
+            let last = (hi - 1).min(start + BLOCK_SIZE - 1) - start;
+            let range = Self::rank_window(last) & !((1u64 << first) - 1);
+            let words = self.load_words(self.block_base(block as usize));
+            let mut matches = 0u64;
+            let mut bits = lanes;
+            while bits != 0 {
+                let lane = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                matches |= self.lane_mask_from_words(&words, lane);
+            }
+            let mut rows = range & if keep_matches { matches } else { !matches };
+            while rows != 0 {
+                out.push(start + rows.trailing_zeros());
+                rows &= rows - 1;
+            }
+        }
+    }
+
     /// Positions of `range` (a bitmask within the block whose Level-3 `words` are loaded)
     /// holding a symbol of any lane in `lanes`.
     #[inline(always)]
