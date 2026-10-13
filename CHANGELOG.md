@@ -8,6 +8,21 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-10-12
+
+### Performance
+- `BidirFmIndex` now runs the same SMEM/MEM sweeps as the run-length index: pruned MEM
+  sweep, lockstep SMEM backward phase, a derived k-mer interval cache (at most 2^21
+  intervals, built on construction and load, never serialized) and one batched locate per
+  query.
+- `BidirFmIndex` sweep steps extend only the query symbol's compatible codes instead of
+  ranking every symbol, answer an extension inside one 64-row occ block from that block
+  alone, and filter left-maximal MEM rows a block at a time. On 200 Mbp at `-O3`:
+  `find_mems` 4.4x, `find_mems` with locate 3.7x, `find_smems` 1.3x faster than 0.6.8.
+
+### Fixed
+- `BidirFmIndex::from_bytes` rejects forward and reverse halves that do not match.
+
 ## [0.6.8] - 2026-10-12
 
 ### Fixed
@@ -423,6 +438,7 @@ name, and its earlier history is not carried over here.
 - Licensed under Apache-2.0.
 
 [Unreleased]: https://github.com/sriram98v/haystackfm/commits/main
+[0.6.9]: https://crates.io/crates/haystackfm/0.6.9
 [0.6.8]: https://crates.io/crates/haystackfm/0.6.8
 [0.5.0]: https://crates.io/crates/haystackfm/0.5.0
 [0.4.0]: https://crates.io/crates/haystackfm/0.4.0

@@ -3,6 +3,7 @@ use crate::error::FmIndexError;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::fwd_interval::FwdInterval;
 use crate::fm_index::seq_id::SeqId;
+use crate::fm_index::smem::ShallowCache;
 use crate::fm_index::{FmIndex, FmIndexConfig};
 
 /// A bidirectional FM-index: pairs a forward FM-index (built on text T) with a
@@ -33,9 +34,17 @@ pub struct BidirFmIndex {
     pub(crate) fwd: FmIndex,
     /// FM-index of the byte-reversal of T (T^R).
     pub(crate) rev: FmIndex,
+    /// Interval sets of short k-mers for the SMEM/MEM sweeps; derived, never serialized.
+    pub(crate) shallow: ShallowCache,
 }
 
 impl BidirFmIndex {
+    /// Pair two halves and derive the sweep cache.
+    fn from_halves(fwd: FmIndex, rev: FmIndex) -> Self {
+        let shallow = ShallowCache::build(BidirInterval::full(fwd.text_len), &rev, fwd.text_len);
+        Self { fwd, rev, shallow }
+    }
+
     // ── Construction ──────────────────────────────────────────────────────────
 
     /// Build a bidirectional FM-index from DNA sequences using the CPU with [`IupacDna`]
@@ -87,7 +96,7 @@ impl BidirFmIndex {
         // than carry — and serialize — a second copy of the whole text.
         rev.forget_text();
 
-        Ok(Self { fwd, rev })
+        Ok(Self::from_halves(fwd, rev))
     }
 
     /// Exclusive end positions of each reference in the concatenated text.
@@ -125,7 +134,7 @@ impl BidirFmIndex {
         // See `build_cpu_with`: the reverse text is redundant and never served.
         rev.forget_text();
 
-        Ok(Self { fwd, rev })
+        Ok(Self::from_halves(fwd, rev))
     }
 
     // ── Interval operations ───────────────────────────────────────────────────
@@ -438,7 +447,17 @@ impl BidirFmIndex {
         }
         let fwd = FmIndex::from_bytes(&data[4..4 + fwd_len])?;
         let rev = FmIndex::from_bytes(&data[4 + fwd_len..])?;
-        Ok(Self { fwd, rev })
+        // Both halves index the same symbols: equal C arrays catch swapped or mixed halves,
+        // which would answer queries with wrong intervals and break the shallow-cache build.
+        if fwd.text_len != rev.text_len
+            || fwd.alphabet_fns != rev.alphabet_fns
+            || fwd.c_array != rev.c_array
+        {
+            return Err(FmIndexError::DeserializeError(
+                "forward and reverse halves do not match".into(),
+            ));
+        }
+        Ok(Self::from_halves(fwd, rev))
     }
 
     // ── GPU MEM/SMEM finding ──────────────────────────────────────────────────
@@ -1097,5 +1116,24 @@ mod tests {
             loaded.find_smems(&q, 3, true),
             fresh.find_smems(&q, 3, true)
         );
+    }
+
+    /// Halves of different indexes are rejected at load (before the shallow cache, which
+    /// ranks the reverse half over the forward half's full interval, is built).
+    #[test]
+    fn from_bytes_rejects_halves_of_different_indexes() {
+        let splice = |fwd: &FmIndex, rev: &FmIndex| {
+            let fwd = fwd.to_bytes().unwrap();
+            let mut out = (fwd.len() as u32).to_le_bytes().to_vec();
+            out.extend_from_slice(&fwd);
+            out.extend_from_slice(&rev.to_bytes().unwrap());
+            out
+        };
+        let a = bidir("ACGTACGTAACCGG");
+        let same_len = bidir("AAAAAAAAAATTTT");
+        let shorter = bidir("ACGT");
+        assert!(BidirFmIndex::from_bytes(&splice(&a.fwd, &a.rev)).is_ok());
+        assert!(BidirFmIndex::from_bytes(&splice(&a.fwd, &same_len.rev)).is_err());
+        assert!(BidirFmIndex::from_bytes(&splice(&a.fwd, &shorter.rev)).is_err());
     }
 }

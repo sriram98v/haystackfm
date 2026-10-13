@@ -571,6 +571,65 @@ mod tests {
         }
     }
 
+    /// The single-block path of `extend_ranks` against the two-border one, over every
+    /// narrow interval (all within-block and block-straddling pairs up to 70 wide).
+    #[test]
+    fn extend_ranks_matches_rank_with_below_pair() {
+        use crate::occ::rank::BwtRank;
+        for text in fused_rank_texts() {
+            let bwt = build_bwt_for(&text);
+            let n = bwt.len() as u32;
+            for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+                let occ = build_occ_table(&bwt, enc);
+                for c in 0..ALPHABET_SIZE as u8 {
+                    for lo in 0..=n {
+                        for hi in (lo..=n.min(lo + 70)).chain([n]) {
+                            let expected = occ
+                                .rank_with_below_pair(c, lo, hi)
+                                .map(|((r_lo, b_lo), (r_hi, b_hi))| (r_lo, r_hi, b_hi - b_lo));
+                            assert_eq!(
+                                BwtRank::extend_ranks(&occ, c, lo, hi),
+                                expected,
+                                "extend_ranks({c}, {lo}, {hi}) mismatch ({enc:?})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Block-wise `rows_not_in` against a per-row `symbol_at` filter, for every symbol set
+    /// of interest (single codes, IUPAC compatibility sets, empty and full) and many ranges.
+    #[test]
+    fn rows_not_in_matches_symbol_at_filter() {
+        let fns = IupacDna::fns();
+        let mut sets: Vec<SymbolSet> = (0..ALPHABET_SIZE as u8)
+            .map(|c| fns.compatible(c))
+            .collect();
+        sets.extend((0..ALPHABET_SIZE as u8).map(|c| SymbolSet::from_codes(&[c])));
+        sets.extend([SymbolSet::EMPTY, SymbolSet::NON_SENTINEL]);
+        for text in fused_rank_texts() {
+            let bwt = build_bwt_for(&text);
+            let n = bwt.len() as u32;
+            for enc in [OccEncoding::Bitplane, OccEncoding::OneHot] {
+                let occ = build_occ_table(&bwt, enc);
+                for &set in &sets {
+                    for lo in (0..=n).step_by(3) {
+                        for hi in (lo..=n).step_by(17).chain([lo + 1, n]).filter(|&h| h <= n) {
+                            let mut got = Vec::new();
+                            occ.rows_not_in(set, lo, hi, &mut got);
+                            let want: Vec<u32> = (lo..hi)
+                                .filter(|&r| !set.contains(occ.symbol_at(r)))
+                                .collect();
+                            assert_eq!(got, want, "rows_not_in({lo}, {hi}) mismatch ({enc:?})");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn rank_all_pair_matches_rank_all() {
         for text in fused_rank_texts() {

@@ -9,7 +9,7 @@ use crate::fm_index::bidir_index::{reverse_as_sequence, BidirFmIndex};
 use crate::fm_index::fwd_interval::FwdInterval;
 use crate::fm_index::prepare::{in_build_pool, prepare_cpu};
 use crate::fm_index::seq_id::SeqId;
-use crate::fm_index::smem::{BidirSearch, Mem, RawMem, ShallowCache};
+use crate::fm_index::smem::{BidirSearch, Mem, ShallowCache};
 
 /// Bidirectional run-length FM-index: [`RlFmIndex`] halves over the text `T` (`fwd`) and
 /// its reversal `T^R` (`rev`), the run-length counterpart of [`BidirFmIndex`].
@@ -333,18 +333,6 @@ impl BidirSearch for BidirRlFmIndex {
 
     fn shallow(&self, kmer: &[u8]) -> Option<&[BidirInterval]> {
         self.shallow.get(kmer)
-    }
-
-    fn locate_all(&self, raws: Vec<RawMem>, locate: bool) -> Vec<Mem> {
-        self.locate_all_batched(raws, locate)
-    }
-
-    fn collect_smem_candidates(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
-        self.collect_smem_candidates_lockstep(query, min_len)
-    }
-
-    fn collect_mem_candidates(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
-        self.collect_mem_candidates_pruned(query, min_len)
     }
 
     fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
