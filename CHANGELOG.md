@@ -8,6 +8,15 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+### Performance
+- `BidirFmIndex` now runs the same SMEM/MEM sweeps as the run-length index: pruned MEM
+  sweep, lockstep SMEM backward phase, a derived k-mer interval cache (at most 2^21
+  intervals, built on construction and load, never serialized) and one batched locate per
+  query.
+
+### Fixed
+- `BidirFmIndex::from_bytes` rejects forward and reverse halves that do not match.
+
 ## [0.6.8] - 2026-10-12
 
 ### Fixed

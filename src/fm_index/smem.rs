@@ -183,11 +183,10 @@ pub(crate) trait BidirSearch {
         self.locate_all(self.mem_raws(query, min_len), locate)
     }
 
-    /// Resolve every [`RawMem`] of one query, in order (see [`locate_raw`](Self::locate_raw)).
+    /// Resolve every [`RawMem`] of one query, in order: one batched locate for the whole
+    /// query ([`locate_all_batched`](Self::locate_all_batched)).
     fn locate_all(&self, raws: Vec<RawMem>, locate: bool) -> Vec<Mem> {
-        raws.into_iter()
-            .map(|raw| self.locate_raw(raw, locate))
-            .collect()
+        self.locate_all_batched(raws, locate)
     }
 
     /// [`locate_all`](Self::locate_all) with one [`search_locate_row_list`] call for the
@@ -278,7 +277,13 @@ pub(crate) trait BidirSearch {
         raws
     }
 
-    /// Collect every occurrence-level MEM candidate, without resolving positions.
+    /// Collect every occurrence-level MEM candidate, without resolving positions: the
+    /// pruned sweep ([`collect_mem_candidates_pruned`](Self::collect_mem_candidates_pruned)).
+    fn collect_mem_candidates(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
+        self.collect_mem_candidates_pruned(query, min_len)
+    }
+
+    /// The original MEM sweep, kept as the oracle the pruned one is tested against.
     ///
     /// For each start `i`, forward-extends the full occurrence set of `query[i..j)`. At every
     /// step where the occurrence count drops, the occurrences that failed to extend are
@@ -291,9 +296,8 @@ pub(crate) trait BidirSearch {
     /// every MEM `(i,j)` has its witnessing occurrence in the drop set at `j`. Soundness:
     /// anything emitted has an occurrence maximal in both directions.
     ///
-    /// Used only by [`find_mems`](Self::find_mems); [`find_smems`](Self::find_smems) has its
-    /// own generator in [`collect_smem_candidates`](Self::collect_smem_candidates).
-    fn collect_mem_candidates(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
+    #[cfg(test)]
+    fn collect_mem_candidates_reference(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
         let n = query.len();
         let mut out: Vec<RawMem> = Vec::new();
 
@@ -327,8 +331,8 @@ pub(crate) trait BidirSearch {
         out
     }
 
-    /// [`collect_mem_candidates`](Self::collect_mem_candidates) with the work whose output
-    /// is always discarded skipped. Returns the same candidates in the same order.
+    /// [`collect_mem_candidates_reference`](Self::collect_mem_candidates_reference) with the
+    /// work whose output is always discarded skipped. Returns the same candidates in the same order.
     ///
     /// With `cov(i, j) = |occ(query[i..j))|`, occurrences of `query[i-1..j)` at `p` are exactly
     /// the occurrences of `query[i..j)` at `p+1` preceded by a symbol compatible with
@@ -436,6 +440,7 @@ pub(crate) trait BidirSearch {
     /// Extends by every symbol *incompatible* with `c`. The results are disjoint (distinct
     /// following symbols), and the sentinel is incompatible with every base, so occurrences
     /// sitting at the end of a reference are captured here rather than silently lost.
+    #[cfg(test)]
     fn drop_set(&self, ivs: &[BidirInterval], c: u8) -> Vec<BidirInterval> {
         let mut out = Vec::new();
         for sym in self.rev_half().alphabet().compatible(c).complement().iter() {
@@ -455,6 +460,7 @@ pub(crate) trait BidirSearch {
     /// subtracting its coverage counts exactly the occurrences that are left-extendable —
     /// no interval subtraction and no sentinel special case (a reference start is preceded by
     /// a sentinel, which is never compatible with a base).
+    #[cfg(test)]
     fn push_mem_candidate(
         &self,
         out: &mut Vec<RawMem>,
@@ -488,7 +494,14 @@ pub(crate) trait BidirSearch {
         });
     }
 
-    /// Single-pass BWA-MEM collection of MEM candidates that contain every SMEM.
+    /// MEM candidates that contain every SMEM: the lockstep sweep
+    /// ([`collect_smem_candidates_lockstep`](Self::collect_smem_candidates_lockstep)).
+    fn collect_smem_candidates(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
+        self.collect_smem_candidates_lockstep(query, min_len)
+    }
+
+    /// Single-pass BWA-MEM collection of MEM candidates that contain every SMEM, kept as the
+    /// oracle the lockstep sweep is tested against.
     ///
     /// Visits pivots left-to-right, advancing each time by the pivot's *forward reach* (the
     /// end of the longest match anchored at the pivot). At each pivot it forward-extends,
@@ -500,7 +513,8 @@ pub(crate) trait BidirSearch {
     /// after a pivot must extend past that pivot's reach and therefore covers the next pivot —
     /// hence every SMEM is anchored by some visited pivot and appears here (possibly alongside
     /// non-super MEMs, which the caller's containment filter removes).
-    fn collect_smem_candidates(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
+    #[cfg(test)]
+    fn collect_smem_candidates_reference(&self, query: &[u8], min_len: usize) -> Vec<RawMem> {
         let n = query.len();
         let mut out: Vec<RawMem> = Vec::new();
         let mut pivot = 0;
@@ -577,8 +591,8 @@ pub(crate) trait BidirSearch {
         out
     }
 
-    /// [`collect_smem_candidates`](Self::collect_smem_candidates) with the backward phase
-    /// run on all of a pivot's prefixes in lockstep. Returns the same candidates in the same
+    /// [`collect_smem_candidates_reference`](Self::collect_smem_candidates_reference) with the
+    /// backward phase run on all of a pivot's prefixes in lockstep. Returns the same candidates in the same
     /// order: only work whose result is always rejected is skipped.
     ///
     /// Let prefixes `e_0 < e_1 < …` be the recorded right-maximal ends of a pivot `p`.
@@ -727,6 +741,7 @@ pub(crate) trait BidirSearch {
     /// Extend an interval set as far left as possible from left boundary `from`, returning the
     /// widened set and the resulting start position. Stops when the next left extension is
     /// empty (left-maximal) or the query start is reached.
+    #[cfg(test)]
     fn extend_left_maximally(
         &self,
         mut ivs: Vec<BidirInterval>,
@@ -793,6 +808,10 @@ impl BidirSearch for BidirFmIndex {
         self.fwd.locate_rows(lo, hi)
     }
 
+    fn shallow(&self, kmer: &[u8]) -> Option<&[BidirInterval]> {
+        self.shallow.get(kmer)
+    }
+
     fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
         let mut text_positions = Vec::with_capacity(rows.len());
         self.fwd.resolve_sa_batch(rows, &mut text_positions);
@@ -830,6 +849,7 @@ fn coverage(ivs: &[BidirInterval]) -> u32 {
 }
 
 /// Extend each interval in `ivs` right by `c`, using the index's alphabet compatibility.
+#[cfg(test)]
 fn extend_multi_right<H: FmHalf>(ivs: &[BidirInterval], c: u8, rev: &H) -> Vec<BidirInterval> {
     let mut result = Vec::new();
     for base in rev.alphabet().compatible(c).iter() {
@@ -947,8 +967,8 @@ const CORE_CODES: [u8; 4] = [
 
 /// Every child of every interval of a set, from one rank pass per interval
 /// ([`BidirInterval::children_right`] / [`children_left`](BidirInterval::children_left)),
-/// then emitted for any symbol subset in the order [`extend_multi_right`] /
-/// [`extend_multi_left`] produce: symbols ascending, intervals in input order. A sweep step
+/// then emitted for any symbol subset in the order `extend_multi_right` /
+/// `extend_multi_left` produce: symbols ascending, intervals in input order. A sweep step
 /// takes its compatible extension and its drop set from the same pass.
 #[derive(Default)]
 pub(crate) struct Fanout {
@@ -980,6 +1000,7 @@ impl Fanout {
 }
 
 /// Extend each interval in `ivs` left by `c`, using the index's alphabet compatibility.
+#[cfg(test)]
 fn extend_multi_left<H: FmHalf>(ivs: &[BidirInterval], c: u8, fwd: &H) -> Vec<BidirInterval> {
     let mut result = Vec::new();
     for base in fwd.alphabet().compatible(c).iter() {
@@ -1682,8 +1703,8 @@ mod tests {
 
     /// The pruned/lockstep sweeps against the original algorithms they replace, compared
     /// as raw candidates (bounds, counts, intervals in order, left context) before any
-    /// filtering or locating: on `BidirFmIndex` (which runs the originals by default) and on
-    /// the run-length index's overrides. Strain-like texts with N runs and reads with
+    /// filtering or locating, on both backends (the uncompressed one with its shallow cache,
+    /// the run-length one with its rank scan). Strain-like texts with N runs and reads with
     /// substitutions and ambiguity codes, so the early stop, the equal-coverage pruning and
     /// the drop arithmetic all fire.
     #[test]
@@ -1733,14 +1754,11 @@ mod tests {
                 }
                 let q = encode(std::str::from_utf8(&read).unwrap());
                 for min_len in [1, 6, 19] {
-                    let smems = keys(fm.collect_smem_candidates(&q, min_len));
-                    let mems = keys(fm.collect_mem_candidates(&q, min_len));
-                    assert_eq!(
-                        keys(fm.collect_smem_candidates_lockstep(&q, min_len)),
-                        smems
-                    );
+                    let smems = keys(fm.collect_smem_candidates_reference(&q, min_len));
+                    let mems = keys(fm.collect_mem_candidates_reference(&q, min_len));
+                    assert_eq!(keys(fm.collect_smem_candidates(&q, min_len)), smems);
                     assert_eq!(keys(rl.collect_smem_candidates(&q, min_len)), smems);
-                    assert_eq!(keys(fm.collect_mem_candidates_pruned(&q, min_len)), mems);
+                    assert_eq!(keys(fm.collect_mem_candidates(&q, min_len)), mems);
                     assert_eq!(keys(rl.collect_mem_candidates(&q, min_len)), mems);
                 }
             }
