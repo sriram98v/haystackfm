@@ -1,10 +1,11 @@
-//! Plain vs run-length vs move-structure indexes: `count`, `locate` and cursor extension on
-//! a random reference (r ≈ n) and a repetitive collection (r ≪ n). Inputs are seeded.
+//! Plain vs run-length vs move-structure indexes: `count`, `locate`, cursor extension and
+//! located SMEM / MEM finding on a random reference (r ≈ n) and a repetitive collection
+//! (r ≪ n). Inputs are seeded.
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use haystackfm::alphabet::DnaSequence;
 use haystackfm::{
-    BMoveIndex, BidirFmIndex, BidirRlFmIndex, FmIndex, FmIndexConfig, MoveFmIndex,
+    BMoveIndex, BidirFmIndex, BidirRlFmIndex, FmIndex, FmIndexConfig, Mem, MoveFmIndex,
     MoveFmIndexConfig, RlFmIndex, RlFmIndexConfig,
 };
 use rand::rngs::StdRng;
@@ -43,6 +44,30 @@ fn patterns(seqs: &[DnaSequence], len: usize, count: usize) -> Vec<Vec<u8>> {
             text[at..at + len].to_vec()
         })
         .collect()
+}
+
+/// `count` reads of `len` bases with up to three substitutions each.
+fn reads(seqs: &[DnaSequence], len: usize, count: usize) -> Vec<Vec<u8>> {
+    let mut rng = StdRng::seed_from_u64(0x4ead);
+    patterns(seqs, len, count)
+        .into_iter()
+        .map(|mut read| {
+            for _ in 0..rng.random_range(0..4) {
+                let at = rng.random_range(0..len);
+                read[at] = BASES[rng.random_range(0..4)];
+            }
+            read
+        })
+        .collect()
+}
+
+/// Total positions over `reads`.
+fn positions(reads: &[Vec<u8>], find: impl Fn(&[u8]) -> Vec<Mem>) -> usize {
+    reads
+        .iter()
+        .flat_map(|r| find(r))
+        .map(|m| m.positions.len())
+        .sum()
 }
 
 fn fm_config() -> FmIndexConfig {
@@ -132,6 +157,37 @@ fn bench_move(c: &mut Criterion) {
             })
         });
         group.finish();
+
+        let rs = reads(&seqs, 150, 16);
+        for (op, mems) in [("smems", false), ("mems", true)] {
+            let mut group = c.benchmark_group(format!("move_{op}/{name}"));
+            let run = |find: &dyn Fn(&[u8]) -> Vec<Mem>| positions(&rs, find);
+            group.bench_function("fm", |b| {
+                b.iter(|| {
+                    run(&|r| match mems {
+                        true => fm_bidir.find_mems(r, 19, true),
+                        false => fm_bidir.find_smems(r, 19, true),
+                    })
+                })
+            });
+            group.bench_function("rl", |b| {
+                b.iter(|| {
+                    run(&|r| match mems {
+                        true => rl_bidir.find_mems(r, 19, true),
+                        false => rl_bidir.find_smems(r, 19, true),
+                    })
+                })
+            });
+            group.bench_function("bmove", |b| {
+                b.iter(|| {
+                    run(&|r| match mems {
+                        true => bm.find_mems(r, 19, true),
+                        false => bm.find_smems(r, 19, true),
+                    })
+                })
+            });
+            group.finish();
+        }
     }
 }
 
