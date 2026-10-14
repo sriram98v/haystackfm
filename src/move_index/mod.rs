@@ -30,6 +30,7 @@
 mod bmove;
 mod lf;
 mod locate;
+mod mems;
 mod serialize;
 
 pub use bmove::{BMoveCursor, BMoveIndex};

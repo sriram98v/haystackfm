@@ -12,6 +12,7 @@ use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::reverse_as_sequence;
 use crate::fm_index::prepare::{in_build_pool, prepare_cpu};
 use crate::fm_index::seq_id::SeqId;
+use crate::fm_index::smem::ShallowCache;
 
 /// A b-move search state: the SA interval of the matched pattern `P` in the forward index
 /// and of `P^R` in the reverse one, the move-table rows of their borders, `|P|`, and a
@@ -22,10 +23,10 @@ use crate::fm_index::seq_id::SeqId;
 /// intervals are identical across index types).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BMoveCursor {
-    fwd: Span,
-    rev: Span,
-    len: u32,
-    toehold: u32,
+    pub(super) fwd: Span,
+    pub(super) rev: Span,
+    pub(super) len: u32,
+    pub(super) toehold: u32,
 }
 
 impl BMoveCursor {
@@ -75,6 +76,8 @@ pub struct BMoveIndex {
     pub(crate) rev: MoveLf,
     /// Present exactly when `fwd` has locate support.
     pub(crate) rev_samples: Option<RunSamples>,
+    /// Cursor sets of short k-mers for the SMEM/MEM sweeps; derived, never serialized.
+    pub(crate) shallow: ShallowCache<BMoveCursor>,
 }
 
 impl BMoveIndex {
@@ -106,12 +109,30 @@ impl BMoveIndex {
             let rev_samples = config
                 .locate
                 .then(|| RunSamples::build(&rev.table, &rev_prepared.sa.data));
-            Ok(Self {
-                fwd,
-                rev,
-                rev_samples,
-            })
+            Ok(Self::from_parts(fwd, rev, rev_samples))
         })
+    }
+
+    /// Pair the halves and derive the sweep cache.
+    pub(crate) fn from_parts(
+        fwd: MoveFmIndex,
+        rev: MoveLf,
+        rev_samples: Option<RunSamples>,
+    ) -> Self {
+        let mut index = Self {
+            fwd,
+            rev,
+            rev_samples,
+            shallow: ShallowCache::default(),
+        };
+        let shallow = ShallowCache::build_with(
+            index.full_cursor(),
+            index.fwd.text_len,
+            &index.fwd.alphabet_fns,
+            |cur| index.children_right_sweep(cur),
+        );
+        index.shallow = shallow;
+        index
     }
 
     /// The forward half.
@@ -152,7 +173,7 @@ impl BMoveIndex {
     pub fn extend_right(&self, cur: &BMoveCursor, c: u8) -> Option<BMoveCursor> {
         let (rev, toehold) = self.rev.extend(c, &cur.rev)?;
         let below = self.rev.count_set_in(SymbolSet::below(c), &cur.rev);
-        Some(self.right_child(cur, c, rev, toehold, below))
+        Some(self.right_child(cur, c, (rev, toehold), below, false))
     }
 
     fn left_child(
@@ -184,24 +205,32 @@ impl BMoveIndex {
         }
     }
 
+    /// The right child by `c` of `cur`, from the reverse step's span and toehold source and
+    /// the count `below` of occurrences followed by a smaller symbol. A sentinel child gets
+    /// a toehold only when `sentinel_toehold` is set (see
+    /// [`children_right_sweep`](Self::children_right_sweep)).
     fn right_child(
         &self,
         cur: &BMoveCursor,
         c: u8,
-        rev: Span,
-        toehold: Toehold,
+        (rev, toehold): (Span, Toehold),
         below: u32,
+        sentinel_toehold: bool,
     ) -> BMoveCursor {
         let s = cur.fwd.s + below;
         let fwd = self.fwd.lf.narrow(&cur.fwd, s, s + rev.size() - 1);
-        let len = cur.len + 1;
         let toehold = match &self.rev_samples {
-            Some(samples) if c != SENTINEL && cur.toehold != UNKNOWN_TOEHOLD => {
+            Some(samples)
+                if (c != SENTINEL || sentinel_toehold) && cur.toehold != UNKNOWN_TOEHOLD =>
+            {
                 match samples.get(toehold) {
-                    // `y` starts an occurrence of (Pc)^R in T^R, and T^R[j] = T[n − 2 − j].
+                    // `v` starts an occurrence of P^R in T^R preceded by c (cyclically:
+                    // `v = 0` is preceded by T^R's closing sentinel), and
+                    // T^R[j] = T[n − 2 − j]: P ends at T[n − 2 − v], followed by
+                    // T[n − 1 − v] = c (the closing sentinel of T when `v = 0`).
                     Some(v) => v
-                        .checked_sub(1)
-                        .and_then(|y| (self.fwd.text_len - 1).checked_sub(y + len))
+                        .checked_add(cur.len)
+                        .and_then(|end| (self.fwd.text_len - 1).checked_sub(end))
                         .unwrap_or(UNKNOWN_TOEHOLD),
                     // Every occurrence of P is followed by c: the toehold still starts one.
                     None => cur.toehold,
@@ -212,7 +241,7 @@ impl BMoveIndex {
         BMoveCursor {
             fwd,
             rev,
-            len,
+            len: cur.len + 1,
             toehold,
         }
     }
@@ -233,12 +262,34 @@ impl BMoveIndex {
 
     /// Every right child at once: `children_right(cur)[c] == extend_right(cur, c)`.
     pub fn children_right(&self, cur: &BMoveCursor) -> [Option<BMoveCursor>; ALPHABET_SIZE] {
+        self.children_right_with(cur, false)
+    }
+
+    /// [`children_right`](Self::children_right) with a toehold on the sentinel child too:
+    /// its reverse sample is the SA value of a row whose BWT symbol is a sentinel, exact by
+    /// the BWT's definition and needing no LF step, so the child (the occurrences of P at a
+    /// reference end, which the MEM sweep's drop sets hold) can be located. The sweep never
+    /// extends such a child; the public cursor API keeps sentinel children unlocatable (see
+    /// [`locate`](Self::locate)).
+    pub(crate) fn children_right_sweep(
+        &self,
+        cur: &BMoveCursor,
+    ) -> [Option<BMoveCursor>; ALPHABET_SIZE] {
+        self.children_right_with(cur, true)
+    }
+
+    fn children_right_with(
+        &self,
+        cur: &BMoveCursor,
+        sentinel_toehold: bool,
+    ) -> [Option<BMoveCursor>; ALPHABET_SIZE] {
         let mut out = [None; ALPHABET_SIZE];
         let mut below = 0;
         for c in self.rev.present().iter() {
             if let Some((rev, toehold)) = self.rev.extend(c, &cur.rev) {
                 let size = rev.size();
-                out[c as usize] = Some(self.right_child(cur, c, rev, toehold, below));
+                let child = self.right_child(cur, c, (rev, toehold), below, sentinel_toehold);
+                out[c as usize] = Some(child);
                 below += size;
             }
         }
@@ -354,5 +405,6 @@ impl BMoveIndex {
                 .rev_samples
                 .as_ref()
                 .map_or(0, RunSamples::heap_size_bytes)
+            + self.shallow.heap_size_bytes()
     }
 }

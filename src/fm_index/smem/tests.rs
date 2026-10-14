@@ -687,20 +687,25 @@ fn smems_equal_containment_filtered_mems_randomized() {
 
 /// The pruned/lockstep sweeps against the original algorithms they replace, compared
 /// as raw candidates (bounds, counts, intervals in order, left context) before any
-/// filtering or locating, on both backends (the uncompressed one with its shallow cache,
-/// the run-length one with its rank scan). Strain-like texts with N runs and reads with
+/// filtering or locating, on every backend (the uncompressed one with its shallow cache,
+/// the run-length one with its rank scan, b-move with its move tables; the oracles also run
+/// on b-move's own hooks). Strain-like texts with N runs and reads with
 /// substitutions and ambiguity codes, so the early stop, the equal-coverage pruning and
 /// the drop arithmetic all fire.
 #[test]
 fn rewritten_sweeps_match_the_original_candidates() {
+    use crate::move_index::{BMoveIndex, MoveFmIndexConfig};
     use crate::rl_fm_index::BidirRlFmIndex;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
     type Key = (usize, usize, u32, Vec<BidirInterval>, Option<u8>);
-    fn keys(raws: Vec<RawMem>) -> Vec<Key> {
+    fn keys<C: SweepCursor>(raws: Vec<RawMem<C>>) -> Vec<Key> {
         raws.into_iter()
-            .map(|r| (r.query_start, r.query_end, r.match_count, r.ivs, r.left_ctx))
+            .map(|r| {
+                let ivs = r.ivs.iter().map(C::interval).collect();
+                (r.query_start, r.query_end, r.match_count, ivs, r.left_ctx)
+            })
             .collect()
     }
 
@@ -728,6 +733,7 @@ fn rewritten_sweeps_match_the_original_candidates() {
         };
         let fm = BidirFmIndex::build_cpu(&seqs, &config).unwrap();
         let rl = BidirRlFmIndex::from_bidir_fm_index(&fm);
+        let bm = BMoveIndex::build_cpu(&seqs, &MoveFmIndexConfig::default()).unwrap();
         for _ in 0..25 {
             let src = texts[rng.random_range(0..texts.len())].as_bytes();
             let start = rng.random_range(0..src.len() - 120);
@@ -744,6 +750,12 @@ fn rewritten_sweeps_match_the_original_candidates() {
                 assert_eq!(keys(rl.collect_smem_candidates(&q, min_len)), smems);
                 assert_eq!(keys(fm.collect_mem_candidates(&q, min_len)), mems);
                 assert_eq!(keys(rl.collect_mem_candidates(&q, min_len)), mems);
+                assert_eq!(keys(bm.collect_smem_candidates(&q, min_len)), smems);
+                assert_eq!(keys(bm.collect_mem_candidates(&q, min_len)), mems);
+                let bm_smems = oracle::collect_smem_candidates_reference(&bm, &q, min_len);
+                let bm_mems = oracle::collect_mem_candidates_reference(&bm, &q, min_len);
+                assert_eq!(keys(bm_smems), smems);
+                assert_eq!(keys(bm_mems), mems);
             }
         }
     }
@@ -751,9 +763,10 @@ fn rewritten_sweeps_match_the_original_candidates() {
 
 /// A reference dense in ambiguity codes multiplies every k-mer's wildcard variants:
 /// the shallow cache must stop at its budget (shallower, never larger), and the sweeps
-/// must still match the uncompressed index exactly.
+/// must still match the uncompressed index exactly (b-move: positions as a set).
 #[test]
 fn shallow_cache_respects_its_budget_on_iupac_dense_text() {
+    use crate::move_index::{BMoveCursor, BMoveIndex, MoveFmIndexConfig};
     use crate::rl_fm_index::BidirRlFmIndex;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
@@ -775,6 +788,13 @@ fn shallow_cache_respects_its_budget_on_iupac_dense_text() {
         rl.shallow.depth < SHALLOW_MAX_DEPTH as usize,
         "budget never hit"
     );
+    let bm = BMoveIndex::build_cpu(&seqs, &MoveFmIndexConfig::default()).unwrap();
+    assert!(bm.shallow.ivs.len() <= ShallowCache::<BMoveCursor>::MAX_ENTRIES);
+    assert!(bm.shallow.depth <= rl.shallow.depth);
+    let sorted = |mut mems: Vec<Mem>| {
+        mems.iter_mut().for_each(|m| m.positions.sort());
+        mems
+    };
     // Few, short reads: every query position fans out over the wildcard variants.
     for _ in 0..3 {
         let at = rng.random_range(0..text.len() - 30);
@@ -787,6 +807,14 @@ fn shallow_cache_respects_its_budget_on_iupac_dense_text() {
         assert_eq!(
             rl.find_mems(&q, min_len, true),
             fm.find_mems(&q, min_len, true)
+        );
+        assert_eq!(
+            sorted(bm.find_smems(&q, min_len, true)),
+            sorted(fm.find_smems(&q, min_len, true))
+        );
+        assert_eq!(
+            sorted(bm.find_mems(&q, min_len, true)),
+            sorted(fm.find_mems(&q, min_len, true))
         );
     }
 }

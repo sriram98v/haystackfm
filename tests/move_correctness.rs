@@ -376,6 +376,9 @@ fn bmove_fuzzed_blobs_never_panic() {
             if cur.toehold().is_some() {
                 let _ = idx.locate(&cur);
             }
+            let q = encode("ACGTTGCANNACG");
+            let _ = idx.find_smems(&q, 3, false);
+            let _ = idx.find_mems(&q, 3, false);
         }
     }
 }

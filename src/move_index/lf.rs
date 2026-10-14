@@ -98,6 +98,9 @@ impl MoveLf {
             if row.q != c_array.data[c] + counts[c] {
                 return Err(format!("LF row {k} does not map to C[head] + rank"));
             }
+            if row.head == SENTINEL && table.end(k) != table.start(k) {
+                return Err(format!("sentinel LF row {k} spans several positions"));
+            }
             counts[c] += table.end(k) - table.start(k) + 1;
             heads.push(row.head);
         }
@@ -232,6 +235,35 @@ impl MoveLf {
         set.iter().map(|c| self.count_in(c, span)).sum()
     }
 
+    /// Symbols in `bwt[s..=e]`, or a superset: the heads of a span over few rows, else every
+    /// present symbol.
+    pub(crate) fn symbols_in(&self, span: &Span) -> SymbolSet {
+        let (ks, ke) = (span.ks as usize, span.ke as usize);
+        if ke - ks > 2 * WALK {
+            return self.present;
+        }
+        (ks..=ke).fold(SymbolSet::EMPTY, |set, k| {
+            set.union(SymbolSet::single(self.table.head(k)))
+        })
+    }
+
+    /// Calls `each` with every row of `span` whose head is `c`, ascending: a scan over few
+    /// rows, rank/select on the heads over many.
+    pub(crate) fn rows_with(&self, c: u8, span: &Span, mut each: impl FnMut(usize)) {
+        let (ks, ke) = (span.ks as usize, span.ke as usize);
+        if ke - ks <= 2 * WALK {
+            (ks..=ke)
+                .filter(|&k| self.table.head(k) == c)
+                .for_each(each);
+            return;
+        }
+        let first = self.heads.rank(c, span.ks);
+        let last = self.heads.rank(c, span.ke + 1);
+        for r in first + 1..=last {
+            each(self.heads.select(c, r).expect("ranked within the heads") as usize);
+        }
+    }
+
     /// Backward-search step: the span of `c·P` given the span of `P`, and where its toehold
     /// comes from. `None` when `c` does not occur in `bwt[s..=e]`.
     #[inline]
@@ -295,5 +327,58 @@ impl TryFrom<MoveLfRepr> for MoveLf {
 
     fn try_from(r: MoveLfRepr) -> Result<Self, String> {
         Self::from_parts(r.table, r.c_array)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    use super::*;
+    use crate::alphabet::DnaSequence;
+    use crate::bwt::cpu::build_bwt;
+    use crate::fm_index::prepare::prepare_cpu;
+
+    /// `symbols_in` covers every symbol of the span (exactly, over few rows) and `rows_with`
+    /// lists exactly the rows of the span with that head, on spans narrow and wide.
+    #[test]
+    fn span_symbols_and_rows_match_a_scan() {
+        let mut rng = StdRng::seed_from_u64(0x5a11);
+        for round in 0..12 {
+            let seqs: Vec<DnaSequence> = (0..rng.random_range(1..8))
+                .map(|_| {
+                    let len = rng.random_range(1..400);
+                    let top = if round % 3 == 0 { 16 } else { 5 };
+                    DnaSequence::from_encoded((0..len).map(|_| rng.random_range(1..top)).collect())
+                })
+                .collect();
+            let p = prepare_cpu(&seqs).unwrap();
+            let bwt = build_bwt(&p.text, &p.sa);
+            let lf = MoveLf::from_bwt(&bwt, &p.c_array);
+            let full = lf.full_span().unwrap();
+            let n = lf.len();
+            for _ in 0..200 {
+                let s = rng.random_range(0..n);
+                let width = [4, 40, 4000][rng.random_range(0..3)];
+                let e = rng.random_range(s..n.min(s + width));
+                let span = lf.narrow(&full, s, e);
+                let (ks, ke) = (span.ks as usize, span.ke as usize);
+                let exact = (s..=e).fold(SymbolSet::EMPTY, |set, i| {
+                    set.union(SymbolSet::single(bwt.get(i as usize)))
+                });
+                let got = lf.symbols_in(&span);
+                assert_eq!(got.intersection(exact), exact, "missing symbols");
+                if ke - ks <= 2 * WALK {
+                    assert_eq!(got, exact);
+                }
+                for c in 0..ALPHABET_SIZE as u8 {
+                    let mut rows = Vec::new();
+                    lf.rows_with(c, &span, |k| rows.push(k));
+                    let want: Vec<usize> = (ks..=ke).filter(|&k| lf.table.head(k) == c).collect();
+                    assert_eq!(rows, want, "rows with {c} in {span:?}");
+                }
+            }
+        }
     }
 }

@@ -144,7 +144,8 @@ impl BMoveIndex {
         Ok(out)
     }
 
-    /// Deserialize from bytes written by [`to_bytes`](Self::to_bytes).
+    /// Deserialize from bytes written by [`to_bytes`](Self::to_bytes). Rebuilds the SMEM /
+    /// MEM sweeps' k-mer cache (at most 40 MiB), which is not stored.
     pub fn from_bytes(data: &[u8]) -> Result<Self, FmIndexError> {
         let rest = data
             .strip_prefix(&BMOVE_FORMAT_MAGIC)
@@ -162,6 +163,11 @@ impl BMoveIndex {
         if d.rev.len() != fwd.text_len {
             return Err(corrupt("reverse half covers a different text length"));
         }
+        // The reversed text holds the same symbols: halves of different indexes would
+        // answer with wrong intervals.
+        if d.rev.c_array != fwd.lf.c_array {
+            return Err(corrupt("reverse half indexes a different text"));
+        }
         match (&d.rev_samples, fwd.can_locate()) {
             (Some(samples), true) => samples
                 .validate(d.rev.num_rows(), fwd.text_len)
@@ -173,10 +179,6 @@ impl BMoveIndex {
                 ))
             }
         }
-        Ok(Self {
-            fwd,
-            rev: d.rev,
-            rev_samples: d.rev_samples,
-        })
+        Ok(Self::from_parts(fwd, d.rev, d.rev_samples))
     }
 }
