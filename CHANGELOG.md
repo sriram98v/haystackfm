@@ -8,6 +8,19 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+### Added
+- `BMoveIndex::find_smems` / `find_mems`: the b-move index runs the same SMEM/MEM sweeps
+  as the other bidirectional indexes and returns the same matches and counts. Positions
+  are located from toeholds and come back as a set, in no particular order. A derived
+  k-mer cursor cache (at most 40 MiB) is built on construction and load, never
+  serialized. On 200 Mbp of strains at `-O3` b-move takes about 1.8x (`find_smems`) to
+  2.1x (`find_mems`) the time of `BidirFmIndex`, with the cheapest locate of the three;
+  on a highly repetitive collection it is the fastest at `find_mems`.
+
+### Fixed
+- `BMoveIndex::from_bytes` rejects a reverse half whose symbol counts differ from the
+  forward half's, and move-table loads reject sentinel rows spanning several positions.
+
 ## [0.6.9] - 2026-10-12
 
 ### Performance
