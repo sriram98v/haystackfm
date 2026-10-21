@@ -76,8 +76,8 @@ impl BidirFmIndex {
 
         // Reverse index: built on the byte-reversal of the same concatenated text.
         let rev_seq = reverse_as_sequence(&text)?;
-        let mut rev = FmIndex::build_cpu_with::<A>(
-            &[rev_seq],
+        let mut rev = FmIndex::build_cpu_reverse_half_with::<A>(
+            &rev_seq,
             &FmIndexConfig {
                 sa_sample_rate: config.sa_sample_rate,
                 use_gpu: false,
@@ -130,7 +130,7 @@ impl BidirFmIndex {
         // Build sequentially: both paths share the GPU device pool and
         // concurrent init would contend for it.
         let fwd = FmIndex::build(sequences, config).await?;
-        let mut rev = FmIndex::build(&[rev_seq], &rev_config).await?;
+        let mut rev = FmIndex::build_reverse_half(&rev_seq, &rev_config).await?;
         // See `build_cpu_with`: the reverse text is redundant and never served.
         rev.forget_text();
 

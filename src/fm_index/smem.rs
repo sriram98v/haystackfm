@@ -73,7 +73,8 @@ impl BidirFmIndex {
     /// # Parameters
     ///
     /// - `query`: encoded alphabet codes (1–15; ambiguity codes fan out over the reference
-    ///   codes they match under the index's alphabet; 0 = sentinel, must not appear).
+    ///   codes they match under the index's alphabet; 0 = sentinel / `#`, matches nothing
+    ///   and so splits the query like a mismatch).
     /// - `min_len`: discard matches shorter than this (must be ≥ 1).
     /// - `locate`: if `true`, populate `Mem::positions` with reference positions.
     ///

@@ -131,13 +131,28 @@ impl FmIndex {
         }
 
         prepare::in_build_pool(config.build_threads, || {
-            Self::build_cpu_inner::<A>(sequences, config)
+            Self::build_cpu_inner::<A>(sequences, config, false)
+        })
+    }
+
+    /// The reverse half of a [`BidirFmIndex`](crate::BidirFmIndex), built on the one
+    /// sequence [`reverse_as_sequence`](crate::fm_index::bidir_index::reverse_as_sequence)
+    /// returns. That half never locates, so only text offset 0 is force-sampled rather than
+    /// every piece start behind its interior sentinels (which also keeps it byte-identical
+    /// to halves written before `#` delimiters existed).
+    pub(crate) fn build_cpu_reverse_half_with<A: Alphabet>(
+        reversed: &DnaSequence,
+        config: &FmIndexConfig,
+    ) -> Result<Self, FmIndexError> {
+        prepare::in_build_pool(config.build_threads, || {
+            Self::build_cpu_inner::<A>(std::slice::from_ref(reversed), config, true)
         })
     }
 
     fn build_cpu_inner<A: Alphabet>(
         sequences: &[DnaSequence],
         config: &FmIndexConfig,
+        reverse_half: bool,
     ) -> Result<Self, FmIndexError> {
         let alphabet_fns = A::fns();
         let prepare::Prepared {
@@ -151,6 +166,7 @@ impl FmIndex {
             sa,
             seq_starts,
         } = prepare::prepare_cpu(sequences)?;
+        let seq_starts = if reverse_half { vec![0] } else { seq_starts };
 
         // Build BWT from SA. The text is retained (not dropped) to back `sequence()`.
         let bwt = build_bwt(&text, &sa);
@@ -246,7 +262,9 @@ impl FmIndex {
     /// The bases are **alphabet codes**, not ASCII: `A = 1`, `C = 2`, `G = 3`, `T = 4`,
     /// `N = 5`, and so on (see [`crate::alphabet`]). Use [`crate::alphabet::decode_char`]
     /// to render them, or [`crate::alphabet::encode_byte`] to bring a query into the same
-    /// space before comparing.
+    /// space before comparing. A sequence built with `#` record delimiters carries
+    /// [`SENTINEL`](crate::alphabet::SENTINEL) at each one;
+    /// [`crate::alphabet::decode_sequence`] renders those as `#`.
     pub fn sequence(&self, id: SeqId) -> Option<&[u8]> {
         // Empty text means it was released by `forget_text` (the reverse half of a
         // `BidirFmIndex`); a built index always has a non-empty text otherwise.
@@ -291,6 +309,25 @@ impl FmIndex {
     pub async fn build(
         sequences: &[DnaSequence],
         config: &FmIndexConfig,
+    ) -> Result<Self, FmIndexError> {
+        Self::build_gpu_inner(sequences, config, false).await
+    }
+
+    /// GPU counterpart of [`build_cpu_reverse_half_with`](Self::build_cpu_reverse_half_with):
+    /// only text offset 0 is force-sampled.
+    #[cfg(feature = "gpu")]
+    pub(crate) async fn build_reverse_half(
+        reversed: &DnaSequence,
+        config: &FmIndexConfig,
+    ) -> Result<Self, FmIndexError> {
+        Self::build_gpu_inner(std::slice::from_ref(reversed), config, true).await
+    }
+
+    #[cfg(feature = "gpu")]
+    async fn build_gpu_inner(
+        sequences: &[DnaSequence],
+        config: &FmIndexConfig,
+        reverse_half: bool,
     ) -> Result<Self, FmIndexError> {
         use crate::bwt::gpu::BwtPipelines;
         use crate::gpu::GpuContext;
@@ -339,17 +376,14 @@ impl FmIndex {
         let occ = occ_pipelines.build_occ_table(&ctx, &bwt).await;
 
         // Sample the suffix array
-        // Every sequence start must be sampled so `resolve_sa`'s LF-walk never crosses a
-        // sentinel (all sentinels share one byte value → ambiguous LF). `seq_boundaries[k]` is
-        // the start of sequence k+1, so the starts are `0` plus every boundary but the last.
-        let seq_starts: Vec<u32> = std::iter::once(0)
-            .chain(
-                seq_boundaries
-                    .iter()
-                    .take(seq_boundaries.len().saturating_sub(1))
-                    .copied(),
-            )
-            .collect();
+        // Every piece start (sequence or `#`-delimited record) must be sampled so
+        // `resolve_sa`'s LF-walk never crosses a sentinel (all sentinels share one byte
+        // value → ambiguous LF).
+        let seq_starts = if reverse_half {
+            vec![0]
+        } else {
+            crate::alphabet::piece_starts(&text)
+        };
         let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate, &seq_starts);
 
         drop(bwt);

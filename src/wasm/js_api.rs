@@ -14,6 +14,7 @@ fn to_js_err(e: impl std::fmt::Display) -> JsValue {
 /// - Lines starting with `>` are treated as FASTA headers (stored in `DnaSequence`).
 /// - Blank lines are skipped.
 /// - Everything else is treated as sequence data (may span multiple lines per entry).
+///   A `#` inside it joins records into one logical sequence (see [`crate::alphabet`]).
 ///
 /// Returns one `DnaSequence` per FASTA record (or one per non-blank line for plain input).
 fn parse_fasta(input: &str) -> Result<Vec<DnaSequence>, JsValue> {
@@ -93,7 +94,8 @@ impl FmIndexBuilder {
         }
     }
 
-    /// Add a single DNA sequence (ACGT characters, case-insensitive).
+    /// Add a single DNA sequence (IUPAC characters, case-insensitive; `#` joins records
+    /// into one logical sequence).
     pub fn add_sequence(&mut self, seq: &str) -> Result<(), JsValue> {
         let dna = DnaSequence::from_str(seq).map_err(to_js_err)?;
         self.sequences.push(dna);
@@ -229,7 +231,8 @@ impl FmIndexHandle {
     }
 }
 
-/// Encode an ACGT pattern string to internal byte representation.
+/// Encode an ACGT pattern string to internal byte representation. `#` (and `$`) encode to
+/// the sentinel, which matches nothing.
 fn encode_pattern(pattern: &str) -> Result<Vec<u8>, JsValue> {
     use crate::alphabet::encode_char;
     pattern

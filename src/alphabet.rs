@@ -4,7 +4,7 @@
 //!
 //! | Code | Symbol | Bases |
 //! |------|--------|-------|
-//! | 0 | `$` | sentinel |
+//! | 0 | `$` / `#` | sentinel / record delimiter |
 //! | 1–4 | A C G T | exact bases |
 //! | 5 | N | A C G T (any) |
 //! | 6–15 | R Y S W K M B D H V | degenerate IUPAC |
@@ -14,6 +14,14 @@
 //! query code, so the CPU query path tests compatibility with a mask intersection. The GPU
 //! WGSL shaders hard-code the same IUPAC table; a unit test parses the shader sources and
 //! checks them against [`IupacDna`].
+//!
+//! # Record delimiter `#`
+//!
+//! `#` joins several records (e.g. FASTA entries) into one logical sequence: one
+//! [`SeqId`](crate::SeqId), one header, offsets counted across the whole joined string (each
+//! `#` occupies one position). It is stored as the sentinel code `0`, so it matches no query
+//! symbol and ends SMEM/MEM extension exactly like the `$` between sequences; `#` in a query
+//! likewise matches nothing. [`decode_sequence`] renders it back as `#`.
 
 use crate::error::FmIndexError;
 
@@ -22,6 +30,9 @@ pub const ALPHABET_SIZE: usize = 16;
 
 /// Sentinel character (lexicographically smallest)
 pub const SENTINEL: u8 = 0;
+/// ASCII record delimiter inside a sequence; encodes to [`SENTINEL`] (see the
+/// [module docs](self#record-delimiter-)).
+pub const DELIMITER: u8 = b'#';
 /// Encoded value for adenine (A).
 pub const A: u8 = 1;
 /// Encoded value for cytosine (C).
@@ -56,6 +67,7 @@ pub const V: u8 = 15;
 const fn build_encode_lut() -> [i8; 256] {
     let mut lut = [-1i8; 256];
     lut[b'$' as usize] = SENTINEL as i8;
+    lut[DELIMITER as usize] = SENTINEL as i8;
     lut[b'A' as usize] = A as i8;
     lut[b'a' as usize] = A as i8;
     lut[b'C' as usize] = C as i8;
@@ -145,6 +157,19 @@ pub fn decode_char(code: u8) -> Option<char> {
         V => Some('V'),
         _ => None,
     }
+}
+
+/// Render a sequence's alphabet codes as ASCII, with an interior [`SENTINEL`] shown as the
+/// record delimiter `#` (as [`FmIndex::sequence`](crate::FmIndex::sequence) returns them).
+/// Codes outside the alphabet render as `?`.
+pub fn decode_sequence(codes: &[u8]) -> String {
+    codes
+        .iter()
+        .map(|&c| match c {
+            SENTINEL => DELIMITER as char,
+            c => decode_char(c).unwrap_or('?'),
+        })
+        .collect()
 }
 
 /// Returns the {A, C, G, T} base codes that an IUPAC symbol represents.
@@ -510,6 +535,11 @@ pub struct DnaSequence {
 
 impl DnaSequence {
     /// Parse from a string of IUPAC nucleotide characters. Returns Err on invalid characters.
+    ///
+    /// `#` joins records into one logical sequence (see the
+    /// [module docs](self#record-delimiter-)); it must sit between two non-empty records, so a
+    /// leading, trailing or doubled `#` is an [`InvalidCharacter`](FmIndexError::InvalidCharacter),
+    /// as is `$`.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Result<Self, FmIndexError> {
         if s.is_empty() {
@@ -517,7 +547,11 @@ impl DnaSequence {
         }
         let mut bases = Vec::with_capacity(s.len());
         for (i, b) in s.bytes().enumerate() {
+            let piece_empty = bases.last().is_none_or(|&prev| prev == SENTINEL);
             match encode_byte(b) {
+                Some(SENTINEL) if b == DELIMITER && !piece_empty && i + 1 < s.len() => {
+                    bases.push(SENTINEL)
+                }
                 Some(SENTINEL) | None => {
                     let ch = s[i..].chars().next().unwrap_or(b as char);
                     return Err(FmIndexError::InvalidCharacter(ch, i));
@@ -538,12 +572,53 @@ impl DnaSequence {
         Ok(seq)
     }
 
-    /// Create from pre-encoded bases (no validation).
+    /// Join records into one logical sequence, `pieces[0] # pieces[1] # …`, under `header`
+    /// (the pieces' own headers are dropped). Equivalent to [`from_str_with_header`] on the
+    /// `#`-joined string.
+    ///
+    /// Errors: [`EmptySequence`](FmIndexError::EmptySequence) for no pieces or an empty
+    /// piece; [`InvalidCharacter`](FmIndexError::InvalidCharacter) (`'#'` at its offset in the
+    /// joined sequence) for a piece that is itself delimited.
+    ///
+    /// [`from_str_with_header`]: Self::from_str_with_header
+    pub fn join(pieces: &[DnaSequence], header: &str) -> Result<Self, FmIndexError> {
+        if pieces.is_empty() || pieces.iter().any(DnaSequence::is_empty) {
+            return Err(FmIndexError::EmptySequence);
+        }
+        let len = pieces.iter().map(|p| p.len() + 1).sum::<usize>() - 1;
+        let mut bases = Vec::with_capacity(len);
+        for (k, piece) in pieces.iter().enumerate() {
+            if k > 0 {
+                bases.push(SENTINEL);
+            }
+            if let Some(i) = piece.bases.iter().position(|&c| c == SENTINEL) {
+                return Err(FmIndexError::InvalidCharacter(
+                    DELIMITER as char,
+                    bases.len() + i,
+                ));
+            }
+            bases.extend_from_slice(&piece.bases);
+        }
+        Ok(Self {
+            bases,
+            header: header.to_string(),
+        })
+    }
+
+    /// Create from pre-encoded bases (no validation). An interior [`SENTINEL`] is a record
+    /// delimiter `#`.
     pub fn from_encoded(bases: Vec<u8>) -> Self {
         Self {
             bases,
             header: String::new(),
         }
+    }
+
+    /// Number of `#`-delimited records (1 for an undelimited sequence). Counts sentinel-
+    /// separated pieces, so [`from_encoded`](Self::from_encoded) bases with a leading,
+    /// trailing or doubled sentinel count their empty pieces too.
+    pub fn num_pieces(&self) -> usize {
+        1 + self.bases.iter().filter(|&&c| c == SENTINEL).count()
     }
 
     pub fn len(&self) -> usize {
@@ -566,6 +641,10 @@ impl DnaSequence {
 /// Concatenate multiple DNA sequences with $ separators into a single encoded text.
 /// Result: s1 $ s2 $ ... $ sn $
 /// Returns the concatenated text and the cumulative lengths (for mapping positions back).
+///
+/// The lengths are *logical*: a `#` inside a sequence is a sentinel in the text too, but it
+/// stays inside its sequence's range, so positions map to offsets in the `#`-joined string.
+/// [`piece_starts`] / [`piece_boundaries`] give the physical sentinel-separated pieces.
 pub fn concatenate_sequences(
     sequences: &[DnaSequence],
 ) -> Result<(Vec<u8>, Vec<u32>), FmIndexError> {
@@ -584,6 +663,30 @@ pub fn concatenate_sequences(
     }
 
     Ok((text, cumulative_lengths))
+}
+
+/// Start of every sentinel-separated piece of a concatenated `text`: `0` plus each position
+/// right after a sentinel (`$` or `#`), except past the end. Every SA sampling must keep
+/// these, so a locate LF-walk never crosses a sentinel (all sentinels share code 0, which
+/// makes LF ambiguous there).
+pub(crate) fn piece_starts(text: &[u8]) -> Vec<u32> {
+    std::iter::once(0)
+        .chain(
+            piece_boundaries(text)
+                .into_iter()
+                .filter(|&b| (b as usize) < text.len()),
+        )
+        .collect()
+}
+
+/// Exclusive end (sentinel included) of every sentinel-separated piece of a concatenated
+/// `text`, in text order; the last is `text.len()`.
+pub(crate) fn piece_boundaries(text: &[u8]) -> Vec<u32> {
+    text.iter()
+        .enumerate()
+        .filter(|&(_, &c)| c == SENTINEL)
+        .map(|(i, _)| i as u32 + 1)
+        .collect()
 }
 
 #[cfg(test)]
@@ -730,6 +833,88 @@ mod tests {
         let (text, cum) = concatenate_sequences(&[s1, s2]).unwrap();
         assert_eq!(text, vec![A, C, G, SENTINEL, T, T, SENTINEL]);
         assert_eq!(cum, vec![4, 7]);
+    }
+
+    // ── `#` record delimiter ─────────────────────────────────────────────────
+
+    #[test]
+    fn delimiter_encodes_as_sentinel() {
+        assert_eq!(encode_byte(DELIMITER), Some(SENTINEL));
+        assert_eq!(encode_char('#'), Some(SENTINEL));
+        // `$` still encodes (queries), but a sequence may only carry it as `#`.
+        assert_eq!(encode_char('$'), Some(SENTINEL));
+    }
+
+    #[test]
+    fn from_str_accepts_interior_delimiter() {
+        let seq = DnaSequence::from_str("AC#GT#N").unwrap();
+        assert_eq!(seq.as_slice(), &[A, C, SENTINEL, G, T, SENTINEL, N]);
+        assert_eq!(seq.num_pieces(), 3);
+        assert_eq!(DnaSequence::from_str("ACGT").unwrap().num_pieces(), 1);
+    }
+
+    #[test]
+    fn from_str_rejects_dollar_and_empty_pieces() {
+        let bad = |s: &str| match DnaSequence::from_str(s) {
+            Err(FmIndexError::InvalidCharacter(ch, i)) => (ch, i),
+            other => panic!("{s:?}: expected InvalidCharacter, got {other:?}"),
+        };
+        assert_eq!(bad("AC$GT"), ('$', 2));
+        assert_eq!(bad("#ACGT"), ('#', 0));
+        assert_eq!(bad("ACGT#"), ('#', 4));
+        assert_eq!(bad("AC##GT"), ('#', 3));
+        assert_eq!(bad("#"), ('#', 0));
+    }
+
+    #[test]
+    fn join_matches_delimited_string() {
+        let pieces = [
+            DnaSequence::from_str_with_header("AC", "r1").unwrap(),
+            DnaSequence::from_str("GT").unwrap(),
+            DnaSequence::from_str("N").unwrap(),
+        ];
+        let joined = DnaSequence::join(&pieces, "genome").unwrap();
+        assert_eq!(
+            joined,
+            DnaSequence::from_str_with_header("AC#GT#N", "genome").unwrap()
+        );
+        assert_eq!(joined.header(), "genome");
+    }
+
+    #[test]
+    fn join_rejects_degenerate_pieces() {
+        assert!(matches!(
+            DnaSequence::join(&[], "h"),
+            Err(FmIndexError::EmptySequence)
+        ));
+        let ac = DnaSequence::from_str("AC").unwrap();
+        assert!(matches!(
+            DnaSequence::join(&[ac.clone(), DnaSequence::from_encoded(vec![])], "h"),
+            Err(FmIndexError::EmptySequence)
+        ));
+        // A piece that is itself delimited would hide a record boundary inside it.
+        let delimited = DnaSequence::from_str("A#C").unwrap();
+        assert!(matches!(
+            DnaSequence::join(&[ac, delimited], "h"),
+            Err(FmIndexError::InvalidCharacter('#', 4))
+        ));
+    }
+
+    #[test]
+    fn decode_sequence_renders_delimiter() {
+        let seq = DnaSequence::from_str("ACGTN#RYSWKMBDHV#a").unwrap();
+        assert_eq!(decode_sequence(seq.as_slice()), "ACGTN#RYSWKMBDHV#A");
+    }
+
+    #[test]
+    fn concatenate_keeps_logical_boundaries() {
+        let s1 = DnaSequence::from_str("AC#G").unwrap();
+        let s2 = DnaSequence::from_str("TT").unwrap();
+        let (text, cum) = concatenate_sequences(&[s1, s2]).unwrap();
+        assert_eq!(text, vec![A, C, SENTINEL, G, SENTINEL, T, T, SENTINEL]);
+        assert_eq!(cum, vec![5, 8]);
+        assert_eq!(piece_starts(&text), vec![0, 3, 5]);
+        assert_eq!(piece_boundaries(&text), vec![3, 5, 8]);
     }
 
     // ── SymbolSet ─────────────────────────────────────────────────────────────

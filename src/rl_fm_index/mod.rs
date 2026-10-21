@@ -10,7 +10,8 @@
 //! plus each sequence start) and LF-walks over the run-length rank, so its space is still
 //! `O(n / sa_sample_rate)`. `r`-sized SA sampling (toehold + φ) arrives with the move
 //! structure. The text itself is not retained: [`RlFmIndex::sequence`] reads a reference
-//! back off the BWT by LF-walking from its sentinel row (one stored row per sequence).
+//! back off the BWT by LF-walking from its sentinel row (one stored row per
+//! sentinel-separated piece: per sequence, plus per `#` record delimiter inside one).
 //!
 //! Also shared with the uncompressed index: the k-mer lookup table (seeding backward search
 //! and `lookup_interval`), SMEM/MEM finding (the same sweep, generic over the index half),
@@ -101,10 +102,14 @@ pub struct RlFmIndex {
     /// Derived from `seq_headers`; not serialized.
     pub(crate) header_index: HeaderIndex,
     pub(crate) alphabet_fns: AlphabetFns,
-    /// `seq_end_rows[k]` is the BWT row whose suffix starts at sequence `k`'s sentinel, the
-    /// starting point of [`sequence`](Self::sequence)'s LF walk. Empty on the reverse half
-    /// of a [`BidirRlFmIndex`], which never extracts.
-    pub(crate) seq_end_rows: Vec<u32>,
+    /// Exclusive end (sentinel included) of every sentinel-separated piece of the text: one
+    /// per sequence, plus one per `#` record delimiter inside a sequence. Every
+    /// `seq_boundaries` entry is one of them. Empty when `piece_end_rows` is.
+    pub(crate) piece_boundaries: Vec<u32>,
+    /// `piece_end_rows[k]` is the BWT row whose suffix starts at piece `k`'s sentinel, the
+    /// starting point of [`sequence`](Self::sequence)'s LF walk over that piece. Empty on
+    /// the reverse half of a [`BidirRlFmIndex`], which never extracts.
+    pub(crate) piece_end_rows: Vec<u32>,
     /// Optional depth-k lookup table seeding backward search.
     pub(crate) lookup: Option<LookupTable>,
 }
@@ -143,13 +148,13 @@ impl RlFmIndex {
     ) -> Self {
         let sa_samples = (config.sa_sample_rate > 0)
             .then(|| SampledSuffixArray::from_full(&p.sa, config.sa_sample_rate, &p.seq_starts));
-        let seq_end_rows = if extract {
-            seq_end_rows_from(p.num_sequences, &p.seq_boundaries, |row| {
-                Some(p.sa.data[row as usize])
-            })
-            .expect("sentinel rows of a fresh suffix array")
+        let (piece_boundaries, piece_end_rows) = if extract {
+            let bounds = crate::alphabet::piece_boundaries(&p.text);
+            let rows = piece_end_rows_from(&bounds, |row| Some(p.sa.data[row as usize]))
+                .expect("sentinel rows of a fresh suffix array");
+            (bounds, rows)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let bwt = build_bwt(&p.text, &p.sa);
         drop(p.sa);
@@ -174,7 +179,8 @@ impl RlFmIndex {
             seq_headers: p.seq_headers,
             header_index: p.header_index,
             alphabet_fns,
-            seq_end_rows,
+            piece_boundaries,
+            piece_end_rows,
             lookup,
         }
     }
@@ -224,15 +230,25 @@ impl RlFmIndex {
     /// the sentinel rows of a reverse half would LF-walk across its inner sentinels, where
     /// LF is ambiguous and the walk need not reach a sample.
     pub(crate) fn convert(fm: &FmIndex, extract: bool) -> Self {
-        let seq_end_rows = if extract {
-            sentinel_rows_of(fm).unwrap_or_default()
+        let pieces = if extract {
+            // A forward `FmIndex` keeps its text; without it, assume one piece per sequence
+            // (the row mapping below rejects that guess if the text held `#` delimiters).
+            let bounds = if fm.text.is_empty() {
+                fm.seq_boundaries.clone()
+            } else {
+                crate::alphabet::piece_boundaries(&fm.text)
+            };
+            sentinel_rows_of(fm, &bounds).map(|rows| (bounds, rows))
         } else {
-            Vec::new()
+            None
         };
-        Self::convert_with_rows(fm, seq_end_rows)
+        Self::convert_with_rows(fm, pieces.unwrap_or_default())
     }
 
-    fn convert_with_rows(fm: &FmIndex, seq_end_rows: Vec<u32>) -> Self {
+    fn convert_with_rows(
+        fm: &FmIndex,
+        (piece_boundaries, piece_end_rows): (Vec<u32>, Vec<u32>),
+    ) -> Self {
         Self {
             c_array: fm.c_array.clone(),
             bwt: RlBwt::from_occ(&fm.occ),
@@ -243,7 +259,8 @@ impl RlFmIndex {
             seq_headers: fm.seq_headers.clone(),
             header_index: fm.header_index.clone(),
             alphabet_fns: fm.alphabet_fns,
-            seq_end_rows,
+            piece_boundaries,
+            piece_end_rows,
             lookup: fm.lookup.clone(),
         }
     }
@@ -283,28 +300,41 @@ impl RlFmIndex {
     /// index cannot extract (the reverse half of a bidirectional index, or one converted
     /// from an `FmIndex` whose SA samples miss sequence starts).
     ///
-    /// The text is not stored: the bases are read back off the BWT by LF-walking from the
-    /// sequence's sentinel row to the preceding sentinel, one rank per base. Unlike
-    /// `FmIndex::sequence` this returns an owned buffer.
+    /// The text is not stored: the bases are read back off the BWT by LF-walking from each
+    /// piece's sentinel row to the preceding sentinel, one rank per base. A sequence with
+    /// `#` record delimiters is walked piece by piece (LF is ambiguous at a sentinel), with
+    /// [`SENTINEL`](crate::alphabet::SENTINEL) written at each delimiter, as
+    /// `FmIndex::sequence` returns it. Unlike `FmIndex::sequence` this returns an owned
+    /// buffer.
     pub fn sequence(&self, id: SeqId) -> Option<Vec<u8>> {
-        let mut row = *self.seq_end_rows.get(id.index())?;
-        let end = self.seq_boundaries[id.index()];
+        use crate::alphabet::SENTINEL;
+        if self.piece_end_rows.is_empty() {
+            return None;
+        }
+        let end = *self.seq_boundaries.get(id.index())?;
         let start = id
             .index()
             .checked_sub(1)
             .map_or(0, |k| self.seq_boundaries[k]);
-        let len = (end - start - 1) as usize;
-        let mut out = Vec::with_capacity(len);
-        for _ in 0..len {
-            let (c, rank) = self.bwt.lf_step(row);
-            if c == crate::alphabet::SENTINEL {
-                // Only a corrupted `seq_end_rows` can end the walk early.
-                return None;
+        let mut out = vec![SENTINEL; (end - start - 1) as usize];
+        // Pieces whose boundary falls in `(start, end]`: this sequence's records.
+        let first = self.piece_boundaries.partition_point(|&b| b <= start);
+        let last = self.piece_boundaries.partition_point(|&b| b <= end);
+        for k in first..last {
+            let piece_start = k.checked_sub(1).map_or(0, |j| self.piece_boundaries[j]);
+            let lo = (piece_start - start) as usize;
+            let hi = (self.piece_boundaries[k] - 1 - start) as usize;
+            let mut row = self.piece_end_rows[k];
+            for slot in out[lo..hi].iter_mut().rev() {
+                let (c, rank) = self.bwt.lf_step(row);
+                if c == SENTINEL {
+                    // Only corrupted piece metadata can end the walk early.
+                    return None;
+                }
+                *slot = c;
+                row = self.c_array.get(c) + rank;
             }
-            out.push(c);
-            row = self.c_array.get(c) + rank;
         }
-        out.reverse();
         Some(out)
     }
 
@@ -341,26 +371,26 @@ impl RlFmIndex {
                 .as_ref()
                 .map_or(0, SampledSuffixArray::heap_size_bytes)
             + self.seq_boundaries.len() * 4
-            + self.seq_end_rows.len() * 4
+            + self.piece_boundaries.len() * 4
+            + self.piece_end_rows.len() * 4
             + self.lookup.as_ref().map_or(0, LookupTable::heap_size_bytes)
             + self.seq_headers.iter().map(String::len).sum::<usize>()
     }
 }
 
-/// Sentinel row of each sequence: rows `0..num_sequences` hold the sentinel suffixes, and
-/// `text_pos_of(row)` gives the text position of that row's suffix (one of the sentinels).
-/// `None` when a row is unresolved or does not map one-to-one onto the sequence ends.
-fn seq_end_rows_from(
-    num_sequences: u32,
-    seq_boundaries: &[u32],
+/// Sentinel row of each piece: rows `0..piece_boundaries.len()` hold the sentinel suffixes
+/// (one sentinel per piece), and `text_pos_of(row)` gives the text position of that row's
+/// suffix. `None` when a row is unresolved or does not map one-to-one onto the piece ends.
+fn piece_end_rows_from(
+    piece_boundaries: &[u32],
     text_pos_of: impl Fn(u32) -> Option<u32>,
 ) -> Option<Vec<u32>> {
-    let mut rows = vec![u32::MAX; num_sequences as usize];
-    for row in 0..num_sequences {
+    let mut rows = vec![u32::MAX; piece_boundaries.len()];
+    for row in 0..piece_boundaries.len() as u32 {
         let pos = text_pos_of(row)?;
-        // A sentinel at `pos` ends the sequence whose exclusive boundary is `pos + 1`.
-        let k = seq_boundaries.partition_point(|&b| b <= pos);
-        if seq_boundaries.get(k) != Some(&(pos + 1)) || rows[k] != u32::MAX {
+        // A sentinel at `pos` ends the piece whose exclusive boundary is `pos + 1`.
+        let k = piece_boundaries.partition_point(|&b| b <= pos);
+        if piece_boundaries.get(k) != Some(&(pos + 1)) || rows[k] != u32::MAX {
             return None;
         }
         rows[k] = row;
@@ -369,12 +399,20 @@ fn seq_end_rows_from(
 }
 
 /// Sentinel rows of an existing index, by LF-walking each sentinel row back to an SA
-/// sample. A walk stops (unresolved) at the sequence's first base, so it never crosses a
-/// sentinel, where LF is ambiguous, and takes at most one sequence length. Freshly built
-/// indexes sample every sequence start, so the walk always resolves. It may not for an
-/// older file, or for the reverse half of a bidirectional index, whose one "sequence"
-/// holds the other sentinels; extraction is then unavailable (`None`).
-fn sentinel_rows_of(fm: &FmIndex) -> Option<Vec<u32>> {
+/// sample. A walk stops (unresolved) at the piece's first base, so it never crosses a
+/// sentinel, where LF is ambiguous, and takes at most one piece length. Freshly built
+/// indexes sample every piece start, so the walk always resolves. It may not for an older
+/// file, or for the reverse half of a bidirectional index, whose one "sequence" holds the
+/// other sentinels; extraction is then unavailable (`None`).
+fn sentinel_rows_of(fm: &FmIndex, piece_boundaries: &[u32]) -> Option<Vec<u32>> {
+    // Rows `0..pieces` must be exactly the sentinel rows.
+    if fm
+        .c_array
+        .symbol_count(crate::alphabet::SENTINEL, fm.text_len)
+        != piece_boundaries.len() as u32
+    {
+        return None;
+    }
     let resolve = |mut row: u32| -> Option<u32> {
         let mut steps = 0u32;
         loop {
@@ -389,7 +427,7 @@ fn sentinel_rows_of(fm: &FmIndex) -> Option<Vec<u32>> {
             steps += 1;
         }
     };
-    seq_end_rows_from(fm.num_sequences, &fm.seq_boundaries, resolve)
+    piece_end_rows_from(piece_boundaries, resolve)
 }
 
 impl From<&FmIndex> for RlFmIndex {
