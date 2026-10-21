@@ -85,5 +85,7 @@ GPU-accelerated FM-index for DNA sequences. Compiles to native (Vulkan/Metal/DX1
 ### DNA encoding
 Alphabet is `{A=1, C=2, G=3, T=4}`. Sentinel `0` marks sequence boundaries. See `src/alphabet.rs`.
 
+`#` inside a sequence is a record delimiter (joins FASTA entries into one logical sequence): stored as sentinel `0`, so it matches nothing and stops SMEM/MEM extension like `$`. `seq_boundaries` stay *logical* (a `#` takes one offset), so locate/GPU ref-mapping need no change; only the physical pieces (`alphabet::piece_starts`/`piece_boundaries`) feed forced SA sampling and RL extraction (`piece_end_rows`, `"HRL\x03"`/`"HRB\x03"`, v2 still read). `decode_sequence` renders `0` as `#`.
+
 ### GpuContext caching
 `src/gpu/context_cache.rs` holds a process-wide `OnceLock<GpuContext>`. GPU functions accept an optional pre-initialized context; pass `None` on first call, reuse thereafter. Avoids adapter/device init overhead in benchmarks and tests.

@@ -22,10 +22,10 @@ pub(crate) struct Prepared {
     pub header_index: HeaderIndex,
     pub c_array: CArray,
     pub sa: SuffixArray,
-    /// Text offsets every SA sampling must keep: the start of each sequence, so an LF-walk
-    /// never crosses a sentinel (all sentinels share one byte value, which makes LF
-    /// ambiguous there). `seq_boundaries[k]` is the start of sequence `k+1`, so the starts
-    /// are `0` plus every boundary but the last.
+    /// Text offsets every SA sampling must keep: the start of each sentinel-separated piece
+    /// (each sequence, and each `#`-delimited record inside one), so an LF-walk never
+    /// crosses a sentinel (all sentinels share one byte value, which makes LF ambiguous
+    /// there). See [`alphabet::piece_starts`].
     pub seq_starts: Vec<u32>,
 }
 
@@ -59,14 +59,7 @@ pub(crate) fn prepare_cpu(sequences: &[DnaSequence]) -> Result<Prepared, FmIndex
     // Build suffix array (single-threaded; psacak has no parallel API)
     let sa = build_suffix_array(&text);
 
-    let seq_starts: Vec<u32> = std::iter::once(0)
-        .chain(
-            seq_boundaries
-                .iter()
-                .take(seq_boundaries.len().saturating_sub(1))
-                .copied(),
-        )
-        .collect();
+    let seq_starts = alphabet::piece_starts(&text);
 
     Ok(Prepared {
         text,

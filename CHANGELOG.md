@@ -8,6 +8,29 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+### Added
+- `#` record delimiter: `DnaSequence::from_str("ACGT#TTGA")` (or `DnaSequence::join`)
+  indexes several records (e.g. FASTA entries) as one logical sequence — one `SeqId`, one
+  header, offsets counted across the joined string with each `#` taking one position. A
+  `#` matches nothing: no hit spans it, SMEM/MEM extension stops at it as at `$`, and a `#`
+  in a query matches nothing. Leading, trailing and doubled `#` are rejected.
+  `alphabet::decode_sequence` renders extracted sequences with `#`.
+
+### Changed
+- **Breaking (run-length files).** Run-length format `"HRL\x03"` / `"HRB\x03"`:
+  extraction rows are stored per `#`-delimited piece. Version 2 files still load; blobs
+  written by this version cannot be read by older builds. `FORMAT_MAGIC` /
+  `BIDIR_FORMAT_MAGIC` now read `"HRL\x03"` / `"HRB\x03"`.
+- **Breaking.** `#` is no longer an invalid character: `encode_byte(b'#')` /
+  `encode_char('#')` return `Some(SENTINEL)` instead of `None`, and
+  `DnaSequence::from_str` accepts an interior `#` (see *Added*) where it used to return
+  `InvalidCharacter`.
+
+### Fixed
+- Locate on an index built from `DnaSequence::from_encoded` bases containing interior
+  sentinels: every piece start is now force-sampled, so the LF walk never crosses one.
+  Indexes already serialized from such text keep their old samples; rebuild them.
+
 ## [0.6.9] - 2026-10-12
 
 ### Performance
