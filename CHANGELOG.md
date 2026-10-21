@@ -17,8 +17,14 @@ Before 1.0, a breaking change bumps the **minor** version.
   `alphabet::decode_sequence` renders extracted sequences with `#`.
 
 ### Changed
-- Run-length format `"HRL\x03"` / `"HRB\x03"`: extraction rows are stored per
-  `#`-delimited piece. Version 2 files still load.
+- **Breaking (run-length files).** Run-length format `"HRL\x03"` / `"HRB\x03"`:
+  extraction rows are stored per `#`-delimited piece. Version 2 files still load; blobs
+  written by this version cannot be read by older builds. `FORMAT_MAGIC` /
+  `BIDIR_FORMAT_MAGIC` now read `"HRL\x03"` / `"HRB\x03"`.
+- **Breaking.** `#` is no longer an invalid character: `encode_byte(b'#')` /
+  `encode_char('#')` return `Some(SENTINEL)` instead of `None`, and
+  `DnaSequence::from_str` accepts an interior `#` (see *Added*) where it used to return
+  `InvalidCharacter`.
 
 ### Fixed
 - Locate on an index built from `DnaSequence::from_encoded` bases containing interior
