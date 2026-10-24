@@ -1,22 +1,24 @@
 //! Freeze on-disk format fixtures for the compatibility tests in
-//! `src/fm_index/serialize.rs`, `src/fm_index/bidir_index.rs` and
-//! `src/rl_fm_index/serialize.rs`.
+//! `src/fm_index/serialize.rs`, `src/fm_index/bidir_index.rs`,
+//! `src/rl_fm_index/serialize.rs` and `src/move_index/serialize.rs`.
 //!
 //! Run this on the commit whose format you want to freeze (before bumping its
-//! `FORMAT_MAGIC`); it writes `tests/fixtures/v{N}_*.hfm` (FM-index) and
-//! `tests/fixtures/v{N}_rl_*.hrl` / `.hrb` (run-length) from exactly the input and configs
-//! those tests rebuild. CPU construction is deterministic, so a later reader must load these
-//! bytes into an index that serializes identically to a fresh build. Pass `fm` or `rl` to
-//! write only that family.
+//! `FORMAT_MAGIC`); it writes `tests/fixtures/v{N}_*.hfm` (FM-index),
+//! `tests/fixtures/v{N}_rl_*.hrl` / `.hrb` (run-length) and
+//! `tests/fixtures/v{N}_move.hmv` / `v{N}_bmove.hbm` (move structures) from exactly the
+//! input and configs those tests rebuild. CPU construction is deterministic, so a later
+//! reader must load these bytes into an index that serializes identically to a fresh build.
+//! Pass `fm`, `rl` or `move` to write only that family.
 //!
 //! ```text
-//! cargo run --example gen_fixtures [fm|rl]
+//! cargo run --example gen_fixtures [fm|rl|move]
 //! ```
 
 use haystackfm::alphabet::{DnaSequence, ExactDna};
 use haystackfm::fm_index::bidir_index::BidirFmIndex;
 use haystackfm::fm_index::serialize::FORMAT_MAGIC;
 use haystackfm::fm_index::{FmIndex, FmIndexConfig};
+use haystackfm::move_index::{BMoveIndex, MoveFmIndex, MoveFmIndexConfig};
 use haystackfm::occ::OccEncoding;
 use haystackfm::rl_fm_index::{BidirRlFmIndex, RlFmIndex, RlFmIndexConfig};
 use std::path::PathBuf;
@@ -61,12 +63,44 @@ fn rl_config() -> RlFmIndexConfig {
 
 fn main() {
     let family = std::env::args().nth(1);
+    let wants = |name: &str| family.as_deref().is_none_or(|f| f == name);
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    if family.as_deref() != Some("rl") {
+    if wants("fm") {
         write_fm(&dir);
     }
-    if family.as_deref() != Some("fm") {
+    if wants("rl") {
         write_rl(&dir);
+    }
+    if wants("move") {
+        write_move(&dir);
+    }
+}
+
+fn write_move(dir: &std::path::Path) {
+    let version = haystackfm::move_index::FORMAT_MAGIC[3];
+    let bmove_version = haystackfm::move_index::BMOVE_FORMAT_MAGIC[3];
+    let input = fixture_input();
+    let config = MoveFmIndexConfig::default();
+    let blobs: [(String, Vec<u8>); 2] = [
+        (
+            format!("v{version}_move.hmv"),
+            MoveFmIndex::build_cpu(&input, &config)
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
+        ),
+        (
+            format!("v{bmove_version}_bmove.hbm"),
+            BMoveIndex::build_cpu(&input, &config)
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
+        ),
+    ];
+    for (name, bytes) in blobs {
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        println!("{} ({} bytes)", path.display(), bytes.len());
     }
 }
 
