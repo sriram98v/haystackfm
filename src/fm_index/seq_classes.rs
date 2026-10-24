@@ -49,8 +49,13 @@ impl SeqClasses {
 
     /// Group `sequences` by their encoded bases. Returns the classes and the input index of
     /// each slot's representative, in slot order (the order to concatenate them in).
+    ///
+    /// Every input sequence is hashed whole, so the map uses foldhash rather than std's
+    /// SipHash (~3-5x faster on long keys). Slot numbering depends only on input order, not
+    /// on the hasher or its seed, so builds stay deterministic.
     pub(crate) fn classify(sequences: &[DnaSequence]) -> (Self, Vec<usize>) {
-        let mut slot_by_bases: HashMap<&[u8], u32> = HashMap::with_capacity(sequences.len());
+        let mut slot_by_bases: HashMap<&[u8], u32, foldhash::fast::RandomState> =
+            HashMap::with_capacity_and_hasher(sequences.len(), Default::default());
         let mut reps = Vec::new();
         let seq_to_slot = sequences
             .iter()
