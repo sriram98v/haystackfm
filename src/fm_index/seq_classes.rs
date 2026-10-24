@@ -204,6 +204,7 @@ impl SeqClasses {
     /// [`expand`](Self::expand) for hits naming stored slots (as the GPU reference map
     /// reports them): each in-range slot's hit becomes one hit per member of its class; an
     /// out-of-range slot (an unresolvable row) is kept as is, never expanded.
+    #[cfg(any(test, feature = "gpu"))]
     pub(crate) fn expand_slots(&self, hits: Vec<(u32, u32)>) -> Vec<(SeqId, u32)> {
         if self.is_identity() {
             return hits
