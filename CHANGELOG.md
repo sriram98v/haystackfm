@@ -8,6 +8,8 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-24
+
 ### Added
 - Deduplication of identical input sequences in every index (`FmIndex`, `BidirFmIndex`,
   `RlFmIndex`, `BidirRlFmIndex`, `MoveFmIndex`, `BMoveIndex`; CPU and GPU builds). Input
@@ -510,6 +512,7 @@ name, and its earlier history is not carried over here.
 - Licensed under Apache-2.0.
 
 [Unreleased]: https://github.com/sriram98v/haystackfm/commits/main
+[0.8.0]: https://crates.io/crates/haystackfm/0.8.0
 [0.7.0]: https://crates.io/crates/haystackfm/0.7.0
 [0.6.9]: https://crates.io/crates/haystackfm/0.6.9
 [0.6.8]: https://crates.io/crates/haystackfm/0.6.8
