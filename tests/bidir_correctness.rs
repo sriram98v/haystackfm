@@ -903,8 +903,9 @@ mod wild {
         fn contract_left_on_repeated_and_identical_sequences() {
             // Identical copies: every occurrence of P has copies preceded by different
             // symbols (sentinel vs base), so [r, r + size) is a strict sub-range and the
-            // LCP expansion must widen it.
-            let idx = build_str(&["ACGTACGT", "ACGTACGT", "ACGTACGT", "TACGTACG"]);
+            // LCP expansion must widen it. The copies are `#`-joined records of one
+            // sequence, since identical sequences are stored once.
+            let idx = build_str(&["ACGTACGT#ACGTACGT#ACGTACGT", "TACGTACG"]);
             let text: Vec<u8> = "ACGTACGT"
                 .chars()
                 .map(|c| alphabet::encode_char(c).unwrap())
@@ -919,7 +920,7 @@ mod wild {
                 }
             }
             let long_a = "A".repeat(200);
-            let idx = build_str(&[&long_a, &long_a, "AAAAT"]);
+            let idx = build_str(&[&format!("{long_a}#{long_a}"), "AAAAT"]);
             let pat = vec![alphabet::A; 200];
             let ivs = left_walk(&idx, &pat);
             for k in 0..pat.len() {
@@ -1123,7 +1124,8 @@ mod wild {
         fn contract_right_on_repeated_and_identical_sequences() {
             // Identical copies: occurrences of P are followed by different symbols
             // (sentinel vs base), so the reverse-half sub-range must be LCP-widened.
-            let idx = build_str(&["ACGTACGT", "ACGTACGT", "ACGTACGT", "TACGTACG"]);
+            // `#`-joined, since identical sequences are stored once.
+            let idx = build_str(&["ACGTACGT#ACGTACGT#ACGTACGT", "TACGTACG"]);
             let text: Vec<u8> = "ACGTACGT"
                 .chars()
                 .map(|c| alphabet::encode_char(c).unwrap())
@@ -1134,7 +1136,7 @@ mod wild {
                 }
             }
             let long_a = "A".repeat(200);
-            let idx = build_str(&[&long_a, &long_a, "TAAAA"]);
+            let idx = build_str(&[&format!("{long_a}#{long_a}"), "TAAAA"]);
             assert_right_chain(&idx, &[alphabet::A; 200], "A^200");
         }
 
@@ -1321,7 +1323,8 @@ mod wild {
 
         #[test]
         fn parent_chain_on_repeats_and_identical_sequences() {
-            let idx = build_str(&["ACGTACGT", "ACGTACGT", "ACGTACGT", "TACGTACG"]);
+            // `#`-joined copies, since identical sequences are stored once.
+            let idx = build_str(&["ACGTACGT#ACGTACGT#ACGTACGT", "TACGTACG"]);
             let text = encode("ACGTACGT");
             for start in 0..text.len() {
                 for end in start + 1..=text.len() {
@@ -1329,7 +1332,7 @@ mod wild {
                 }
             }
             let long_a = "A".repeat(200);
-            let idx = build_str(&[&long_a, &long_a, "AAAAT"]);
+            let idx = build_str(&[&format!("{long_a}#{long_a}"), "AAAAT"]);
             check_parent_chain(&idx, &vec![alphabet::A; 200], "A200");
             check_parent_chain(&idx, &encode("AAAAT"), "AAAAT");
             let tandem = "ACGT".repeat(100);

@@ -34,6 +34,7 @@ use crate::error::FmIndexError;
 use crate::fm_index::half::{FmHalf, Sealed};
 use crate::fm_index::lookup::LookupTable;
 use crate::fm_index::prepare::{in_build_pool, prepare_cpu, Prepared};
+use crate::fm_index::seq_classes::{DupWeights, SeqClasses};
 use crate::fm_index::seq_id::{HeaderIndex, SeqId};
 use crate::fm_index::FmIndex;
 use crate::occ::BwtRank;
@@ -95,16 +96,23 @@ pub struct RlFmIndex {
     /// [`BidirRlFmIndex`], which never locates).
     pub(crate) sa_samples: Option<SampledSuffixArray>,
     pub(crate) text_len: u32,
+    /// Number of input sequences, duplicates included.
     pub(crate) num_sequences: u32,
-    /// `seq_boundaries[k]` is the end of sequence `k` including its trailing sentinel.
-    pub(crate) seq_boundaries: Vec<u32>,
+    /// `slot_boundaries[s]` is the end of stored (distinct) sequence `s` including its
+    /// trailing sentinel. See [`seq_classes`](crate::fm_index::seq_classes).
+    pub(crate) slot_boundaries: Vec<u32>,
+    /// Header of every input sequence, indexed by [`SeqId`].
     pub(crate) seq_headers: Vec<String>,
     /// Derived from `seq_headers`; not serialized.
     pub(crate) header_index: HeaderIndex,
+    /// Classes of identical input sequences; one representative of each is stored.
+    pub(crate) seq_classes: SeqClasses,
+    /// Extra multiplicity of rows inside duplicated representatives, for counts.
+    pub(crate) dup_weights: DupWeights,
     pub(crate) alphabet_fns: AlphabetFns,
     /// Exclusive end (sentinel included) of every sentinel-separated piece of the text: one
-    /// per sequence, plus one per `#` record delimiter inside a sequence. Every
-    /// `seq_boundaries` entry is one of them. Empty when `piece_end_rows` is.
+    /// per stored sequence, plus one per `#` record delimiter inside one. Every
+    /// `slot_boundaries` entry is one of them. Empty when `piece_end_rows` is.
     pub(crate) piece_boundaries: Vec<u32>,
     /// `piece_end_rows[k]` is the BWT row whose suffix starts at piece `k`'s sentinel, the
     /// starting point of [`sequence`](Self::sequence)'s LF walk over that piece. Empty on
@@ -175,9 +183,11 @@ impl RlFmIndex {
             sa_samples,
             text_len: p.text_len,
             num_sequences: p.num_sequences,
-            seq_boundaries: p.seq_boundaries,
+            slot_boundaries: p.slot_boundaries,
             seq_headers: p.seq_headers,
             header_index: p.header_index,
+            seq_classes: p.seq_classes,
+            dup_weights: p.dup_weights,
             alphabet_fns,
             piece_boundaries,
             piece_end_rows,
@@ -234,7 +244,7 @@ impl RlFmIndex {
             // A forward `FmIndex` keeps its text; without it, assume one piece per sequence
             // (the row mapping below rejects that guess if the text held `#` delimiters).
             let bounds = if fm.text.is_empty() {
-                fm.seq_boundaries.clone()
+                fm.slot_boundaries.clone()
             } else {
                 crate::alphabet::piece_boundaries(&fm.text)
             };
@@ -255,9 +265,11 @@ impl RlFmIndex {
             sa_samples: Some(fm.sa_samples.clone()),
             text_len: fm.text_len,
             num_sequences: fm.num_sequences,
-            seq_boundaries: fm.seq_boundaries.clone(),
+            slot_boundaries: fm.slot_boundaries.clone(),
             seq_headers: fm.seq_headers.clone(),
             header_index: fm.header_index.clone(),
+            seq_classes: fm.seq_classes.clone(),
+            dup_weights: fm.dup_weights.clone(),
             alphabet_fns: fm.alphabet_fns,
             piece_boundaries,
             piece_end_rows,
@@ -270,9 +282,31 @@ impl RlFmIndex {
         self.text_len
     }
 
-    /// Number of sequences indexed.
+    /// Number of sequences indexed: every input sequence, duplicates included.
     pub fn num_sequences(&self) -> u32 {
         self.num_sequences
+    }
+
+    /// Number of distinct sequences stored in the text.
+    pub fn num_distinct_sequences(&self) -> u32 {
+        self.slot_boundaries.len() as u32
+    }
+
+    /// Classes of identical input sequences. See [`crate::fm_index::seq_classes`].
+    pub fn seq_classes(&self) -> &SeqClasses {
+        &self.seq_classes
+    }
+
+    /// Every input sequence identical to `id` (itself included), ascending; empty when `id`
+    /// is out of range.
+    pub fn equivalence_class(&self, id: SeqId) -> &[SeqId] {
+        self.seq_classes.equivalence_class(id)
+    }
+
+    /// The member of `id`'s class that is stored in the index, or `None` when `id` is out
+    /// of range.
+    pub fn representative(&self, id: SeqId) -> Option<SeqId> {
+        self.seq_classes.representative(id)
     }
 
     /// FASTA headers in build order; a header's position is its [`SeqId`].
@@ -290,9 +324,11 @@ impl RlFmIndex {
         self.header_index.get(header)
     }
 
-    /// Exclusive end of each reference (its sentinel included) in the concatenated text.
+    /// Exclusive end of each **stored** reference (its sentinel included) in the
+    /// concatenated text, indexed by stored slot (see
+    /// [`FmIndex::seq_boundaries`](crate::FmIndex::seq_boundaries)).
     pub fn seq_boundaries(&self) -> &[u32] {
-        &self.seq_boundaries
+        &self.slot_boundaries
     }
 
     /// Bases of sequence `id` as alphabet codes (see
@@ -311,11 +347,10 @@ impl RlFmIndex {
         if self.piece_end_rows.is_empty() {
             return None;
         }
-        let end = *self.seq_boundaries.get(id.index())?;
-        let start = id
-            .index()
-            .checked_sub(1)
-            .map_or(0, |k| self.seq_boundaries[k]);
+        // A duplicate's bases are its representative's.
+        let slot = self.seq_classes.slot_of(id)? as usize;
+        let end = self.slot_boundaries[slot];
+        let start = slot.checked_sub(1).map_or(0, |k| self.slot_boundaries[k]);
         let mut out = vec![SENTINEL; (end - start - 1) as usize];
         // Pieces whose boundary falls in `(start, end]`: this sequence's records.
         let first = self.piece_boundaries.partition_point(|&b| b <= start);
@@ -370,7 +405,9 @@ impl RlFmIndex {
                 .sa_samples
                 .as_ref()
                 .map_or(0, SampledSuffixArray::heap_size_bytes)
-            + self.seq_boundaries.len() * 4
+            + self.slot_boundaries.len() * 4
+            + self.seq_classes.heap_size_bytes()
+            + self.dup_weights.heap_size_bytes()
             + self.piece_boundaries.len() * 4
             + self.piece_end_rows.len() * 4
             + self.lookup.as_ref().map_or(0, LookupTable::heap_size_bytes)

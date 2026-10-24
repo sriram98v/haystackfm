@@ -29,7 +29,8 @@ pub struct BMoveCursor {
 }
 
 impl BMoveCursor {
-    /// Number of occurrences.
+    /// Number of occurrences in the stored text (a class of identical input sequences
+    /// counts once); [`BMoveIndex::count_cursor`] counts every member.
     pub fn size(&self) -> u32 {
         self.fwd.size()
     }
@@ -294,12 +295,23 @@ impl BMoveIndex {
         self.fwd.alphabet_fns.compatible_set(q)
     }
 
-    /// Locate every occurrence of the cursor's pattern, in no particular order.
+    /// Locate every occurrence of the cursor's pattern, in no particular order. An
+    /// occurrence in a class of identical sequences is reported once per member,
+    /// consecutively.
     ///
     /// # Panics
     /// If the index was built without locate support, or the cursor has no toehold (its
     /// pattern was extended by the sentinel).
     pub fn locate(&self, cur: &BMoveCursor) -> Vec<(SeqId, u32)> {
+        self.fwd.seq_classes.expand(self.locate_grouped(cur))
+    }
+
+    /// [`locate`](Self::locate) with one hit per occurrence in the stored text, naming the
+    /// representative of a class of identical sequences.
+    ///
+    /// # Panics
+    /// As [`locate`](Self::locate).
+    pub fn locate_grouped(&self, cur: &BMoveCursor) -> Vec<(SeqId, u32)> {
         let locate = self.fwd.locate_support();
         assert!(
             cur.toehold != UNKNOWN_TOEHOLD,
@@ -316,9 +328,16 @@ impl BMoveIndex {
             .collect()
     }
 
-    /// Count occurrences of `pattern` (backward search on the forward half).
+    /// Count occurrences of `pattern` (backward search on the forward half), in every
+    /// member of a class of identical input sequences.
     pub fn count(&self, pattern: &[u8]) -> u32 {
         self.fwd.count(pattern)
+    }
+
+    /// Occurrences of the cursor's pattern, in every member of a class of identical input
+    /// sequences ([`BMoveCursor::size`] counts the stored text only).
+    pub fn count_cursor(&self, cur: &BMoveCursor) -> u32 {
+        self.fwd.dup_weights.weighted_size(cur.fwd.s, cur.fwd.e + 1)
     }
 
     /// Total text length (sentinels included).
@@ -326,9 +345,29 @@ impl BMoveIndex {
         self.fwd.text_len
     }
 
-    /// Number of sequences indexed.
+    /// Number of sequences indexed: every input sequence, duplicates included.
     pub fn num_sequences(&self) -> u32 {
         self.fwd.num_sequences
+    }
+
+    /// Number of distinct sequences stored in the text.
+    pub fn num_distinct_sequences(&self) -> u32 {
+        self.fwd.num_distinct_sequences()
+    }
+
+    /// Classes of identical input sequences. See [`crate::fm_index::seq_classes`].
+    pub fn seq_classes(&self) -> &crate::SeqClasses {
+        &self.fwd.seq_classes
+    }
+
+    /// Every input sequence identical to `id` (itself included), ascending.
+    pub fn equivalence_class(&self, id: SeqId) -> &[SeqId] {
+        self.fwd.equivalence_class(id)
+    }
+
+    /// The member of `id`'s class that is stored in the index.
+    pub fn representative(&self, id: SeqId) -> Option<SeqId> {
+        self.fwd.representative(id)
     }
 
     /// FASTA headers in build order.

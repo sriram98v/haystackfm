@@ -9,10 +9,13 @@ impl FmIndex {
     /// IUPAC ambiguity codes in the pattern and/or reference are resolved via
     /// base-set intersection: a query symbol matches a reference symbol when
     /// their IUPAC base sets share at least one nucleotide.
+    ///
+    /// Occurrences in every member of a class of identical input sequences are counted
+    /// (see [`crate::fm_index::seq_classes`]).
     pub fn count(&self, pattern: &[u8]) -> u32 {
         self.backward_search(pattern)
             .iter()
-            .map(|(lo, hi)| hi - lo)
+            .map(|&(lo, hi)| self.dup_weights.weighted_size(lo, hi))
             .sum()
     }
 
@@ -22,32 +25,47 @@ impl FmIndex {
     /// identified sequence. Resolve a [`SeqId`] to its FASTA header with
     /// [`seq_header`](Self::seq_header) — no string is allocated per occurrence.
     ///
+    /// A match in a sequence that has identical copies is reported once per copy,
+    /// consecutively and by ascending id; [`locate_grouped`](Self::locate_grouped) reports
+    /// it once, on the class representative.
+    ///
     /// IUPAC ambiguity codes are resolved via base-set intersection (see `count`).
     pub fn locate(&self, pattern: &[u8]) -> Vec<(SeqId, u32)> {
+        self.seq_classes.expand(self.locate_grouped(pattern))
+    }
+
+    /// [`locate`](Self::locate) with one hit per occurrence in the stored text: a match in
+    /// a class of identical sequences names only its representative (expand it with
+    /// [`equivalence_class`](Self::equivalence_class)).
+    pub fn locate_grouped(&self, pattern: &[u8]) -> Vec<(SeqId, u32)> {
         let rows: Vec<u32> = self
             .backward_search(pattern)
             .into_iter()
             .flat_map(|(lo, hi)| lo..hi)
             .collect();
-        let mut text_positions = Vec::with_capacity(rows.len());
-        self.resolve_sa_batch(&rows, &mut text_positions);
-        text_positions
-            .into_iter()
-            .map(|text_pos| {
-                self.map_position(text_pos)
-                    .expect("resolved SA position must be within text bounds")
-            })
-            .collect()
+        self.locate_row_list(&rows)
     }
 
     /// Locate the suffix-array rows `lo..hi`: `(sequence id, offset)` per row, in row
-    /// order. The forward-only counterpart of
+    /// order, each row expanded to every member of its class like
+    /// [`locate`](Self::locate). The forward-only counterpart of
     /// [`BidirFmIndex::locate_interval`](crate::BidirFmIndex::locate_interval); time is
     /// O((hi − lo) × sample_rate).
     pub fn locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
+        self.seq_classes.expand(self.locate_rows_grouped(lo, hi))
+    }
+
+    /// [`locate_rows`](Self::locate_rows) with exactly one hit per row, naming the
+    /// representative of a class of identical sequences.
+    pub fn locate_rows_grouped(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
         let rows: Vec<u32> = (lo..hi).collect();
+        self.locate_row_list(&rows)
+    }
+
+    /// One `(representative id, offset)` per row of `rows`, in order.
+    pub(crate) fn locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
         let mut text_positions = Vec::with_capacity(rows.len());
-        self.resolve_sa_batch(&rows, &mut text_positions);
+        self.resolve_sa_batch(rows, &mut text_positions);
         text_positions
             .into_iter()
             .map(|text_pos| {
@@ -62,6 +80,10 @@ impl FmIndex {
     /// Cheaper than [`Self::locate`] when sequence header strings are not needed — avoids
     /// heap-allocating and cloning a `String` per hit. Positions are absolute offsets
     /// into the concatenated text (including sentinel bytes between sequences).
+    ///
+    /// The indexed text stores one copy of each class of identical input sequences, so
+    /// these are positions in the representatives only (one per stored occurrence);
+    /// [`map_position`](Self::map_position) maps them back.
     pub fn locate_positions(&self, pattern: &[u8]) -> Vec<u32> {
         let rows: Vec<u32> = self
             .backward_search(pattern)
@@ -333,16 +355,19 @@ impl FmIndex {
         }
     }
 
-    /// Map a text position back to `(sequence_id, position_within_sequence)`.
+    /// Map a text position back to `(sequence_id, position_within_sequence)`. The id is
+    /// that of the stored sequence, i.e. the representative of its class of identical
+    /// sequences.
     pub fn map_position(&self, text_pos: u32) -> Option<(SeqId, u32)> {
-        map_text_position(&self.seq_boundaries, text_pos)
+        map_text_position(&self.slot_boundaries, &self.seq_classes, text_pos)
     }
 
     /// Locate all occurrences of multiple patterns in parallel on the GPU.
     ///
     /// Each pattern is processed by a separate GPU thread during backward search.
     /// Returns one `Vec<(sequence_id, position)>` per query, in the same order
-    /// as `queries`. Positions are 0-based within each sequence.
+    /// as `queries`. Positions are 0-based within each sequence. Hits in classes of
+    /// identical sequences are expanded as in [`locate`](Self::locate).
     ///
     /// Requires the `gpu` feature.
     #[cfg(feature = "gpu")]
@@ -355,13 +380,10 @@ impl FmIndex {
         let ctx = context_cache::get_or_init()?;
         let encoded: Vec<&[u8]> = queries.iter().map(|q| q.as_ref()).collect();
         let by_idx = locate_batch_gpu(&ctx, self, &encoded).await?;
+        // The shader maps positions to stored slots; expand each to its class members.
         Ok(by_idx
             .into_iter()
-            .map(|hits| {
-                hits.into_iter()
-                    .map(|(seq_idx, pos)| (SeqId::new(seq_idx), pos))
-                    .collect()
-            })
+            .map(|hits| self.seq_classes.expand_slots(hits))
             .collect())
     }
 }

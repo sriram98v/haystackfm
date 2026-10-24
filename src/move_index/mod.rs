@@ -43,6 +43,7 @@ use crate::alphabet::{Alphabet, AlphabetFns, DnaSequence, IupacDna};
 use crate::bwt::cpu::build_bwt;
 use crate::error::FmIndexError;
 use crate::fm_index::prepare::{in_build_pool, prepare_cpu, Prepared};
+use crate::fm_index::seq_classes::{DupWeights, SeqClasses};
 use crate::fm_index::seq_id::{map_text_position, HeaderIndex, SeqId};
 
 /// Toehold value meaning "no known occurrence" (count-only index, sentinel extension, or
@@ -75,10 +76,18 @@ pub struct MoveFmIndex {
     pub(crate) lf: MoveLf,
     pub(crate) locate: Option<MoveLocate>,
     pub(crate) text_len: u32,
+    /// Number of input sequences, duplicates included.
     pub(crate) num_sequences: u32,
-    pub(crate) seq_boundaries: Vec<u32>,
+    /// Ends of the stored (distinct) sequences, sentinel included. See
+    /// [`seq_classes`](crate::fm_index::seq_classes).
+    pub(crate) slot_boundaries: Vec<u32>,
+    /// Header of every input sequence, indexed by [`SeqId`].
     pub(crate) seq_headers: Vec<String>,
     pub(crate) header_index: HeaderIndex,
+    /// Classes of identical input sequences; one representative of each is stored.
+    pub(crate) seq_classes: SeqClasses,
+    /// Extra multiplicity of rows inside duplicated representatives, for counts.
+    pub(crate) dup_weights: DupWeights,
     pub(crate) alphabet_fns: AlphabetFns,
 }
 
@@ -115,28 +124,41 @@ impl MoveFmIndex {
             locate,
             text_len: p.text_len,
             num_sequences: p.num_sequences,
-            seq_boundaries: p.seq_boundaries.clone(),
+            slot_boundaries: p.slot_boundaries.clone(),
             seq_headers: p.seq_headers.clone(),
             header_index: p.header_index.clone(),
+            seq_classes: p.seq_classes.clone(),
+            dup_weights: p.dup_weights.clone(),
             alphabet_fns,
         }
     }
 
     /// Count occurrences of `pattern` (alphabet codes), matching codes under the index's
-    /// alphabet as [`FmIndex::count`](crate::FmIndex::count) does.
+    /// alphabet as [`FmIndex::count`](crate::FmIndex::count) does, in every member of a
+    /// class of identical input sequences.
     pub fn count(&self, pattern: &[u8]) -> u32 {
         self.search(pattern)
             .iter()
-            .map(|(span, _)| span.size())
+            .map(|(span, _)| self.dup_weights.weighted_size(span.s, span.e + 1))
             .sum()
     }
 
     /// Locate every occurrence of `pattern` as `(sequence id, offset in that sequence)`,
-    /// in no particular order.
+    /// in no particular order. An occurrence in a class of identical sequences is reported
+    /// once per member, consecutively.
     ///
     /// # Panics
     /// If the index was built without locate support ([`can_locate`](Self::can_locate)).
     pub fn locate(&self, pattern: &[u8]) -> Vec<(SeqId, u32)> {
+        self.seq_classes.expand(self.locate_grouped(pattern))
+    }
+
+    /// [`locate`](Self::locate) with one hit per occurrence in the stored text, naming the
+    /// representative of a class of identical sequences.
+    ///
+    /// # Panics
+    /// If the index was built without locate support.
+    pub fn locate_grouped(&self, pattern: &[u8]) -> Vec<(SeqId, u32)> {
         self.locate_positions(pattern)
             .into_iter()
             .map(|pos| {
@@ -147,7 +169,8 @@ impl MoveFmIndex {
     }
 
     /// Locate every occurrence of `pattern` as absolute offsets into the concatenated
-    /// text, in no particular order.
+    /// text, in no particular order: positions in the stored sequences (class
+    /// representatives) only.
     ///
     /// # Panics
     /// If the index was built without locate support.
@@ -218,9 +241,10 @@ impl MoveFmIndex {
         self.locate.is_some()
     }
 
-    /// Map an absolute text offset to `(sequence id, offset within it)`.
+    /// Map an absolute text offset to `(sequence id, offset within it)`; the id is that of
+    /// the stored sequence, the representative of its class.
     pub fn map_position(&self, text_pos: u32) -> Option<(SeqId, u32)> {
-        map_text_position(&self.seq_boundaries, text_pos)
+        map_text_position(&self.slot_boundaries, &self.seq_classes, text_pos)
     }
 
     /// Total text length (sentinels included).
@@ -228,9 +252,31 @@ impl MoveFmIndex {
         self.text_len
     }
 
-    /// Number of sequences indexed.
+    /// Number of sequences indexed: every input sequence, duplicates included.
     pub fn num_sequences(&self) -> u32 {
         self.num_sequences
+    }
+
+    /// Number of distinct sequences stored in the text.
+    pub fn num_distinct_sequences(&self) -> u32 {
+        self.slot_boundaries.len() as u32
+    }
+
+    /// Classes of identical input sequences. See [`crate::fm_index::seq_classes`].
+    pub fn seq_classes(&self) -> &SeqClasses {
+        &self.seq_classes
+    }
+
+    /// Every input sequence identical to `id` (itself included), ascending; empty when `id`
+    /// is out of range.
+    pub fn equivalence_class(&self, id: SeqId) -> &[SeqId] {
+        self.seq_classes.equivalence_class(id)
+    }
+
+    /// The member of `id`'s class that is stored in the index, or `None` when `id` is out
+    /// of range.
+    pub fn representative(&self, id: SeqId) -> Option<SeqId> {
+        self.seq_classes.representative(id)
     }
 
     /// FASTA headers in build order.
@@ -248,9 +294,10 @@ impl MoveFmIndex {
         self.header_index.get(header)
     }
 
-    /// Exclusive end of each reference (sentinel included) in the concatenated text.
+    /// Exclusive end of each **stored** reference (sentinel included) in the concatenated
+    /// text, indexed by stored slot (see [`FmIndex::seq_boundaries`](crate::FmIndex::seq_boundaries)).
     pub fn seq_boundaries(&self) -> &[u32] {
-        &self.seq_boundaries
+        &self.slot_boundaries
     }
 
     /// The matching semantics this index was built with.
@@ -267,7 +314,9 @@ impl MoveFmIndex {
     pub fn heap_size_bytes(&self) -> usize {
         self.lf.heap_size_bytes()
             + self.locate.as_ref().map_or(0, MoveLocate::heap_size_bytes)
-            + self.seq_boundaries.len() * 4
+            + self.slot_boundaries.len() * 4
+            + self.seq_classes.heap_size_bytes()
+            + self.dup_weights.heap_size_bytes()
             + self.seq_headers.iter().map(String::len).sum::<usize>()
     }
 }

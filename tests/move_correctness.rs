@@ -283,7 +283,7 @@ fn from_bytes_rejects_malformed_input() {
     let bytes = mv.to_bytes().unwrap();
     assert!(MoveFmIndex::from_bytes(&[]).is_err());
     let mut wrong = bytes.clone();
-    wrong[3] = 2;
+    wrong[3] = 3;
     assert!(MoveFmIndex::from_bytes(&wrong).is_err());
     for cut in (0..bytes.len()).step_by(5) {
         assert!(

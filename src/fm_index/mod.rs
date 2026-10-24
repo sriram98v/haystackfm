@@ -5,6 +5,7 @@ pub mod half;
 pub mod lookup;
 pub(crate) mod prepare;
 pub mod query;
+pub mod seq_classes;
 pub mod seq_id;
 pub mod serialize;
 pub mod smem;
@@ -14,6 +15,7 @@ use crate::bwt::cpu::build_bwt;
 use crate::c_array::CArray;
 use crate::error::FmIndexError;
 use crate::fm_index::lookup::LookupTable;
+use crate::fm_index::seq_classes::{DupWeights, SeqClasses};
 use crate::fm_index::seq_id::{HeaderIndex, SeqId};
 use crate::lcp::LcpArray;
 use crate::occ::cpu::build_occ_table;
@@ -83,15 +85,20 @@ pub struct FmIndex {
     /// into a fresh allocation on every call, which is the cost this field exists to avoid.
     pub(crate) text: Vec<u8>,
     pub(crate) text_len: u32,
+    /// Number of input sequences, duplicates included.
     pub(crate) num_sequences: u32,
-    /// Cumulative sequence lengths for mapping positions back to sequences.
-    /// `seq_boundaries[k]` is the end of sequence `k` *including* its trailing sentinel.
-    pub(crate) seq_boundaries: Vec<u32>,
-    /// FASTA headers for each sequence (index-parallel with seq_boundaries).
-    /// A sequence's position here is its [`SeqId`].
+    /// Cumulative lengths of the stored (distinct) sequences, for mapping positions back.
+    /// `slot_boundaries[s]` is the end of stored sequence `s` *including* its trailing
+    /// sentinel. See [`seq_classes`](crate::fm_index::seq_classes).
+    pub(crate) slot_boundaries: Vec<u32>,
+    /// FASTA headers of every input sequence. A sequence's position here is its [`SeqId`].
     pub(crate) seq_headers: Vec<String>,
     /// O(1) reverse lookup for `seq_headers`. Derived, not serialized.
     pub(crate) header_index: HeaderIndex,
+    /// Classes of identical input sequences; one representative of each is stored.
+    pub(crate) seq_classes: SeqClasses,
+    /// Extra multiplicity of SA rows inside duplicated representatives, for counts.
+    pub(crate) dup_weights: DupWeights,
     /// Optional depth-k prefix lookup table for seeding backward search.
     pub(crate) lookup: Option<LookupTable>,
     /// Alphabet matching semantics (compatible symbols + core symbols for lookup BFS).
@@ -159,9 +166,11 @@ impl FmIndex {
             text,
             text_len,
             num_sequences,
-            seq_boundaries,
+            slot_boundaries,
             seq_headers,
             header_index,
+            seq_classes,
+            dup_weights,
             c_array,
             sa,
             seq_starts,
@@ -207,9 +216,11 @@ impl FmIndex {
             text,
             text_len,
             num_sequences,
-            seq_boundaries,
+            slot_boundaries,
             seq_headers,
             header_index,
+            seq_classes,
+            dup_weights,
             lookup,
             alphabet_fns,
             lcp,
@@ -227,9 +238,41 @@ impl FmIndex {
         &self.occ
     }
 
-    /// Number of sequences indexed.
+    /// Number of sequences indexed: every input sequence, duplicates included.
     pub fn num_sequences(&self) -> u32 {
         self.num_sequences
+    }
+
+    /// Number of distinct sequences stored in the text (one per
+    /// [equivalence class](crate::fm_index::seq_classes)).
+    pub fn num_distinct_sequences(&self) -> u32 {
+        self.slot_boundaries.len() as u32
+    }
+
+    /// End offset (trailing sentinel included) of every **stored** sequence in the indexed
+    /// text, in text order. Stored sequences are the class representatives, so this is
+    /// indexed by stored slot, not by [`SeqId`]; with no duplicate input sequences the two
+    /// coincide. Raw text positions (`locate_positions`, [`map_position`](Self::map_position))
+    /// live in this coordinate space.
+    pub fn seq_boundaries(&self) -> &[u32] {
+        &self.slot_boundaries
+    }
+
+    /// Classes of identical input sequences. See [`crate::fm_index::seq_classes`].
+    pub fn seq_classes(&self) -> &SeqClasses {
+        &self.seq_classes
+    }
+
+    /// Every input sequence identical to `id` (itself included), ascending; empty when `id`
+    /// is out of range.
+    pub fn equivalence_class(&self, id: SeqId) -> &[SeqId] {
+        self.seq_classes.equivalence_class(id)
+    }
+
+    /// The member of `id`'s class that is stored in the index, or `None` when `id` is out
+    /// of range.
+    pub fn representative(&self, id: SeqId) -> Option<SeqId> {
+        self.seq_classes.representative(id)
     }
 
     /// FASTA headers of every indexed reference, in build order.
@@ -271,12 +314,14 @@ impl FmIndex {
         if self.text.is_empty() {
             return None;
         }
-        // `seq_boundaries[k]` is the end of sequence k *including* its sentinel, so the
-        // bases run from the previous boundary up to (but not including) that sentinel.
-        let end = *self.seq_boundaries.get(id.index())? as usize - 1;
-        let start = match id.index() {
+        // A duplicate's bases are its representative's. `slot_boundaries[s]` is the end of
+        // stored sequence s *including* its sentinel, so the bases run from the previous
+        // boundary up to (but not including) that sentinel.
+        let slot = self.seq_classes.slot_of(id)? as usize;
+        let end = self.slot_boundaries[slot] as usize - 1;
+        let start = match slot {
             0 => 0,
-            k => self.seq_boundaries[k - 1] as usize,
+            s => self.slot_boundaries[s - 1] as usize,
         };
         Some(&self.text[start..end])
     }
@@ -338,25 +383,15 @@ impl FmIndex {
             return Err(FmIndexError::EmptySequence);
         }
 
-        let (text, seq_boundaries) = crate::alphabet::concatenate_sequences(sequences)?;
-        let text_len = text.len() as u32;
-        let num_sequences = sequences.len() as u32;
-
-        let seq_headers: Vec<String> = sequences
-            .iter()
-            .enumerate()
-            .map(|(i, seq)| {
-                let h = seq.header();
-                if h.is_empty() {
-                    format!("seq_{}", i)
-                } else {
-                    h.to_string()
-                }
-            })
-            .collect();
-        // Built before the suffix array so a duplicate header fails fast rather than after
-        // the expensive construction passes.
-        let header_index = HeaderIndex::build(&seq_headers)?;
+        let prepare::PreparedText {
+            text,
+            text_len,
+            num_sequences,
+            slot_boundaries,
+            seq_headers,
+            header_index,
+            seq_classes,
+        } = prepare::prepare_text(sequences)?;
 
         let ctx = GpuContext::new().await?;
         let sa_pipelines = SaPipelines::new(&ctx);
@@ -385,6 +420,7 @@ impl FmIndex {
             crate::alphabet::piece_starts(&text)
         };
         let sa_samples = SampledSuffixArray::from_full(&sa, config.sa_sample_rate, &seq_starts);
+        let dup_weights = DupWeights::build(&sa.data, &slot_boundaries, &seq_classes);
 
         drop(bwt);
 
@@ -395,9 +431,11 @@ impl FmIndex {
             text,
             text_len,
             num_sequences,
-            seq_boundaries,
+            slot_boundaries,
             seq_headers,
             header_index,
+            seq_classes,
+            dup_weights,
             lookup: None,
             // GPU construction is IUPAC-only (shaders hard-code the 16-symbol COMPAT table).
             alphabet_fns: IupacDna::fns(),

@@ -8,6 +8,11 @@
 //! [`BIDIR_FORMAT_MAGIC`] (`"HRB\x03"`), a little-endian `u32` byte length of the forward
 //! half, then the forward and reverse halves, each a complete `"HRL"` blob.
 //!
+//! Version 4 stores the classes of identical input sequences (each sequence's stored slot,
+//! and the duplicate-row weights; see [`seq_classes`](crate::fm_index::seq_classes)) after
+//! the headers; the boundaries are those of the stored sequences. Version 3, written
+//! before deduplication, is still read with every sequence in a class of its own.
+//!
 //! Version 3 stores the extraction rows per sentinel-separated *piece* (`piece_boundaries`
 //! and `piece_end_rows`), so a sequence holding `#` record delimiters can be read back.
 //! Version 2 stored one row per sequence (`seq_end_rows`); it is still read, as a file whose
@@ -18,17 +23,20 @@ use crate::alphabet::AlphabetFns;
 use crate::c_array::CArray;
 use crate::error::FmIndexError;
 use crate::fm_index::lookup::LookupTable;
+use crate::fm_index::seq_classes::DupWeights;
 use crate::fm_index::seq_id::HeaderIndex;
-use crate::fm_index::serialize::check_stored_alphabet;
+use crate::fm_index::serialize::{check_sequence_tables, check_stored_alphabet};
 use crate::occ::BwtRank;
 use crate::rlbwt::RlBwt;
 use crate::suffix_array::SampledSuffixArray;
 
 /// Leading bytes of a serialized [`RlFmIndex`]: `"HRL"` plus the format version.
-pub const FORMAT_MAGIC: [u8; 4] = *b"HRL\x03";
+pub const FORMAT_MAGIC: [u8; 4] = *b"HRL\x04";
 /// Leading bytes of a serialized [`BidirRlFmIndex`]: `"HRB"` plus the format version.
-pub const BIDIR_FORMAT_MAGIC: [u8; 4] = *b"HRB\x03";
-/// Version 2 markers, still readable.
+pub const BIDIR_FORMAT_MAGIC: [u8; 4] = *b"HRB\x04";
+/// Version 3 and 2 markers, still readable.
+const FORMAT_MAGIC_V3: [u8; 4] = *b"HRL\x03";
+const BIDIR_FORMAT_MAGIC_V3: [u8; 4] = *b"HRB\x03";
 const FORMAT_MAGIC_V2: [u8; 4] = *b"HRL\x02";
 const BIDIR_FORMAT_MAGIC_V2: [u8; 4] = *b"HRB\x02";
 
@@ -40,9 +48,14 @@ struct SerializableRlFmIndex<'a> {
     sa_samples: Option<&'a SampledSuffixArray>,
     text_len: u32,
     num_sequences: u32,
+    /// Ends of the stored (distinct) sequences.
     #[serde(with = "crate::serde_raw::u32s")]
-    seq_boundaries: &'a [u32],
+    slot_boundaries: &'a [u32],
     seq_headers: &'a [String],
+    /// Stored slot of every input sequence (version 4 onwards).
+    #[serde(with = "crate::serde_raw::u32s")]
+    seq_to_slot: &'a [u32],
+    dup_weights: &'a DupWeights,
     alphabet: &'a AlphabetFns,
     #[serde(with = "crate::serde_raw::u32s")]
     piece_boundaries: &'a [u32],
@@ -60,6 +73,28 @@ struct OwnedSerializableRlFmIndex {
     text_len: u32,
     num_sequences: u32,
     #[serde(with = "crate::serde_raw::u32s")]
+    slot_boundaries: Vec<u32>,
+    seq_headers: Vec<String>,
+    #[serde(with = "crate::serde_raw::u32s")]
+    seq_to_slot: Vec<u32>,
+    dup_weights: DupWeights,
+    alphabet: AlphabetFns,
+    #[serde(with = "crate::serde_raw::u32s")]
+    piece_boundaries: Vec<u32>,
+    #[serde(with = "crate::serde_raw::u32s")]
+    piece_end_rows: Vec<u32>,
+    lookup: Option<LookupTable>,
+}
+
+/// Version 3 read layout: version 4 without the sequence classes.
+#[derive(serde::Deserialize)]
+struct OwnedSerializableRlFmIndexV3 {
+    c_array: CArray,
+    bwt: RlBwt,
+    sa_samples: Option<SampledSuffixArray>,
+    text_len: u32,
+    num_sequences: u32,
+    #[serde(with = "crate::serde_raw::u32s")]
     seq_boundaries: Vec<u32>,
     seq_headers: Vec<String>,
     alphabet: AlphabetFns,
@@ -68,6 +103,30 @@ struct OwnedSerializableRlFmIndex {
     #[serde(with = "crate::serde_raw::u32s")]
     piece_end_rows: Vec<u32>,
     lookup: Option<LookupTable>,
+}
+
+impl From<OwnedSerializableRlFmIndexV3> for OwnedSerializableRlFmIndex {
+    /// A version 3 file predates deduplication: every sequence is stored, in its own class.
+    /// The identity is sized by the headers read (bounded by the input), not by the stored
+    /// `num_sequences`; the load check rejects a mismatch.
+    fn from(v3: OwnedSerializableRlFmIndexV3) -> Self {
+        let seq_to_slot = (0..v3.seq_headers.len() as u32).collect();
+        Self {
+            c_array: v3.c_array,
+            bwt: v3.bwt,
+            sa_samples: v3.sa_samples,
+            text_len: v3.text_len,
+            num_sequences: v3.num_sequences,
+            slot_boundaries: v3.seq_boundaries,
+            seq_headers: v3.seq_headers,
+            seq_to_slot,
+            dup_weights: DupWeights::default(),
+            alphabet: v3.alphabet,
+            piece_boundaries: v3.piece_boundaries,
+            piece_end_rows: v3.piece_end_rows,
+            lookup: v3.lookup,
+        }
+    }
 }
 
 /// Version 2 read layout: one extraction row per sequence.
@@ -87,7 +146,7 @@ struct OwnedSerializableRlFmIndexV2 {
     lookup: Option<LookupTable>,
 }
 
-impl From<OwnedSerializableRlFmIndexV2> for OwnedSerializableRlFmIndex {
+impl From<OwnedSerializableRlFmIndexV2> for OwnedSerializableRlFmIndexV3 {
     /// A version 2 file has no `#` delimiters, so its pieces are its sequences.
     fn from(v2: OwnedSerializableRlFmIndexV2) -> Self {
         let piece_boundaries = if v2.seq_end_rows.is_empty() {
@@ -124,8 +183,10 @@ impl RlFmIndex {
             sa_samples: self.sa_samples.as_ref(),
             text_len: self.text_len,
             num_sequences: self.num_sequences,
-            seq_boundaries: &self.seq_boundaries,
+            slot_boundaries: &self.slot_boundaries,
             seq_headers: &self.seq_headers,
+            seq_to_slot: self.seq_classes.seq_to_slot(),
+            dup_weights: &self.dup_weights,
             alphabet: &self.alphabet_fns,
             piece_boundaries: &self.piece_boundaries,
             piece_end_rows: &self.piece_end_rows,
@@ -140,20 +201,25 @@ impl RlFmIndex {
 
     /// Deserialize from bytes written by [`to_bytes`](Self::to_bytes).
     ///
-    /// Reads version 3 and version 2 files.
+    /// Reads version 4, 3 and 2 files.
     ///
     /// Returns [`FmIndexError::DeserializeError`] for a wrong magic or version, a truncated
-    /// or malformed body, an inconsistent run structure, or an alphabet whose built-in tag
-    /// does not match its tables.
+    /// or malformed body, an inconsistent run structure or sequence classes, or an alphabet
+    /// whose built-in tag does not match its tables.
     pub fn from_bytes(data: &[u8]) -> Result<Self, FmIndexError> {
         let d: OwnedSerializableRlFmIndex = if let Some(body) = data.strip_prefix(&FORMAT_MAGIC) {
             bincode::deserialize(body).map_err(corrupt)?
-        } else if let Some(body) = data.strip_prefix(&FORMAT_MAGIC_V2) {
-            bincode::deserialize::<OwnedSerializableRlFmIndexV2>(body)
+        } else if let Some(body) = data.strip_prefix(&FORMAT_MAGIC_V3) {
+            bincode::deserialize::<OwnedSerializableRlFmIndexV3>(body)
                 .map_err(corrupt)?
                 .into()
+        } else if let Some(body) = data.strip_prefix(&FORMAT_MAGIC_V2) {
+            OwnedSerializableRlFmIndexV3::from(
+                bincode::deserialize::<OwnedSerializableRlFmIndexV2>(body).map_err(corrupt)?,
+            )
+            .into()
         } else {
-            return Err(corrupt("missing \"HRL\\x03\" format marker"));
+            return Err(corrupt("missing \"HRL\\x04\" format marker"));
         };
         check_stored_alphabet(&d.alphabet)?;
         // Deserializing the BWT already validated its runs and rebuilt the blocks.
@@ -176,19 +242,21 @@ impl RlFmIndex {
         if let Some(samples) = &d.sa_samples {
             samples.validate(d.text_len).map_err(corrupt)?;
         }
-        if d.seq_boundaries.len() != d.num_sequences as usize
-            || d.seq_headers.len() != d.num_sequences as usize
-            || d.seq_boundaries.last().copied().unwrap_or(0) != d.text_len
-            || d.seq_boundaries.windows(2).any(|w| w[0] >= w[1])
-            // Every sequence holds at least its sentinel.
-            || d.seq_boundaries.first() == Some(&0)
-        {
-            return Err(corrupt("sequence metadata disagrees with the text"));
-        }
+        // Every stored sequence holds at least its sentinel, and every input sequence names
+        // one of them.
+        let seq_classes = check_sequence_tables(
+            d.text_len,
+            d.num_sequences,
+            &d.slot_boundaries,
+            &d.seq_headers,
+            d.seq_to_slot,
+            &d.dup_weights,
+        )
+        .map_err(|e| corrupt(format!("sequence metadata disagrees with the text: {e}")))?;
         check_pieces(
             &d.piece_boundaries,
             &d.piece_end_rows,
-            &d.seq_boundaries,
+            &d.slot_boundaries,
             d.text_len,
             &bwt,
         )?;
@@ -202,9 +270,11 @@ impl RlFmIndex {
             sa_samples: d.sa_samples,
             text_len: d.text_len,
             num_sequences: d.num_sequences,
-            seq_boundaries: d.seq_boundaries,
+            slot_boundaries: d.slot_boundaries,
             seq_headers: d.seq_headers,
             header_index,
+            seq_classes,
+            dup_weights: d.dup_weights,
             alphabet_fns: d.alphabet,
             piece_boundaries: d.piece_boundaries,
             piece_end_rows: d.piece_end_rows,
@@ -213,9 +283,10 @@ impl RlFmIndex {
     }
 }
 
-/// Validate the extraction metadata against the BWT and the (already checked) sequence
-/// boundaries: empty (reverse half), or one sentinel-separated piece per BWT sentinel, with
-/// strictly increasing ends finishing at the text length, every sequence end among them,
+/// Validate the extraction metadata against the BWT and the (already checked) stored
+/// sequence boundaries: empty (reverse half), or one sentinel-separated piece per BWT
+/// sentinel, with strictly increasing ends finishing at the text length, every sequence end
+/// among them,
 /// and one distinct sentinel row (`0..pieces`) per piece. A piece's row must not hold a
 /// sentinel in the BWT unless the piece is empty, or extraction would walk off its start.
 fn check_pieces(
@@ -269,12 +340,13 @@ impl BidirRlFmIndex {
         Ok(out)
     }
 
-    /// Deserialize from bytes written by [`to_bytes`](Self::to_bytes) (version 3 or 2).
+    /// Deserialize from bytes written by [`to_bytes`](Self::to_bytes) (version 4, 3 or 2).
     pub fn from_bytes(data: &[u8]) -> Result<Self, FmIndexError> {
         let rest = data
             .strip_prefix(&BIDIR_FORMAT_MAGIC)
+            .or_else(|| data.strip_prefix(&BIDIR_FORMAT_MAGIC_V3))
             .or_else(|| data.strip_prefix(&BIDIR_FORMAT_MAGIC_V2))
-            .ok_or_else(|| corrupt("missing \"HRB\\x03\" format marker"))?;
+            .ok_or_else(|| corrupt("missing \"HRB\\x04\" format marker"))?;
         let (len_bytes, rest) = rest
             .split_first_chunk::<4>()
             .ok_or_else(|| corrupt("truncated bidirectional header"))?;
@@ -352,8 +424,74 @@ mod tests {
 
         // A sequence without even its sentinel would let a row reach the BWT length.
         let mut empty_first = good.clone();
-        empty_first.seq_boundaries[0] = 0;
+        empty_first.slot_boundaries[0] = 0;
         assert!(rejects(&empty_first), "zero-length first sequence");
+    }
+
+    fn duplicated() -> RlFmIndex {
+        let seqs: Vec<DnaSequence> = ["ACGT#TG", "GGCA", "ACGT#TG", "GGCA", "ACGT#TG"]
+            .iter()
+            .map(|s| DnaSequence::from_str(s).unwrap())
+            .collect();
+        let config = RlFmIndexConfig {
+            sa_sample_rate: 2,
+            ..Default::default()
+        };
+        RlFmIndex::build_cpu(&seqs, &config).unwrap()
+    }
+
+    #[test]
+    fn round_trip_keeps_sequence_classes() {
+        let ix = duplicated();
+        assert_eq!(ix.num_sequences(), 5);
+        assert_eq!(ix.num_distinct_sequences(), 2);
+        let back = RlFmIndex::from_bytes(&ix.to_bytes().unwrap()).unwrap();
+        assert_eq!(back.seq_classes, ix.seq_classes);
+        assert_eq!(back.dup_weights, ix.dup_weights);
+        assert_eq!(back.to_bytes().unwrap(), ix.to_bytes().unwrap());
+        for id in 0..5 {
+            assert_eq!(
+                back.sequence(crate::SeqId(id)),
+                ix.sequence(crate::SeqId(id))
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_corrupted_sequence_classes() {
+        let good = duplicated();
+        assert!(!rejects(&good));
+
+        let mut no_weights = good.clone();
+        no_weights.dup_weights = DupWeights::default();
+        assert!(rejects(&no_weights), "weights missing for duplicated slots");
+
+        let mut extra_header = good.clone();
+        extra_header.seq_headers.push("extra".into());
+        assert!(rejects(&extra_header), "header count");
+
+        let mut identity = good.clone();
+        identity.seq_classes = crate::fm_index::seq_classes::SeqClasses::identity(5);
+        assert!(rejects(&identity), "classes naming more slots than stored");
+    }
+
+    // `tests/fixtures/v3_rl_*` were written at `1077d09` (format version 3) by
+    // `examples/gen_fixtures.rs` from the fixture input and config below.
+    #[test]
+    fn reads_version_3_fixtures() {
+        use crate::rl_fm_index::BidirRlFmIndex;
+        let blob = include_bytes!("../../tests/fixtures/v3_rl_lookup.hrl");
+        assert_eq!(&blob[..4], &FORMAT_MAGIC_V3);
+        let back = RlFmIndex::from_bytes(blob).unwrap();
+        assert!(back.seq_classes.is_identity());
+        let fresh = RlFmIndex::build_cpu(&fixture_input(), &fixture_config()).unwrap();
+        assert_eq!(back.to_bytes().unwrap(), fresh.to_bytes().unwrap());
+
+        let blob = include_bytes!("../../tests/fixtures/v3_rl_bidir_lookup.hrb");
+        assert_eq!(&blob[..4], &BIDIR_FORMAT_MAGIC_V3);
+        let back = BidirRlFmIndex::from_bytes(blob).unwrap();
+        let fresh = BidirRlFmIndex::build_cpu(&fixture_input(), &fixture_config()).unwrap();
+        assert_eq!(back.to_bytes().unwrap(), fresh.to_bytes().unwrap());
     }
 
     /// `#` delimiters: one piece per record, and every sequence end must be a piece end.

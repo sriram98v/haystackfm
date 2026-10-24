@@ -8,6 +8,53 @@ Before 1.0, a breaking change bumps the **minor** version.
 
 ## [Unreleased]
 
+### Added
+- Deduplication of identical input sequences in every index (`FmIndex`, `BidirFmIndex`,
+  `RlFmIndex`, `BidirRlFmIndex`, `MoveFmIndex`, `BMoveIndex`; CPU and GPU builds). Input
+  sequences with byte-identical bases (`#` layout included; headers may differ) form an
+  equivalence class, and only the first member, its representative, is stored in the
+  text. A sequence that is only a prefix or substring of another is not grouped. `SeqId`s
+  keep their meaning (the position in the builder's input) for every sequence, stored or
+  not, and `sequence(id)` returns any member's bases.
+- `SeqClasses` (`seq_classes()` on every index) plus `equivalence_class(id)`,
+  `representative(id)` and `num_distinct_sequences()` accessors.
+- Grouped query variants that report a match in a class once, on its representative:
+  `locate_grouped` / `locate_rows_grouped` (FM, RL, Move), `locate_interval_grouped`
+  (bidirectional indexes), `BMoveIndex::locate_grouped`, and `find_smems_grouped` /
+  `find_mems_grouped` (`BidirFmIndex`, `BidirRlFmIndex`). `BMoveIndex::count_cursor` and
+  `count_fwd(&FwdInterval)` (bidirectional indexes) count a cursor's occurrences over every
+  member.
+
+### Changed
+- **Breaking (results).** A match in a sequence with identical copies is reported once per
+  class member: `locate`, `locate_rows`, `locate_interval`, `locate_fwd`,
+  `FwdInterval::locate`, `BMoveIndex::locate`, `Mem::positions` (with `locate = true`),
+  `FmIndex::locate_gpu` and `MemHit::positions` (with the index's own `seq_boundaries`)
+  list one hit per member, consecutively and by ascending id, in place of the
+  representative's hit. Counts include every member: `count`, `count_interval`,
+  `Mem::match_count`, `MemHit::match_count` and the GPU batch MEM counts (so
+  `match_count == positions.len()` still holds for flat MEMs). Cursor `size()` and the
+  `count_*_in` / `count_wild_*` helpers still count the stored text. Inputs without
+  identical sequences give the same results as before.
+- **Breaking.** `seq_boundaries()` (now also on `FmIndex`), `map_position`,
+  `locate_positions(_many)`, `text_len()` and `BMoveCursor::toehold` describe the stored
+  (deduplicated) text: boundaries are indexed by stored slot rather than `SeqId`, and raw
+  positions lie in representatives only. `find_smems_gpu` / `find_mems_gpu` expand hits
+  only when passed the index's own `seq_boundaries()`; with any other `ref_boundaries`
+  table (e.g. one built in input order from the original sequences) positions are indices
+  into that table, one per stored occurrence, not expanded.
+- **Breaking (files).** Format versions `"HFM\x04"`, `"HRL\x04"` / `"HRB\x04"` and
+  `"HMV\x02"` / `"HBM\x02"` store the sequence classes and the duplicate-row count weights.
+  Older files still load (every sequence in a class of its own); blobs written by this
+  version cannot be read by older builds. Loading now checks every format's sequence
+  tables (header count, boundaries ending at the text length), so a corrupt older
+  `FmIndex` file that used to load is now rejected.
+
+### Known limitations
+- The WASM bindings (`FmIndexHandle`) return the expanded `locate` / `count` results but do
+  not yet expose the classes: no `seq_classes`, `equivalence_class`, `representative`,
+  `num_distinct_sequences` or `*_grouped` variants from JavaScript.
+
 ## [0.7.0] - 2026-10-21
 
 ### Added

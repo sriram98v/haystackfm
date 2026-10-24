@@ -1,4 +1,4 @@
-use crate::alphabet::{self, Alphabet, DnaSequence, IupacDna, SymbolSet, ALPHABET_SIZE};
+use crate::alphabet::{Alphabet, DnaSequence, IupacDna, SymbolSet, ALPHABET_SIZE};
 use crate::error::FmIndexError;
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::fwd_interval::FwdInterval;
@@ -69,13 +69,12 @@ impl BidirFmIndex {
             return Err(FmIndexError::EmptySequence);
         }
 
-        let (text, _) = alphabet::concatenate_sequences(sequences)?;
-
         // Forward index.
         let fwd = FmIndex::build_cpu_with::<A>(sequences, config)?;
 
-        // Reverse index: built on the byte-reversal of the same concatenated text.
-        let rev_seq = reverse_as_sequence(&text)?;
+        // Reverse index: built on the byte-reversal of the forward half's (deduplicated)
+        // text.
+        let rev_seq = reverse_as_sequence(&fwd.text)?;
         let mut rev = FmIndex::build_cpu_reverse_half_with::<A>(
             &rev_seq,
             &FmIndexConfig {
@@ -99,11 +98,14 @@ impl BidirFmIndex {
         Ok(Self::from_halves(fwd, rev))
     }
 
-    /// Exclusive end positions of each reference in the concatenated text.
-    /// `seq_boundaries()[i]` is the position just past the last base of reference `i`.
-    /// Pass this slice as `ref_boundaries` to `find_smems_gpu` / `find_mems_gpu`.
+    /// Exclusive end positions (trailing sentinel included) of each **stored** reference in
+    /// the concatenated text. Identical input sequences are stored once (see
+    /// [`crate::fm_index::seq_classes`]), so this is indexed by stored slot, which equals
+    /// the [`SeqId`] when the input has no duplicates.
+    /// Pass this slice as `ref_boundaries` to `find_smems_gpu` / `find_mems_gpu`, which
+    /// then report hits by [`SeqId`] with duplicates expanded.
     pub fn seq_boundaries(&self) -> &[u32] {
-        &self.fwd.seq_boundaries
+        &self.fwd.slot_boundaries
     }
 
     /// Build a bidirectional FM-index using GPU acceleration (async).
@@ -116,11 +118,6 @@ impl BidirFmIndex {
             return Err(FmIndexError::EmptySequence);
         }
 
-        let (text, _) = alphabet::concatenate_sequences(sequences)?;
-
-        // Build forward and reverse indices concurrently via GPU.
-        let rev_seq = reverse_as_sequence(&text)?;
-
         let rev_config = FmIndexConfig {
             sa_sample_rate: config.sa_sample_rate,
             use_gpu: true,
@@ -128,8 +125,10 @@ impl BidirFmIndex {
         };
 
         // Build sequentially: both paths share the GPU device pool and
-        // concurrent init would contend for it.
+        // concurrent init would contend for it. The reverse half indexes the byte-reversal
+        // of the forward half's (deduplicated) text.
         let fwd = FmIndex::build(sequences, config).await?;
+        let rev_seq = reverse_as_sequence(&fwd.text)?;
         let mut rev = FmIndex::build_reverse_half(&rev_seq, &rev_config).await?;
         // See `build_cpu_with`: the reverse text is redundant and never served.
         rev.forget_text();
@@ -218,6 +217,13 @@ impl BidirFmIndex {
     /// Locate every row of a forward interval: see [`FwdInterval::locate`].
     pub fn locate_fwd(&self, iv: &FwdInterval) -> Vec<(SeqId, u32)> {
         iv.locate(&self.fwd)
+    }
+
+    /// Occurrences of a forward interval in every member of a class of identical input
+    /// sequences, i.e. `locate_fwd(iv).len()` without locating (`iv.size()` counts the
+    /// stored text only).
+    pub fn count_fwd(&self, iv: &FwdInterval) -> u32 {
+        self.fwd.dup_weights.weighted_size(iv.lo, iv.hi)
     }
 
     // ── k-mer seeding ─────────────────────────────────────────────────────────
@@ -342,18 +348,26 @@ impl BidirFmIndex {
 
     // ── Query helpers ─────────────────────────────────────────────────────────
 
-    /// Count occurrences of the pattern represented by `iv`.
+    /// Count occurrences of the pattern represented by `iv`, in every member of a class of
+    /// identical input sequences. `iv.size()` counts occurrences in the stored text only.
     pub fn count_interval(&self, iv: &BidirInterval) -> u32 {
-        iv.size()
+        self.fwd.dup_weights.weighted_size(iv.fwd_lo, iv.fwd_hi)
     }
 
     /// Locate all occurrences for the pattern represented by `iv`.
     ///
     /// Returns `(sequence_id, position_within_sequence)` tuples; resolve a [`SeqId`] to its
-    /// FASTA header with [`seq_header`](Self::seq_header).
+    /// FASTA header with [`seq_header`](Self::seq_header). A row in a class of identical
+    /// sequences yields one tuple per member (see [`FmIndex::locate`]).
     /// Uses the forward SA samples; time is O(occ × sample_rate).
     pub fn locate_interval(&self, iv: &BidirInterval) -> Vec<(SeqId, u32)> {
         self.fwd.locate_rows(iv.fwd_lo, iv.fwd_hi)
+    }
+
+    /// [`locate_interval`](Self::locate_interval) with one tuple per row, naming the
+    /// representative of a class of identical sequences.
+    pub fn locate_interval_grouped(&self, iv: &BidirInterval) -> Vec<(SeqId, u32)> {
+        self.fwd.locate_rows_grouped(iv.fwd_lo, iv.fwd_hi)
     }
 
     /// Total length of the indexed text (including sentinels).
@@ -361,9 +375,31 @@ impl BidirFmIndex {
         self.fwd.text_len
     }
 
-    /// Number of sequences indexed.
+    /// Number of sequences indexed: every input sequence, duplicates included.
     pub fn num_sequences(&self) -> u32 {
         self.fwd.num_sequences
+    }
+
+    /// Number of distinct sequences stored in the text.
+    pub fn num_distinct_sequences(&self) -> u32 {
+        self.fwd.num_distinct_sequences()
+    }
+
+    /// Classes of identical input sequences. See [`crate::fm_index::seq_classes`].
+    pub fn seq_classes(&self) -> &crate::SeqClasses {
+        &self.fwd.seq_classes
+    }
+
+    /// Every input sequence identical to `id` (itself included), ascending; empty when `id`
+    /// is out of range.
+    pub fn equivalence_class(&self, id: SeqId) -> &[SeqId] {
+        self.fwd.equivalence_class(id)
+    }
+
+    /// The member of `id`'s class that is stored in the index, or `None` when `id` is out
+    /// of range.
+    pub fn representative(&self, id: SeqId) -> Option<SeqId> {
+        self.fwd.representative(id)
     }
 
     /// FASTA headers of every indexed reference, in build order.
@@ -468,10 +504,17 @@ impl BidirFmIndex {
     /// resolving each match to `(ref_id, offset_within_ref)` positions.
     ///
     /// `ref_boundaries[i]` is the exclusive end position of reference `i` in the
-    /// concatenated text (same order as passed to [`BidirFmIndex::build_cpu`]).
-    /// Pass `&[]` to skip position resolution (positions will be empty).
+    /// concatenated text. Pass [`seq_boundaries`](Self::seq_boundaries) to get positions
+    /// by [`SeqId`], with a hit in a class of identical input sequences reported once per
+    /// member (as [`find_smems`](Self::find_smems) does); any other table yields indices
+    /// into it, one per occurrence in the stored text. Pass `&[]` to skip position
+    /// resolution (positions will be empty).
     ///
-    /// Hits per MEM are capped at `max_hits_per_mem`. Pass `1024` for the default.
+    /// `match_count` counts every class member. Hits per MEM are capped at
+    /// `max_hits_per_mem` (pass `1024` for the default); `truncated` is set when the cap
+    /// cut the list short: with [`seq_boundaries`](Self::seq_boundaries) when fewer
+    /// positions than `match_count` are listed, with a caller's table when the stored
+    /// occurrences exceed the cap, and with `&[]` when `match_count` does.
     #[cfg(feature = "gpu")]
     pub async fn find_smems_gpu(
         &self,
@@ -507,11 +550,8 @@ impl BidirFmIndex {
     ///
     /// [`find_smems_gpu`](Self::find_smems_gpu) is unaffected by this.
     ///
-    /// `ref_boundaries[i]` is the exclusive end position of reference `i` in the
-    /// concatenated text.
-    /// Pass `&[]` to skip position resolution (positions will be empty).
-    ///
-    /// Hits per MEM are capped at `max_hits_per_mem`. Pass `1024` for the default.
+    /// `ref_boundaries`, `match_count`, the hit cap and `truncated` behave as in
+    /// [`find_smems_gpu`](Self::find_smems_gpu).
     #[cfg(feature = "gpu")]
     pub async fn find_mems_gpu(
         &self,
@@ -709,18 +749,27 @@ async fn resolve_mem_hits_gpu(
     }
 
     // ── Build output skeleton with empty positions ────────────────────────────
+    // `match_count` includes every member of a class of identical sequences.
+    let weights = &bidir.fwd.dup_weights;
     let mut output: Vec<Vec<MemHit>> = per_query_intervals
         .iter()
         .map(|mems| {
             mems.iter()
                 .map(|iv| {
-                    let raw = iv.fwd_hi.saturating_sub(iv.fwd_lo);
+                    let count = weights.weighted_size(iv.fwd_lo, iv.fwd_hi);
                     MemHit {
                         query_start: iv.query_start,
                         query_end: iv.query_end,
-                        match_count: raw,
+                        match_count: count,
                         positions: Vec::new(),
-                        truncated: raw > max_hits_per_mem,
+                        // Without resolution: whether the count exceeds the cap. With a
+                        // caller's boundaries one position per stored row is reported, so
+                        // the stored-row count decides. Expansion below recomputes it.
+                        truncated: if ref_boundaries.is_empty() {
+                            count > max_hits_per_mem
+                        } else {
+                            iv.fwd_hi.saturating_sub(iv.fwd_lo) > max_hits_per_mem
+                        },
                     }
                 })
                 .collect()
@@ -730,6 +779,10 @@ async fn resolve_mem_hits_gpu(
     if flat_intervals.is_empty() || ref_boundaries.is_empty() {
         return Ok(output);
     }
+    // With the index's own boundaries the GPU reference ids are stored slots, which name
+    // representatives whose hits expand to their whole class; with a caller's boundaries
+    // they are indices into those, one per stored occurrence.
+    let expand = ref_boundaries == bidir.seq_boundaries();
 
     // Pre-allocate position slots now that we know we'll resolve.
     for (k, iv) in flat_intervals.iter().enumerate() {
@@ -770,7 +823,33 @@ async fn resolve_mem_hits_gpu(
         }
     }
 
+    // Without duplicates slots are ids and `truncated` is already right.
+    if expand && !bidir.fwd.seq_classes.is_identity() {
+        expand_gpu_hits(&mut output, &bidir.fwd.seq_classes, max_hits_per_mem);
+    }
+
     Ok(output)
+}
+
+/// Expand GPU MEM hits whose positions name stored slots to every class member, keeping
+/// the first `max_hits_per_mem`. `min(raw, cap)` stored rows were resolved: if `raw >= cap`
+/// they expand to at least `cap` hits, otherwise every row was, so this keeps the first
+/// `min(match_count, cap)` hits and `truncated` says whether that is all of them.
+#[cfg(feature = "gpu")]
+fn expand_gpu_hits(
+    output: &mut [Vec<crate::gpu::MemHit>],
+    classes: &crate::SeqClasses,
+    max_hits_per_mem: u32,
+) {
+    for hit in output.iter_mut().flatten() {
+        let slots = std::mem::take(&mut hit.positions)
+            .into_iter()
+            .map(|(slot, off)| (slot.get(), off))
+            .collect();
+        hit.positions = classes.expand_slots(slots);
+        hit.positions.truncate(max_hits_per_mem as usize);
+        hit.truncated = hit.match_count as usize > hit.positions.len();
+    }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

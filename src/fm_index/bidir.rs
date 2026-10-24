@@ -85,7 +85,9 @@ impl BidirInterval {
         }
     }
 
-    /// Number of occurrences (same for forward and reverse intervals).
+    /// Number of occurrences in the stored text (same for forward and reverse intervals).
+    /// Identical input sequences are stored once, so this counts each class once; the
+    /// index's `count_interval` counts every member.
     pub fn size(&self) -> u32 {
         self.fwd_hi.saturating_sub(self.fwd_lo)
     }

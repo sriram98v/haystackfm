@@ -2,13 +2,20 @@
 //!
 //! ## Format
 //!
-//! Version 3 (current): [`FORMAT_MAGIC`] (`"HFM\x03"`) followed by the bincode encoding of
+//! Version 4 (current): [`FORMAT_MAGIC`] (`"HFM\x04"`) followed by the bincode encoding of
 //! [`SerializableFmIndex`]. The large numeric vectors (occ checkpoints and block records,
 //! SA samples, LCP arrays, lookup table, the text) are length-prefixed little-endian byte
 //! blobs (`crate::serde_raw`) that load with one copy each. The alphabet's matching tables
 //! ([`AlphabetFns`]) are stored in full, so an index built with a custom alphabet loads back
 //! with the semantics it was built with; the lookup table lists wildcard variants per k-mer
-//! (`crate::fm_index::lookup`).
+//! (`crate::fm_index::lookup`). The classes of identical input sequences are stored as each
+//! sequence's stored slot plus the duplicate-row weights
+//! ([`seq_classes`](crate::fm_index::seq_classes)); the boundaries are those of the stored
+//! sequences.
+//!
+//! Version 3 ([`FORMAT_MAGIC_V3`], `"HFM\x03"`): version 4 without the sequence classes
+//! (written before deduplication: one stored sequence per input sequence). Still read
+//! (`OwnedSerializableFmIndexV3`), never written.
 //!
 //! Version 2 ([`FORMAT_MAGIC_V2`], `"HFM\x02"`): blobs as above, but only the alphabet *tag*
 //! is stored (so only built-in alphabets load) and the lookup table is exact-only. Still
@@ -31,20 +38,23 @@ use crate::alphabet::{alphabet_fns_from_tag, AlphabetFns};
 use crate::c_array::CArray;
 use crate::error::FmIndexError;
 use crate::fm_index::lookup::{LookupTable, LookupTableV1};
+use crate::fm_index::seq_classes::{DupWeights, SeqClasses};
 use crate::fm_index::seq_id::HeaderIndex;
 use crate::lcp::{LcpArray, LcpArrayV1};
 use crate::occ::{OccTable, OccTableV1};
 use crate::suffix_array::{SampledSuffixArray, SampledSuffixArrayV1};
 
-/// Leading bytes of a serialized index: `"HFM"` plus the format version (currently 3).
-pub const FORMAT_MAGIC: [u8; 4] = *b"HFM\x03";
+/// Leading bytes of a serialized index: `"HFM"` plus the format version (currently 4).
+pub const FORMAT_MAGIC: [u8; 4] = *b"HFM\x04";
+/// Magic of format version 3, still accepted by [`FmIndex::from_bytes`].
+pub const FORMAT_MAGIC_V3: [u8; 4] = *b"HFM\x03";
 /// Magic of format version 2, still accepted by [`FmIndex::from_bytes`].
 pub const FORMAT_MAGIC_V2: [u8; 4] = *b"HFM\x02";
 /// Magic of format version 1, still accepted by [`FmIndex::from_bytes`].
 pub const FORMAT_MAGIC_V1: [u8; 4] = *b"HFM\x01";
 
 impl FmIndex {
-    /// Serialize the FM-index to bytes (format version 3, see the module docs).
+    /// Serialize the FM-index to bytes (format version 4, see the module docs).
     pub fn to_bytes(&self) -> Result<Vec<u8>, FmIndexError> {
         let serializable = SerializableFmIndex {
             c_array: &self.c_array,
@@ -53,8 +63,10 @@ impl FmIndex {
             text: &self.text,
             text_len: self.text_len,
             num_sequences: self.num_sequences,
-            seq_boundaries: &self.seq_boundaries,
+            slot_boundaries: &self.slot_boundaries,
             seq_headers: &self.seq_headers,
+            seq_to_slot: self.seq_classes.seq_to_slot(),
+            dup_weights: &self.dup_weights,
             lookup: self.lookup.as_ref(),
             lcp: self.lcp.as_ref(),
             alphabet: &self.alphabet_fns,
@@ -67,10 +79,11 @@ impl FmIndex {
         Ok(out)
     }
 
-    /// Deserialize an FM-index from bytes: the current format, format versions 1 and 2, or
+    /// Deserialize an FM-index from bytes: the current format, format versions 1 to 3, or
     /// a legacy unversioned blob (which loads without an LCP array). See the module docs.
+    /// Formats before 4 load with every sequence in a class of its own.
     ///
-    /// Version 3 carries the alphabet's matching tables; older versions carry a tag from
+    /// Versions 3 and 4 carry the alphabet's matching tables; older versions carry a tag from
     /// which a built-in alphabet is reconstructed. Returns
     /// [`FmIndexError::DeserializeError`] for unknown or reserved tags, for a built-in tag
     /// whose stored tables do not match the built-in alphabet, and for format versions this
@@ -106,6 +119,15 @@ impl FmIndex {
             .sa_samples
             .validate(deserialized.text_len)
             .map_err(invalid)?;
+        let seq_classes = check_sequence_tables(
+            deserialized.text_len,
+            deserialized.num_sequences,
+            &deserialized.slot_boundaries,
+            &deserialized.seq_headers,
+            deserialized.seq_to_slot,
+            &deserialized.dup_weights,
+        )
+        .map_err(invalid)?;
         occ.rebuild_derived();
         // A version-1/2 table is upgraded only once the occ table can answer ranks again.
         let lookup = match (deserialized.lookup, old_lookup) {
@@ -126,8 +148,10 @@ impl FmIndex {
             text: deserialized.text,
             text_len: deserialized.text_len,
             num_sequences: deserialized.num_sequences,
-            seq_boundaries: deserialized.seq_boundaries,
+            slot_boundaries: deserialized.slot_boundaries,
             seq_headers: deserialized.seq_headers,
+            seq_classes,
+            dup_weights: deserialized.dup_weights,
             lookup,
             alphabet_fns,
             lcp: deserialized.lcp,
@@ -135,13 +159,66 @@ impl FmIndex {
     }
 }
 
+/// Check a loaded index's per-sequence tables against each other and the text length, and
+/// rebuild its [`SeqClasses`]. Shared by every index format that stores sequence classes.
+pub(crate) fn check_sequence_tables(
+    text_len: u32,
+    num_sequences: u32,
+    slot_boundaries: &[u32],
+    seq_headers: &[String],
+    seq_to_slot: Vec<u32>,
+    dup_weights: &DupWeights,
+) -> Result<SeqClasses, String> {
+    if seq_headers.len() != num_sequences as usize || seq_to_slot.len() != num_sequences as usize {
+        return Err(format!(
+            "{num_sequences} sequences but {} headers and {} class entries",
+            seq_headers.len(),
+            seq_to_slot.len()
+        ));
+    }
+    if slot_boundaries.last().copied().unwrap_or(0) != text_len
+        || slot_boundaries.first() == Some(&0)
+        || slot_boundaries.windows(2).any(|w| w[0] >= w[1])
+    {
+        return Err("sequence boundaries do not partition the text".into());
+    }
+    let classes = SeqClasses::from_seq_to_slot(seq_to_slot, slot_boundaries.len())?;
+    dup_weights.validate(text_len, slot_boundaries, &classes)?;
+    Ok(classes)
+}
+
 /// Decode any accepted format into the current field layout. A version-1/2 lookup table
 /// comes back separately: converting it needs a working occ table, which the caller has.
+/// Formats before 4 predate deduplication: every sequence is stored, in a class of its own.
 fn decode(data: &[u8]) -> Result<(OwnedSerializableFmIndex, Option<LookupTableV1>), FmIndexError> {
     let de = |e: bincode::Error| FmIndexError::DeserializeError(e.to_string());
+    // Sized by the headers actually read (bounded by the input), never by the stored
+    // `num_sequences`, which a corrupt file could set to u32::MAX; `check_sequence_tables`
+    // then rejects any mismatch between the two.
+    let identity = |headers: &[String]| (0..headers.len() as u32).collect::<Vec<u32>>();
     if let Some(body) = data.strip_prefix(&FORMAT_MAGIC) {
-        let v3: OwnedSerializableFmIndex = bincode::deserialize(body).map_err(de)?;
-        Ok((v3, None))
+        let v4: OwnedSerializableFmIndex = bincode::deserialize(body).map_err(de)?;
+        Ok((v4, None))
+    } else if let Some(body) = data.strip_prefix(&FORMAT_MAGIC_V3) {
+        let v3: OwnedSerializableFmIndexV3 = bincode::deserialize(body).map_err(de)?;
+        Ok((
+            OwnedSerializableFmIndex {
+                c_array: v3.c_array,
+                occ: v3.occ,
+                sa_samples: v3.sa_samples,
+                text: v3.text,
+                text_len: v3.text_len,
+                num_sequences: v3.num_sequences,
+                slot_boundaries: v3.seq_boundaries,
+                seq_to_slot: identity(&v3.seq_headers),
+                seq_headers: v3.seq_headers,
+                dup_weights: DupWeights::default(),
+                lookup: v3.lookup,
+                lcp: v3.lcp,
+                alphabet: v3.alphabet,
+            },
+            None,
+        ))
     } else if let Some(body) = data.strip_prefix(&FORMAT_MAGIC_V2) {
         let v2: OwnedSerializableFmIndexV2 = bincode::deserialize(body).map_err(de)?;
         let alphabet = alphabet_from_tag(v2.alphabet_tag)?;
@@ -153,8 +230,10 @@ fn decode(data: &[u8]) -> Result<(OwnedSerializableFmIndex, Option<LookupTableV1
                 text: v2.text,
                 text_len: v2.text_len,
                 num_sequences: v2.num_sequences,
-                seq_boundaries: v2.seq_boundaries,
+                slot_boundaries: v2.seq_boundaries,
+                seq_to_slot: identity(&v2.seq_headers),
                 seq_headers: v2.seq_headers,
+                dup_weights: DupWeights::default(),
                 lookup: None,
                 lcp: v2.lcp,
                 alphabet,
@@ -172,8 +251,10 @@ fn decode(data: &[u8]) -> Result<(OwnedSerializableFmIndex, Option<LookupTableV1
                 text: v1.text,
                 text_len: v1.text_len,
                 num_sequences: v1.num_sequences,
-                seq_boundaries: v1.seq_boundaries,
+                slot_boundaries: v1.seq_boundaries,
+                seq_to_slot: identity(&v1.seq_headers),
                 seq_headers: v1.seq_headers,
+                dup_weights: DupWeights::default(),
                 lookup: None,
                 lcp: v1.lcp.map(Into::into),
                 alphabet,
@@ -183,7 +264,7 @@ fn decode(data: &[u8]) -> Result<(OwnedSerializableFmIndex, Option<LookupTableV1
     } else if let [b'H', b'F', b'M', version, ..] = data {
         Err(FmIndexError::DeserializeError(format!(
             "unsupported serialized FM-index format version {version} \
-             (this build reads versions 1, 2 and 3)"
+             (this build reads versions 1 to 4)"
         )))
     } else {
         let legacy: LegacyOwnedSerializableFmIndex = bincode::deserialize(data).map_err(de)?;
@@ -196,8 +277,10 @@ fn decode(data: &[u8]) -> Result<(OwnedSerializableFmIndex, Option<LookupTableV1
                 text: legacy.text,
                 text_len: legacy.text_len,
                 num_sequences: legacy.num_sequences,
-                seq_boundaries: legacy.seq_boundaries,
+                slot_boundaries: legacy.seq_boundaries,
+                seq_to_slot: identity(&legacy.seq_headers),
                 seq_headers: legacy.seq_headers,
+                dup_weights: DupWeights::default(),
                 lookup: None,
                 lcp: None,
                 alphabet,
@@ -235,7 +318,7 @@ fn alphabet_from_tag(tag: u8) -> Result<AlphabetFns, FmIndexError> {
     })
 }
 
-/// Format version 3 write layout. Field order is the wire order.
+/// Format version 4 write layout. Field order is the wire order.
 #[derive(serde::Serialize)]
 struct SerializableFmIndex<'a> {
     c_array: &'a CArray,
@@ -246,8 +329,13 @@ struct SerializableFmIndex<'a> {
     text: &'a [u8],
     text_len: u32,
     num_sequences: u32,
-    seq_boundaries: &'a [u32],
+    /// Ends of the stored (distinct) sequences.
+    slot_boundaries: &'a [u32],
     seq_headers: &'a [String],
+    /// Stored slot of every input sequence (format version 4 onwards).
+    #[serde(with = "crate::serde_raw::u32s")]
+    seq_to_slot: &'a [u32],
+    dup_weights: &'a DupWeights,
     lookup: Option<&'a LookupTable>,
     /// Present when built with `FmIndexConfig::build_lcp` (format version 1 onwards).
     lcp: Option<&'a LcpArray>,
@@ -256,9 +344,30 @@ struct SerializableFmIndex<'a> {
     alphabet: &'a AlphabetFns,
 }
 
-/// Format version 3 read layout; mirrors [`SerializableFmIndex`].
+/// Format version 4 read layout; mirrors [`SerializableFmIndex`].
 #[derive(serde::Deserialize)]
 struct OwnedSerializableFmIndex {
+    c_array: CArray,
+    occ: OccTable,
+    sa_samples: SampledSuffixArray,
+    #[serde(with = "crate::serde_raw::bytes")]
+    text: Vec<u8>,
+    text_len: u32,
+    num_sequences: u32,
+    slot_boundaries: Vec<u32>,
+    seq_headers: Vec<String>,
+    #[serde(with = "crate::serde_raw::u32s")]
+    seq_to_slot: Vec<u32>,
+    dup_weights: DupWeights,
+    lookup: Option<LookupTable>,
+    lcp: Option<LcpArray>,
+    /// Kept last (see [`SerializableFmIndex`]).
+    alphabet: AlphabetFns,
+}
+
+/// Format version 3 read layout: version 4 without the sequence classes.
+#[derive(serde::Deserialize)]
+struct OwnedSerializableFmIndexV3 {
     c_array: CArray,
     occ: OccTable,
     sa_samples: SampledSuffixArray,
@@ -270,7 +379,6 @@ struct OwnedSerializableFmIndex {
     seq_headers: Vec<String>,
     lookup: Option<LookupTable>,
     lcp: Option<LcpArray>,
-    /// Kept last (see [`SerializableFmIndex`]).
     alphabet: AlphabetFns,
 }
 
@@ -386,8 +494,9 @@ mod tests {
     // ── Frozen-format fixtures ────────────────────────────────────────────────
     //
     // `tests/fixtures/v1_*.hfm` were written at `9b32c9f` (format version 1) by a throwaway
-    // generator and `v2_*.hfm` at `7e4bff0` (format version 2) by `examples/gen_fixtures.rs`,
-    // both from exactly the input and configs below; the legacy blob is the version-1
+    // generator, `v2_*.hfm` at `7e4bff0` (format version 2) and `v3_*.hfm` at `1077d09`
+    // (format version 3) by `examples/gen_fixtures.rs`, all from exactly the input and
+    // configs below (which has no duplicate sequences); the legacy blob is the version-1
     // Bitplane blob minus its magic and the `Option<LcpArray>` None byte. CPU construction
     // is deterministic, so a fresh build must serialize to the same current-format bytes as
     // the loaded fixture — i.e. every stored field survived the version upgrade. The OneHot
@@ -518,6 +627,38 @@ mod tests {
     }
 
     #[test]
+    fn test_v3_fixtures_load_as_identity_classes() {
+        let cases: [(&[u8], FmIndexConfig, bool); 3] = [
+            (
+                include_bytes!("../../tests/fixtures/v3_onehot_lcp_lookup.hfm"),
+                onehot_fixture_config(),
+                false,
+            ),
+            (
+                include_bytes!("../../tests/fixtures/v3_bitplane_nolcp.hfm"),
+                bitplane_fixture_config(),
+                false,
+            ),
+            (
+                include_bytes!("../../tests/fixtures/v3_exact_onehot_lookup.hfm"),
+                onehot_fixture_config(),
+                true,
+            ),
+        ];
+        for (blob, config, exact) in cases {
+            assert_eq!(&blob[..4], &super::FORMAT_MAGIC_V3);
+            let loaded = FmIndex::from_bytes(blob).unwrap();
+            assert!(loaded.seq_classes.is_identity());
+            assert!(loaded.dup_weights.is_empty());
+            if exact {
+                assert_matches_fresh_build_with::<ExactDna>(&loaded, &config);
+            } else {
+                assert_matches_fresh_build(&loaded, &config);
+            }
+        }
+    }
+
+    #[test]
     fn test_v2_fixture_with_unknown_tag_rejected() {
         let mut blob = include_bytes!("../../tests/fixtures/v2_bitplane_nolcp.hfm").to_vec();
         *blob.last_mut().unwrap() = 0xFF;
@@ -574,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn test_v3_roundtrip_every_field_on_every_config() {
+    fn test_v4_roundtrip_every_field_on_every_config() {
         use crate::occ::OccEncoding;
         for encoding in [OccEncoding::Bitplane, OccEncoding::OneHot] {
             for build_lcp in [false, true] {
@@ -597,8 +738,10 @@ mod tests {
                     assert_eq!(restored.text, original.text);
                     assert_eq!(restored.text_len, original.text_len);
                     assert_eq!(restored.num_sequences, original.num_sequences);
-                    assert_eq!(restored.seq_boundaries, original.seq_boundaries);
+                    assert_eq!(restored.slot_boundaries, original.slot_boundaries);
                     assert_eq!(restored.seq_headers, original.seq_headers);
+                    assert_eq!(restored.seq_classes, original.seq_classes);
+                    assert_eq!(restored.dup_weights, original.dup_weights);
                     assert_eq!(restored.lcp, original.lcp);
                     assert_eq!(restored.lookup.is_some(), lookup_depth > 0);
                     assert_eq!(restored.lookup, original.lookup);
@@ -628,12 +771,86 @@ mod tests {
             .unwrap()
             .to_bytes()
             .unwrap();
-        bytes[3] = 4;
+        bytes[3] = 5;
         let err = FmIndex::from_bytes(&bytes).unwrap_err();
         assert!(
-            err.to_string().contains("format version 4"),
+            err.to_string().contains("format version 5"),
             "unexpected error: {err}"
         );
+    }
+
+    fn duplicated_input() -> Vec<DnaSequence> {
+        vec![
+            DnaSequence::from_str_with_header("ACGTGATTACA", "a").unwrap(),
+            DnaSequence::from_str_with_header("TTGCA", "b").unwrap(),
+            DnaSequence::from_str_with_header("ACGTGATTACA", "a2").unwrap(),
+            DnaSequence::from_str_with_header("TTGCA", "b2").unwrap(),
+            DnaSequence::from_str_with_header("ACGTGATTACA", "a3").unwrap(),
+        ]
+    }
+
+    #[test]
+    fn test_v4_roundtrip_keeps_sequence_classes() {
+        let config = FmIndexConfig {
+            sa_sample_rate: 2,
+            use_gpu: false,
+            ..Default::default()
+        };
+        let original = FmIndex::build_cpu(&duplicated_input(), &config).unwrap();
+        assert!(!original.seq_classes.is_identity());
+        assert!(!original.dup_weights.is_empty());
+        let bytes = original.to_bytes().unwrap();
+        let restored = FmIndex::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.seq_classes, original.seq_classes);
+        assert_eq!(restored.dup_weights, original.dup_weights);
+        assert_eq!(restored.to_bytes().unwrap(), bytes);
+        let p = encode_pattern("GATTA");
+        assert_eq!(restored.count(&p), 3);
+        assert_eq!(restored.locate(&p), original.locate(&p));
+    }
+
+    #[test]
+    fn test_v4_rejects_inconsistent_sequence_classes() {
+        let config = FmIndexConfig {
+            sa_sample_rate: 2,
+            use_gpu: false,
+            ..Default::default()
+        };
+        let original = FmIndex::build_cpu(&duplicated_input(), &config).unwrap();
+        // Rewrite one table at a time through the private write layout.
+        let encode = |seq_to_slot: &[u32], dup_weights: &super::DupWeights| {
+            let serializable = super::SerializableFmIndex {
+                c_array: &original.c_array,
+                occ: &original.occ,
+                sa_samples: &original.sa_samples,
+                text: &original.text,
+                text_len: original.text_len,
+                num_sequences: original.num_sequences,
+                slot_boundaries: &original.slot_boundaries,
+                seq_headers: &original.seq_headers,
+                seq_to_slot,
+                dup_weights,
+                lookup: original.lookup.as_ref(),
+                lcp: original.lcp.as_ref(),
+                alphabet: &original.alphabet_fns,
+            };
+            let mut out = super::FORMAT_MAGIC.to_vec();
+            out.extend(bincode::serialize(&serializable).unwrap());
+            out
+        };
+        let good = encode(original.seq_classes.seq_to_slot(), &original.dup_weights);
+        FmIndex::from_bytes(&good).unwrap();
+        let bad: [&[u32]; 3] = [&[0, 1, 0, 1], &[0, 1, 0, 1, 2], &[0, 2, 0, 1, 0]];
+        for bad_slots in bad {
+            let err = FmIndex::from_bytes(&encode(bad_slots, &original.dup_weights)).unwrap_err();
+            assert!(err.to_string().contains("serialized FM-index"), "{err}");
+        }
+        let err = FmIndex::from_bytes(&encode(
+            original.seq_classes.seq_to_slot(),
+            &super::DupWeights::default(),
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("class sizes"), "{err}");
     }
 
     #[test]

@@ -8,8 +8,9 @@ use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::{reverse_as_sequence, BidirFmIndex};
 use crate::fm_index::fwd_interval::FwdInterval;
 use crate::fm_index::prepare::{in_build_pool, prepare_cpu};
+use crate::fm_index::seq_classes::{DupWeights, SeqClasses};
 use crate::fm_index::seq_id::SeqId;
-use crate::fm_index::smem::{BidirSearch, Mem, ShallowCache};
+use crate::fm_index::smem::{BidirSearch, LocateMode, Mem, ShallowCache};
 
 /// Bidirectional run-length FM-index: [`RlFmIndex`] halves over the text `T` (`fwd`) and
 /// its reversal `T^R` (`rev`), the run-length counterpart of [`BidirFmIndex`].
@@ -178,7 +179,8 @@ impl BidirRlFmIndex {
         self.fwd.count(pattern)
     }
 
-    /// Locate every occurrence of `iv`'s pattern via the forward SA samples.
+    /// Locate every occurrence of `iv`'s pattern via the forward SA samples, a row in a
+    /// class of identical sequences once per member.
     ///
     /// # Panics
     /// If the forward half is count-only (built with `sa_sample_rate == 0`).
@@ -186,9 +188,16 @@ impl BidirRlFmIndex {
         self.fwd.locate_rows(iv.fwd_lo, iv.fwd_hi)
     }
 
-    /// Occurrences of `iv`'s pattern (its size).
+    /// [`locate_interval`](Self::locate_interval) with one tuple per row, naming the
+    /// representative of a class of identical sequences.
+    pub fn locate_interval_grouped(&self, iv: &BidirInterval) -> Vec<(SeqId, u32)> {
+        self.fwd.locate_rows_grouped(iv.fwd_lo, iv.fwd_hi)
+    }
+
+    /// Occurrences of `iv`'s pattern, in every member of a class of identical input
+    /// sequences (`iv.size()` counts the stored text only).
     pub fn count_interval(&self, iv: &BidirInterval) -> u32 {
-        iv.size()
+        self.fwd.dup_weights.weighted_size(iv.fwd_lo, iv.fwd_hi)
     }
 
     /// LF step on a forward row range (any sub-range of an interval): see
@@ -203,6 +212,12 @@ impl BidirRlFmIndex {
     /// If the forward half is count-only.
     pub fn locate_fwd(&self, iv: &FwdInterval) -> Vec<(SeqId, u32)> {
         self.fwd.locate_rows(iv.lo, iv.hi)
+    }
+
+    /// Occurrences of a forward interval in every member of a class of identical input
+    /// sequences: see [`BidirFmIndex::count_fwd`].
+    pub fn count_fwd(&self, iv: &FwdInterval) -> u32 {
+        self.fwd.dup_weights.weighted_size(iv.lo, iv.hi)
     }
 
     /// Depth of the k-mer lookup tables (`RlFmIndexConfig::lookup_depth`), or 0 when the
@@ -253,7 +268,15 @@ impl BidirRlFmIndex {
     /// # Panics
     /// With `locate = true` on a count-only index.
     pub fn find_smems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
-        self.smems(query, min_len, locate)
+        self.smems(query, min_len, LocateMode::flat_if(locate))
+    }
+
+    /// SMEMs located on class representatives: see [`BidirFmIndex::find_smems_grouped`].
+    ///
+    /// # Panics
+    /// On a count-only index.
+    pub fn find_smems_grouped(&self, query: &[u8], min_len: usize) -> Vec<Mem> {
+        self.smems(query, min_len, LocateMode::Grouped)
     }
 
     /// MEMs of `query`: see [`BidirFmIndex::find_mems`]. Identical results, run on
@@ -262,7 +285,15 @@ impl BidirRlFmIndex {
     /// # Panics
     /// With `locate = true` on a count-only index.
     pub fn find_mems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
-        self.mems(query, min_len, locate)
+        self.mems(query, min_len, LocateMode::flat_if(locate))
+    }
+
+    /// MEMs located on class representatives: see [`BidirFmIndex::find_mems_grouped`].
+    ///
+    /// # Panics
+    /// On a count-only index.
+    pub fn find_mems_grouped(&self, query: &[u8], min_len: usize) -> Vec<Mem> {
+        self.mems(query, min_len, LocateMode::Grouped)
     }
 
     /// Bases of sequence `id`, extracted from the forward BWT: see
@@ -276,7 +307,8 @@ impl BidirRlFmIndex {
         self.fwd.sequence_by_header(header)
     }
 
-    /// Exclusive end of each reference (its sentinel included) in the concatenated text.
+    /// Exclusive end of each stored reference (its sentinel included) in the concatenated
+    /// text: see [`RlFmIndex::seq_boundaries`].
     pub fn seq_boundaries(&self) -> &[u32] {
         self.fwd.seq_boundaries()
     }
@@ -286,9 +318,29 @@ impl BidirRlFmIndex {
         self.fwd.text_len
     }
 
-    /// Number of sequences indexed.
+    /// Number of sequences indexed: every input sequence, duplicates included.
     pub fn num_sequences(&self) -> u32 {
         self.fwd.num_sequences
+    }
+
+    /// Number of distinct sequences stored in the text.
+    pub fn num_distinct_sequences(&self) -> u32 {
+        self.fwd.num_distinct_sequences()
+    }
+
+    /// Classes of identical input sequences. See [`crate::fm_index::seq_classes`].
+    pub fn seq_classes(&self) -> &SeqClasses {
+        &self.fwd.seq_classes
+    }
+
+    /// Every input sequence identical to `id` (itself included), ascending.
+    pub fn equivalence_class(&self, id: SeqId) -> &[SeqId] {
+        self.fwd.equivalence_class(id)
+    }
+
+    /// The member of `id`'s class that is stored in the index.
+    pub fn representative(&self, id: SeqId) -> Option<SeqId> {
+        self.fwd.representative(id)
     }
 
     /// FASTA headers in build order.
@@ -328,7 +380,15 @@ impl BidirSearch for BidirRlFmIndex {
     }
 
     fn search_locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
-        self.fwd.locate_rows(lo, hi)
+        self.fwd.locate_rows_grouped(lo, hi)
+    }
+
+    fn seq_classes(&self) -> &SeqClasses {
+        &self.fwd.seq_classes
+    }
+
+    fn dup_weights(&self) -> &DupWeights {
+        &self.fwd.dup_weights
     }
 
     fn shallow(&self, kmer: &[u8]) -> Option<&[BidirInterval]> {
