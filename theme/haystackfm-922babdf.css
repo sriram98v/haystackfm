@@ -1,0 +1,29 @@
+/* haystackfm mdBook theme tweaks */
+
+.demo-cta {
+  margin: 2rem 0;
+  text-align: center;
+}
+
+.demo-button {
+  display: inline-block;
+  padding: 0.75rem 1.75rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #fff !important;
+  background: #238636;
+  border: 1px solid #2ea043;
+  border-radius: 8px;
+  text-decoration: none;
+  transition: background 0.15s ease;
+}
+
+.demo-button:hover {
+  background: #2ea043;
+}
+
+/* Tighten the badge row on the landing page */
+.content p img[alt="MSRV"],
+.content p a img {
+  vertical-align: middle;
+}
