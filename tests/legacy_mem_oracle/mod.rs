@@ -88,7 +88,7 @@ pub fn legacy_mems(
         out.push(LegacyMem {
             query_start: i,
             query_end: j,
-            match_count: ivs.iter().map(|iv| iv.size()).sum(),
+            match_count: ivs.iter().map(|iv| idx.count_interval(iv)).sum(),
             positions: if locate {
                 ivs.iter().flat_map(|iv| idx.locate_interval(iv)).collect()
             } else {

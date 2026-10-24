@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::error::FmIndexError;
+use crate::fm_index::seq_classes::SeqClasses;
 
 /// Identifier of a reference sequence within an index.
 ///
@@ -62,19 +63,24 @@ impl From<SeqId> for usize {
     }
 }
 
-/// Map an absolute offset in the concatenated text to `(sequence id, offset within it)`,
-/// given each sequence's end (its trailing sentinel included). `None` past the text end.
-pub(crate) fn map_text_position(seq_boundaries: &[u32], text_pos: u32) -> Option<(SeqId, u32)> {
-    let seq_idx = seq_boundaries.partition_point(|&boundary| boundary <= text_pos);
-    if seq_idx >= seq_boundaries.len() {
+/// Map an absolute offset in the concatenated text to `(representative id, offset within
+/// it)`, given each stored sequence's end (its trailing sentinel included) and the classes
+/// naming each stored slot's representative. `None` past the text end.
+pub(crate) fn map_text_position(
+    slot_boundaries: &[u32],
+    classes: &SeqClasses,
+    text_pos: u32,
+) -> Option<(SeqId, u32)> {
+    let slot = slot_boundaries.partition_point(|&boundary| boundary <= text_pos);
+    if slot >= slot_boundaries.len() {
         return None;
     }
-    let seq_start = if seq_idx == 0 {
+    let slot_start = if slot == 0 {
         0
     } else {
-        seq_boundaries[seq_idx - 1]
+        slot_boundaries[slot - 1]
     };
-    Some((SeqId::new(seq_idx as u32), text_pos - seq_start))
+    Some((classes.rep_of_slot(slot as u32), text_pos - slot_start))
 }
 
 /// O(1) header -> [`SeqId`] lookup, built alongside the index's header list.

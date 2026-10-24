@@ -1,6 +1,6 @@
 [package]
 name = "haystackfm"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.87"
 description = "GPU-accelerated FM-index construction for DNA sequences via WebGPU"
@@ -27,6 +27,9 @@ thiserror = "2"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
+# Hashes whole input sequences when grouping identical ones (`fm_index::seq_classes`):
+# ~3-5x std's SipHash on long byte keys, dependency-free and portable to wasm32.
+foldhash = "0.2"
 
 # GPU (optional)
 wgpu = { version = "24", optional = true }

@@ -10,19 +10,29 @@ use crate::occ::BwtRank;
 impl RlFmIndex {
     /// Count occurrences of `pattern` (alphabet codes). Query and reference codes match
     /// under the index's alphabet, as in [`FmIndex::count`](crate::FmIndex::count).
+    ///
+    /// Occurrences in every member of a class of identical input sequences are counted.
     pub fn count(&self, pattern: &[u8]) -> u32 {
         self.backward_search(pattern)
             .iter()
-            .map(|(lo, hi)| hi - lo)
+            .map(|&(lo, hi)| self.dup_weights.weighted_size(lo, hi))
             .sum()
     }
 
     /// Locate every occurrence of `pattern` as `(sequence id, offset in that sequence)`.
+    /// An occurrence in a class of identical sequences is reported once per member, as in
+    /// [`FmIndex::locate`](crate::FmIndex::locate).
     ///
     /// # Panics
     /// If the index is count-only (see [`can_locate`](Self::can_locate)); likewise for the
     /// other `locate*` methods.
     pub fn locate(&self, pattern: &[u8]) -> Vec<(SeqId, u32)> {
+        self.seq_classes.expand(self.locate_grouped(pattern))
+    }
+
+    /// [`locate`](Self::locate) with one hit per occurrence in the stored text, naming the
+    /// representative of a class of identical sequences.
+    pub fn locate_grouped(&self, pattern: &[u8]) -> Vec<(SeqId, u32)> {
         self.locate_positions(pattern)
             .into_iter()
             .map(|pos| {
@@ -32,7 +42,8 @@ impl RlFmIndex {
             .collect()
     }
 
-    /// Locate every occurrence of `pattern` as absolute offsets into the concatenated text.
+    /// Locate every occurrence of `pattern` as absolute offsets into the concatenated text:
+    /// positions in the stored sequences (class representatives) only.
     pub fn locate_positions(&self, pattern: &[u8]) -> Vec<u32> {
         let rows: Vec<u32> = self
             .backward_search(pattern)
@@ -50,11 +61,18 @@ impl RlFmIndex {
         patterns.iter().map(|p| self.locate_positions(p)).collect()
     }
 
-    /// Locate the suffix-array rows `lo..hi`: `(sequence id, offset)` per row, in row order.
+    /// Locate the suffix-array rows `lo..hi`: `(sequence id, offset)` per row, in row order,
+    /// each row expanded to every member of its class like [`locate`](Self::locate).
     ///
     /// # Panics
     /// If `lo..hi` is not within `0..text_len` (or on a count-only index).
     pub fn locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
+        self.seq_classes.expand(self.locate_rows_grouped(lo, hi))
+    }
+
+    /// [`locate_rows`](Self::locate_rows) with exactly one hit per row, naming the
+    /// representative of a class of identical sequences.
+    pub fn locate_rows_grouped(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
         assert!(
             lo <= hi && hi <= self.text_len,
             "locate_rows: rows {lo}..{hi} outside 0..{}",
@@ -64,7 +82,7 @@ impl RlFmIndex {
         self.locate_row_list(&rows)
     }
 
-    /// Locate each listed suffix-array row: `(sequence id, offset)` per row, in order.
+    /// Locate each listed suffix-array row: `(representative id, offset)` per row, in order.
     pub(crate) fn locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
         debug_assert!(rows.iter().all(|&row| row < self.text_len));
         let mut positions = Vec::with_capacity(rows.len());
@@ -130,9 +148,10 @@ impl RlFmIndex {
         }
     }
 
-    /// Map an absolute text offset to `(sequence id, offset within it)`.
+    /// Map an absolute text offset to `(sequence id, offset within it)`; the id is that of
+    /// the stored sequence, the representative of its class.
     pub fn map_position(&self, text_pos: u32) -> Option<(SeqId, u32)> {
-        map_text_position(&self.seq_boundaries, text_pos)
+        map_text_position(&self.slot_boundaries, &self.seq_classes, text_pos)
     }
 
     /// SA intervals of every text substring matching `pattern`, disjoint and sorted.

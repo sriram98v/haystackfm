@@ -37,7 +37,8 @@ impl FwdInterval {
         }
     }
 
-    /// Number of rows.
+    /// Number of rows, i.e. occurrences in the stored text (a class of identical input
+    /// sequences counts once); the bidirectional indexes' `count_fwd` counts every member.
     pub fn size(&self) -> u32 {
         self.hi.saturating_sub(self.lo)
     }

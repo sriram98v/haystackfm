@@ -2,6 +2,7 @@ use crate::alphabet::{SymbolSet, ALPHABET_SIZE};
 use crate::fm_index::bidir::BidirInterval;
 use crate::fm_index::bidir_index::BidirFmIndex;
 use crate::fm_index::half::FmHalf;
+use crate::fm_index::seq_classes::{DupWeights, SeqClasses};
 use crate::fm_index::seq_id::SeqId;
 use crate::fm_index::FmIndex;
 use crate::occ::BwtRank;
@@ -22,21 +23,51 @@ use crate::occ::BwtRank;
 /// Note the two constructors differ in what they count: `find_mems` reports only the maximal
 /// occurrences of a match in `match_count` and `positions`, whereas for a `find_smems` result
 /// every occurrence is maximal anyway, so the two coincide there.
+///
+/// Identical input sequences are indexed once ([`crate::fm_index::seq_classes`]); an
+/// occurrence in such a sequence counts, and is located, once per member of its class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mem {
     /// Start position in the query (0-based, inclusive).
     pub query_start: usize,
     /// End position in the query (0-based, exclusive).
     pub query_end: usize,
-    /// Number of occurrences in the reference text.
+    /// Number of occurrences in the reference text, every member of a class of identical
+    /// sequences included.
     pub match_count: u32,
-    /// Reference positions (populated only when `locate = true`).
+    /// Reference positions (populated only when `locate = true`, or by the `*_grouped`
+    /// variants).
     ///
     /// Each entry is `(sequence_id, position_within_sequence)`. Resolve a [`SeqId`] to its
     /// FASTA header with [`BidirFmIndex::seq_header`] — no string is allocated per
     /// occurrence. Same shape as `MemHit::positions` on the GPU path (feature `gpu`), so
-    /// CPU and GPU results can be consumed by the same code.
+    /// CPU and GPU results can be consumed by the same code. With `locate = true` an
+    /// occurrence in a class of identical sequences is listed once per member (consecutively,
+    /// ascending), so `positions.len() == match_count`; the grouped variants list it once,
+    /// on the class representative.
     pub positions: Vec<(SeqId, u32)>,
+}
+
+/// What a sweep resolves for each match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LocateMode {
+    /// Counts only; `positions` stays empty.
+    Off,
+    /// One position per occurrence, a class of identical sequences expanded to its members.
+    Flat,
+    /// One position per stored occurrence, naming class representatives.
+    Grouped,
+}
+
+impl LocateMode {
+    /// The mode of the public `locate: bool` flag.
+    pub(crate) fn flat_if(locate: bool) -> Self {
+        if locate {
+            Self::Flat
+        } else {
+            Self::Off
+        }
+    }
 }
 
 impl Mem {
@@ -83,7 +114,15 @@ impl BidirFmIndex {
     /// SMEMs in order of increasing `query_start`.  Duplicate `(start, end)` pairs
     /// are deduplicated.
     pub fn find_smems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
-        self.smems(query, min_len, locate)
+        self.smems(query, min_len, LocateMode::flat_if(locate))
+    }
+
+    /// [`find_smems`](Self::find_smems) with positions located, one per occurrence in the
+    /// stored text: an occurrence in a class of identical sequences names only the class
+    /// representative (see [`equivalence_class`](Self::equivalence_class)). `match_count`
+    /// still counts every member.
+    pub fn find_smems_grouped(&self, query: &[u8], min_len: usize) -> Vec<Mem> {
+        self.smems(query, min_len, LocateMode::Grouped)
     }
 
     /// Find all MEMs of length ≥ `min_len`, in the MUMmer / BWA sense.
@@ -110,7 +149,13 @@ impl BidirFmIndex {
     /// occurrence-count drop; O(|query|² × α²) worst case. The result can hold up to
     /// O(|query|²) intervals — `min_len` is the only bound on output size.
     pub fn find_mems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
-        self.mems(query, min_len, locate)
+        self.mems(query, min_len, LocateMode::flat_if(locate))
+    }
+
+    /// [`find_mems`](Self::find_mems) with positions located on class representatives, as
+    /// [`find_smems_grouped`](Self::find_smems_grouped) does.
+    pub fn find_mems_grouped(&self, query: &[u8], min_len: usize) -> Vec<Mem> {
+        self.mems(query, min_len, LocateMode::Grouped)
     }
 }
 
@@ -138,11 +183,20 @@ pub(crate) trait BidirSearch {
     /// Cursor spanning every row.
     fn search_full_interval(&self) -> BidirInterval;
 
-    /// `(sequence id, offset)` of forward SA rows `lo..hi`, in row order.
+    /// `(representative id, offset)` of forward SA rows `lo..hi`, in row order: exactly one
+    /// entry per row, never expanded over a class of identical sequences.
     fn search_locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)>;
 
-    /// `(sequence id, offset)` of each listed forward SA row, in order.
+    /// `(representative id, offset)` of each listed forward SA row, in order: exactly one
+    /// entry per row ([`locate_all_batched`](Self::locate_all_batched) splits the result by
+    /// row count).
     fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)>;
+
+    /// Classes of the index's identical input sequences.
+    fn seq_classes(&self) -> &SeqClasses;
+
+    /// Extra multiplicity of the forward rows inside duplicated representatives.
+    fn dup_weights(&self) -> &DupWeights;
 
     /// The interval set of `kmer` exactly as the sweeps' right extension from the full
     /// interval builds it (same intervals, same order), when the backend caches it.
@@ -207,19 +261,19 @@ pub(crate) trait BidirSearch {
     }
 
     /// SMEMs of `query`; see [`BidirFmIndex::find_smems`].
-    fn smems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
-        self.locate_all(self.smem_raws(query, min_len), locate)
+    fn smems(&self, query: &[u8], min_len: usize, mode: LocateMode) -> Vec<Mem> {
+        self.locate_all(self.smem_raws(query, min_len), mode)
     }
 
     /// MEMs of `query`; see [`BidirFmIndex::find_mems`].
-    fn mems(&self, query: &[u8], min_len: usize, locate: bool) -> Vec<Mem> {
-        self.locate_all(self.mem_raws(query, min_len), locate)
+    fn mems(&self, query: &[u8], min_len: usize, mode: LocateMode) -> Vec<Mem> {
+        self.locate_all(self.mem_raws(query, min_len), mode)
     }
 
     /// Resolve every [`RawMem`] of one query, in order: one batched locate for the whole
     /// query ([`locate_all_batched`](Self::locate_all_batched)).
-    fn locate_all(&self, raws: Vec<RawMem>, locate: bool) -> Vec<Mem> {
-        self.locate_all_batched(raws, locate)
+    fn locate_all(&self, raws: Vec<RawMem>, mode: LocateMode) -> Vec<Mem> {
+        self.locate_all_batched(raws, mode)
     }
 
     /// [`locate_all`](Self::locate_all) with one [`search_locate_row_list`] call for the
@@ -227,11 +281,11 @@ pub(crate) trait BidirSearch {
     /// rows at once instead of a few per match. Same results, same order.
     ///
     /// [`search_locate_row_list`]: Self::search_locate_row_list
-    fn locate_all_batched(&self, raws: Vec<RawMem>, locate: bool) -> Vec<Mem> {
-        if !locate {
+    fn locate_all_batched(&self, raws: Vec<RawMem>, mode: LocateMode) -> Vec<Mem> {
+        if mode == LocateMode::Off {
             return raws
                 .into_iter()
-                .map(|raw| self.locate_raw(raw, false))
+                .map(|raw| self.locate_raw(raw, mode))
                 .collect();
         }
         let mut rows: Vec<u32> = Vec::new();
@@ -252,14 +306,62 @@ pub(crate) trait BidirSearch {
             .map(|(raw, end)| {
                 let positions = located.by_ref().take(end - start).collect();
                 start = end;
-                Mem {
-                    query_start: raw.query_start,
-                    query_end: raw.query_end,
-                    match_count: raw.match_count,
-                    positions,
-                }
+                self.finish_mem(raw, positions, mode)
             })
             .collect()
+    }
+
+    /// Assemble a [`Mem`] from a [`RawMem`] and the representative positions of its
+    /// (left-maximal) rows: counts include every member of a class of identical sequences,
+    /// and `Flat` positions are expanded to them.
+    fn finish_mem(&self, raw: RawMem, positions: Vec<(SeqId, u32)>, mode: LocateMode) -> Mem {
+        let match_count = self.weighted_match_count(&raw);
+        let positions = match mode {
+            LocateMode::Flat => self.seq_classes().expand(positions),
+            LocateMode::Off | LocateMode::Grouped => positions,
+        };
+        debug_assert!(
+            mode != LocateMode::Flat || positions.len() == match_count as usize,
+            "expanded positions disagree with the weighted count"
+        );
+        Mem {
+            query_start: raw.query_start,
+            query_end: raw.query_end,
+            match_count,
+            positions,
+        }
+    }
+
+    /// `raw.match_count` with every occurrence weighted by the size of its class of
+    /// identical sequences. With a left context the counted occurrences are the rows of
+    /// `raw.ivs` that do not extend left by a compatible symbol: those that do land, one
+    /// position earlier, in the same stored sequence (a compatible symbol is never a
+    /// sentinel), so they carry the same weight and subtracting the extension's weight
+    /// leaves exactly the left-maximal rows' weight.
+    fn weighted_match_count(&self, raw: &RawMem) -> u32 {
+        let weights = self.dup_weights();
+        if weights.is_empty() {
+            return raw.match_count;
+        }
+        let total = |ivs: &[BidirInterval]| -> u32 {
+            ivs.iter()
+                .map(|iv| weights.weighted_size(iv.fwd_lo, iv.fwd_hi))
+                .sum()
+        };
+        match raw.left_ctx {
+            None => total(&raw.ivs),
+            Some(c) => {
+                let fwd = self.fwd_half();
+                let mut extended = Vec::new();
+                extend_set(
+                    &raw.ivs,
+                    fwd.alphabet().compatible(c),
+                    &mut extended,
+                    |iv, s| iv.extend_left(s, fwd),
+                );
+                total(&raw.ivs).saturating_sub(total(&extended))
+            }
+        }
     }
 
     /// The SMEMs of `query` as unresolved [`RawMem`]s.
@@ -799,8 +901,8 @@ pub(crate) trait BidirSearch {
     /// The symbol preceding the occurrence at forward row `r` is `BWT[r]`, so the test runs
     /// on the BWT before locating and needs no text. An occurrence at a reference start has
     /// a sentinel there, which no query symbol is compatible with: it is always kept.
-    fn locate_raw(&self, raw: RawMem, locate: bool) -> Mem {
-        let positions = if !locate {
+    fn locate_raw(&self, raw: RawMem, mode: LocateMode) -> Mem {
+        let positions = if mode == LocateMode::Off {
             Vec::new()
         } else if let Some(c) = raw.left_ctx {
             let compat = self.fwd_half().alphabet().compatible(c);
@@ -812,12 +914,7 @@ pub(crate) trait BidirSearch {
                 .flat_map(|iv| self.search_locate_rows(iv.fwd_lo, iv.fwd_hi))
                 .collect()
         };
-        Mem {
-            query_start: raw.query_start,
-            query_end: raw.query_end,
-            match_count: raw.match_count,
-            positions,
-        }
+        self.finish_mem(raw, positions, mode)
     }
 }
 
@@ -839,7 +936,15 @@ impl BidirSearch for BidirFmIndex {
     }
 
     fn search_locate_rows(&self, lo: u32, hi: u32) -> Vec<(SeqId, u32)> {
-        self.fwd.locate_rows(lo, hi)
+        self.fwd.locate_rows_grouped(lo, hi)
+    }
+
+    fn seq_classes(&self) -> &SeqClasses {
+        &self.fwd.seq_classes
+    }
+
+    fn dup_weights(&self) -> &DupWeights {
+        &self.fwd.dup_weights
     }
 
     fn shallow(&self, kmer: &[u8]) -> Option<&[BidirInterval]> {
@@ -857,16 +962,7 @@ impl BidirSearch for BidirFmIndex {
     }
 
     fn search_locate_row_list(&self, rows: &[u32]) -> Vec<(SeqId, u32)> {
-        let mut text_positions = Vec::with_capacity(rows.len());
-        self.fwd.resolve_sa_batch(rows, &mut text_positions);
-        text_positions
-            .into_iter()
-            .map(|pos| {
-                self.fwd
-                    .map_position(pos)
-                    .expect("resolved SA position must be within text bounds")
-            })
-            .collect()
+        self.fwd.locate_row_list(rows)
     }
 }
 

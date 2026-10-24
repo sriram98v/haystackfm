@@ -648,16 +648,22 @@ impl DnaSequence {
 pub fn concatenate_sequences(
     sequences: &[DnaSequence],
 ) -> Result<(Vec<u8>, Vec<u32>), FmIndexError> {
-    let total_len: usize = sequences.iter().map(|s| s.len() + 1).sum();
+    let parts: Vec<&[u8]> = sequences.iter().map(DnaSequence::as_slice).collect();
+    concatenate_parts(&parts)
+}
+
+/// [`concatenate_sequences`] over already-encoded sequences.
+pub(crate) fn concatenate_parts(parts: &[&[u8]]) -> Result<(Vec<u8>, Vec<u32>), FmIndexError> {
+    let total_len: usize = parts.iter().map(|s| s.len() + 1).sum();
     if total_len > u32::MAX as usize {
         return Err(FmIndexError::TextTooLarge(total_len));
     }
 
     let mut text = Vec::with_capacity(total_len);
-    let mut cumulative_lengths = Vec::with_capacity(sequences.len());
+    let mut cumulative_lengths = Vec::with_capacity(parts.len());
 
-    for seq in sequences {
-        text.extend_from_slice(seq.as_slice());
+    for part in parts {
+        text.extend_from_slice(part);
         text.push(SENTINEL);
         cumulative_lengths.push(text.len() as u32);
     }

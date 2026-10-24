@@ -47,8 +47,10 @@ struct ResolveParams {
 /// LF-mapping to the nearest sampled SA entry, then maps the text offset to a
 /// reference sequence and within-sequence position.
 ///
-/// Returns one `Vec<(seq_idx, pos_in_seq)>` per query.
-/// `seq_idx` is a 0-based index into the original sequence list.
+/// Returns one `Vec<(slot, pos_in_seq)>` per query. `slot` is a 0-based index into the
+/// stored (deduplicated) sequences, i.e. into `index.seq_boundaries()`; it equals the input
+/// sequence index when the input has no identical sequences.
+/// [`FmIndex::locate_gpu`] maps slots to [`SeqId`](crate::SeqId)s and expands duplicates.
 pub async fn locate_batch_gpu(
     ctx: &GpuContext,
     index: &FmIndex,
@@ -62,7 +64,8 @@ pub async fn locate_batch_gpu(
     let text_len = index.text_len;
     let block_size: u32 = 64;
     let num_blocks = text_len.div_ceil(block_size);
-    let num_seqs = index.num_sequences;
+    // The shader searches the stored (deduplicated) sequences' boundaries.
+    let num_seqs = index.slot_boundaries.len() as u32;
     let sample_rate = index.sa_samples.sample_rate;
     let alpha = ALPHABET_SIZE as u32;
 
@@ -99,7 +102,7 @@ pub async fn locate_batch_gpu(
 
     let bwt_u32: Vec<u32> = index.occ.reconstruct_bwt_u32();
     let sa_samples_data: Vec<u32> = index.sa_samples.to_flat_vec(index.text_len as usize);
-    let seq_bounds_data: Vec<u32> = index.seq_boundaries.clone();
+    let seq_bounds_data: Vec<u32> = index.slot_boundaries.clone();
 
     let bwt_buf = ctx.create_buffer_init("locate_bwt", &bwt_u32);
     let chk_buf = ctx.create_buffer_init("locate_chk", &checkpoints_flat);

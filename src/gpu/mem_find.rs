@@ -334,7 +334,8 @@ async fn run_mem_find_gpu(
 /// `mode` selects SMEM (`MODE_SMEM=0`) or MEM (`MODE_MEM=1`) behaviour.
 ///
 /// Returns one `Vec<(query_start, query_end, match_count)>` per query.
-/// `match_count` is the sum of forward SA interval sizes across all IUPAC branches.
+/// `match_count` is the number of occurrences across all IUPAC branches, every member of a
+/// class of identical input sequences included (the forward SA interval sizes, weighted).
 pub async fn find_mems_batch_gpu(
     ctx: &GpuContext,
     bidir: &BidirFmIndex,
@@ -357,8 +358,11 @@ pub async fn find_mems_batch_gpu(
             // slot: [qs, qe, iv_offset, n_ivs]
             let iv_off = flat[base + 2] as usize;
             let n_ivs = flat[base + 3] as usize;
+            let weights = &bidir.fwd.dup_weights;
             let match_count: u32 = (0..n_ivs)
-                .map(|i| iv_flat[(iv_off + i) * 2 + 1] - iv_flat[(iv_off + i) * 2])
+                .map(|i| {
+                    weights.weighted_size(iv_flat[(iv_off + i) * 2], iv_flat[(iv_off + i) * 2 + 1])
+                })
                 .sum();
             hits.push((flat[base], flat[base + 1], match_count));
         }
